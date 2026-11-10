@@ -11,6 +11,68 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #90 — OLF: incremental shunt control results depend on the order of the contingencies (2026-11-10)
+
+OLF's network restore puts back a controller shunt's susceptance but not its controllers' section positions: `BusState`
+saves `controllerShuntB` and `controllerShuntG`, not `Controller.position` (upstream main 144a54c9d too). The
+incremental loop moves sections from the current position (`Controller.updateSectionB`: `newB = getB() + deltaB`, with
+`getB()` the B of the current section), so after a contingency that switched a section, the next one starts from that
+section with the base susceptance. Measured with OLF alone (CPU security analysis) on ShuntNetworkFactory plus `l1_BIS`,
+INCREMENTAL_VOLTAGE_CONTROL, SHUNT's deadband at 0.1 kV, contingencies `l1` and the loss of `ld1`; b3 against the same
+contingency run alone:
+- target 393 kV, `l1_BIS` at twice `l1`'s impedance (base on section 2, both contingencies on 1): `ld1` after `l1`
+  +4.2e-8 kV, `l1` after `ld1` +1.3e-6 kV;
+- target 395 kV, ten times `l1`'s impedance (base on 2, `l1` on 1, `ld1` on 2): `ld1` after `l1` +4.0e-5 kV.
+
+Every other case of the sweep (targets 390.5 to 395 kV) was bit-identical, and so was the continuous mode, whose
+rounding (`dispatchB`) starts from the position only to break an exact tie. The device answers each contingency from the
+base positions, i.e. as if alone, so it cannot match OLF there; mirroring OLF would make the device's results depend on
+the list order too. The fix belongs in OLF, as for #86: `BusState` saves and restores the positions. The device test
+(`deviceIncrementalShuntVoltageControlMatchesCpu`) keeps the factory's 5 kV deadband, where no section moves.
+
+### #89 — the device answers a contingency without its own load flow parameters (2026-11-10)
+
+OLF applies a contingency's `ContingencyLoadFlowParameters` (distributed slack, area interchange control, balance type,
+outer loop names) to the context before its simulation (`AbstractSecurityAnalysis`, `applySpecificContingencyParameters`).
+The batch precomputes every contingency with the run's parameters, and nothing in this repo reads the extension except
+`ReplayedLossDistribution`, which then falls back to OLF's distribution. Measured on ShuntNetworkFactory with `l1_BIS`
+(continuous shunt control), `l1_BIS` carrying outer loops `[DistributedSlack, ReactiveLimits]`: the device answers it
+with the shunt loop, b3 390.929 kV against OLF's 395.710 kV, and reports it. The RTE contingency list carries no such
+extension, so network.xiidm is not affected. Open: answer such a contingency on the device with its own parameters, or
+until then leave it to the CPU.
+
+### #88 — FIXED: the targeted restore left the device's control state variables in the network (2026-11-10)
+
+Issue a of `docs/device-final-results-plan.md` §7 (branch `device-final-results`). After a contingency the device
+answered, `restoreBaseState` restores only the elements the contingency touched, and the bus voltages lazily. When the
+base system holds a SHUNT_B, BRANCH_ALPHA1 or BRANCH_RHO1 variable (continuous shunt, phase or transformer voltage
+control), `GpuPostContingencyState` writes the state back through `AcSolverUtil.updateNetwork`, which also writes the
+controller shunt's susceptance and the branch's phase or ratio override, and nothing restored them. A later contingency
+left to the CPU reads them in `initStateVector`, and holds them as targets where its control stays off. OLF's full
+restore puts them back.
+
+Measured on ShuntNetworkFactory with `l1_BIS` (twice `l1`'s impedance), continuous shunt control: `l1`'s outage
+dispatches SHUNT on section 1, the base on section 2.
+- `l1_BIS` on the CPU with the shunt loop: the leak changes only Newton's starting point, and the continuous solve lands
+  on the same bits.
+- `l1_BIS` on the CPU without the shunt loop (its own outer loops, #89): Newton holds the leaked susceptance, and the
+  GPU arm distributes 1.65 MW of slack where OLF distributes none.
+- The ratio and phase overrides equal the tap's value while the device leaves the tap where it was, and a branch whose
+  tap the device moved was already restored with it. No effect found; they are restored anyway.
+
+The targeted restore now also restores the buses of the controller shunts with a SHUNT_B variable and the branches with
+a BRANCH_ALPHA1 or BRANCH_RHO1 one, taken once per extraction from the base system's variables
+(`controlStateElements`). `GpuSaShuntControlTest.cpuContingencyAfterADeviceOneHoldsTheBaseSusceptance` fails without it
+(distributed active power of `l1_BIS`: 0 against -1.65 MW). The RTE parameters switch none of these controls on, so
+rte6515 and network.xiidm hold no such variable and nothing changes there.
+
+Two things seen on the way, not acted on:
+- With both contingencies on the CPU route, the GPU provider still differs from OLF's provider by one ulp on `l1_BIS`
+  (b3, 5.7e-14 kV), with the same network state at the start of `l1_BIS` in both GPU runs. Not the leak; probably the
+  base case, which the GPU provider solves on the device (not verified).
+- OLF's restore puts back a controller shunt's susceptance but not its controllers' section positions: in INCREMENTAL
+  mode its results depend on the order of the contingencies (#90).
+
 ### #87 — operator strategies: an unrealistic pair is never answered (b); a flow condition after a device strategy (c, FIXED) (2026-11-09)
 
 Issues b and c of `docs/device-final-results-plan.md` §7 (branch `device-final-results`).

@@ -104,6 +104,38 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
     void deviceSimpleShuntVoltageControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = shuntNetworkWithParallelL1();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")),
+                new Contingency("l1", new BranchContingency("l1")));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, continuousShuntParameters());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "continuous shunt VC must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
+    /** OLF restores the whole network after every contingency; after one the device answered, the GPU arm restores only
+     *  the elements that contingency touched. The continuous control's susceptance is a state variable, which the device
+     *  state writes into the controller shunt (AcSolverUtil.updateNetwork). l1's outage dispatches SHUNT on another section
+     *  than the base (1 instead of 2); l1_BIS then runs on the CPU, its strategy having more conditional stages than the
+     *  device composes, and without the shunt control loop (its own outer loops): its Newton holds the susceptance at the
+     *  shunt's: the base one in OLF, l1's where the restore left it (1.65 MW of slack distributed where OLF has none). */
+    @Test
+    void cpuContingencyAfterADeviceOneHoldsTheBaseSusceptance() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Contingency l1Bis = new Contingency("l1_BIS", new BranchContingency("l1_BIS"));
+        l1Bis.addExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class,
+                new com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters()
+                        .setOuterLoopNames(List.of("DistributedSlack", "ReactiveLimits")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("ld1Up")
+                .withLoadId("ld1").withRelativeValue(true).withActivePowerValue(1).build());
+        assertStrategyMatchesCpu(shuntNetworkWithParallelL1(), List.of(new Contingency("l1", new BranchContingency("l1")), l1Bis),
+                List.of(fourConditionalStageStrategy("sCpu", "l1_BIS", "ld1Up", "ld1Up")), actions, -1, continuousShuntParameters());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.get(), "l1 answered on the device, its restore targeted");
+    }
+
+    /** ShuntNetworkFactory with l1 doubled by l1_BIS (twice its impedance), so that either outage keeps the grid
+     *  connected and moves the voltage SHUNT controls. */
+    private static Network shuntNetworkWithParallelL1() {
         Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
         com.powsybl.iidm.network.Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
@@ -111,15 +143,16 @@ class GpuSaShuntControlTest extends AbstractGpuSaTest {
                 .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
                 .setR(l1.getR() * 2).setX(l1.getX() * 2)
                 .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
-        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")),
-                new Contingency("l1", new BranchContingency("l1")));
+        return network;
+    }
+
+    /** Continuous shunt voltage control (WITH_GENERATOR_VOLTAGE_CONTROL, OLF's default mode): SHUNT_B is a variable. */
+    private static com.powsybl.loadflow.LoadFlowParameters continuousShuntParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
-        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                "continuous shunt VC must ENGAGE the batch (was a whole-run CPU gate)");
+        return lfp;
     }
 
     /** WITH_GENERATOR shunt voltage control CO-PRESENT with a transformer voltage control (AFTER_GENERATOR,

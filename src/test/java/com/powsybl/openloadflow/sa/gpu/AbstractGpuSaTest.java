@@ -367,6 +367,14 @@ abstract class AbstractGpuSaTest extends AbstractOpenSecurityAnalysisTest {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(distributedSlack).setUseReactiveLimits(true);
         customize.accept(com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp));
+        return assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed, lfp);
+    }
+
+    /** As above, with the load flow parameters given whole (a control the default parameters leave off). */
+    SecurityAnalysisResult assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+                                          List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
+                                          List<com.powsybl.action.Action> actions, int expectedPrecomputed,
+                                          com.powsybl.loadflow.LoadFlowParameters lfp) {
         String sConvEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
         if (sConvEps != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)

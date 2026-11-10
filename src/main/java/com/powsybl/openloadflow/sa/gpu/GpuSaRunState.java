@@ -51,6 +51,12 @@ final class GpuSaRunState {
     com.powsybl.openloadflow.network.NetworkState staleVoltages;
     /** Shunt -> its bus, for the shunts a contingency shifts (LfShunt does not know its bus). Built once. */
     java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus;
+    /** What the network update writes beyond the bus voltages when the base system holds control state variables, for
+     *  the extraction {@link #controlStateFor} was built from: the buses of the controller shunts with a SHUNT_B
+     *  variable and the branches with a BRANCH_ALPHA1 or BRANCH_RHO1 one. A targeted restore restores them too. */
+    Map<Variable<AcVariableType>, Integer> controlStateFor;
+    List<LfBus> controlStateBuses = List.of();
+    List<LfBranch> controlStateBranches = List.of();
     /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
      *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
     boolean[] realisticBandApplies;

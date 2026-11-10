@@ -26,6 +26,7 @@ long long gBatchedLuSplitLaunches = 0;
 long long gBatchedLuSupernodalSplitLaunches = 0;
 long long gBatchedLuSupernodalRowLaunches = 0;
 long long gBatchedLuSupernodalForwardRowLaunches = 0;
+long long gBatchedLuSupernodalRowFactorizations = 0;
 long long gBatchedLuRoutedLanes = 0;
 long long gBatchedLuFastLaneSolves = 0;
 long long gFullFactorizations = 0;

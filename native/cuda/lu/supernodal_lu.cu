@@ -23,6 +23,14 @@ constexpr int LU_BLOCK = 128;
 constexpr int TILE = 32;                                     // transposes: 32 entries x 32 lanes per block
 constexpr int TILE_ROWS = 8;
 constexpr int B = LU_MAX_SUPERNODE;
+constexpr int FACTOR_ROWS_MIN = 8;                           // a supernode this wide is factorized a row per warp
+
+// factorBlocksRows' shared memory for a level whose largest such supernode has `largest` rows
+size_t factorRowsSharedBytes(int largest) {
+    const size_t l = SPLIT_LANES;
+    return static_cast<size_t>(largest) * largest * l * sizeof(double) + largest * l * sizeof(double)
+            + 2 * static_cast<size_t>(largest) * l * sizeof(int) + 2 * l * sizeof(int) + 3 * static_cast<size_t>(largest) * l;
+}
 
 unsigned int blocksFor(size_t threads) {
     return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
@@ -252,6 +260,161 @@ __global__ void factorBlocks(int nItems, int width, int capacity, const int* __r
         columnPermutation[static_cast<size_t>(f + q) * capacity + a] = columns[q];
     }
     if (clamps > 0) {
+        atomicAdd(pivotClamps + a, clamps);
+    }
+}
+
+// factorBlocks for the supernodes of at least FACTOR_ROWS_MIN rows: one block per (supernode, 32 lanes) keeps its
+// lanes' diagonal blocks in shared memory, d[(row * largest + column) * 32 + lane], in the slot order factorBlocks keeps
+// them in, and thread (lane, y) does row y's share of each step - its U panel scan, its singleton candidacy, its row's
+// first largest entry, the row and column swaps on its column / row, its row's elimination - while the first warp
+// picks the pivot exactly as factorBlocks' loops do (the first singleton row, else the first largest entry in row-major
+// order). Every element takes the same operations in the same order: the factors, orders and clamps of factorBlocks,
+// bit for bit, the steps of a 16-row block no longer serial in one thread.
+__global__ void factorBlocksRows(int nItems, int width, int capacity, int largest, const int* __restrict__ supernodes,
+                                 const int* __restrict__ supernodeStart, const int* __restrict__ diagonalBase,
+                                 const int* __restrict__ rowStart, const int* __restrict__ upperBase,
+                                 double* __restrict__ lu, unsigned char* __restrict__ rowPermutation,
+                                 unsigned char* __restrict__ columnPermutation, int* __restrict__ pivotClamps) {
+    extern __shared__ double shared[];
+    constexpr int L = SPLIT_LANES;
+    double* d = shared;                                                      // largest * largest * L
+    double* rowBest = d + static_cast<size_t>(largest) * largest * L;        // largest * L
+    int* rowBestColumn = reinterpret_cast<int*>(rowBest + largest * L);      // largest * L
+    int* singletonColumn = rowBestColumn + largest * L;                      // largest * L: -1 when not a singleton row
+    int* pivotRow = singletonColumn + largest * L;                           // L
+    int* pivotColumn = pivotRow + L;                                         // L
+    unsigned char* rows = reinterpret_cast<unsigned char*>(pivotColumn + L); // largest * L: position -> block row
+    unsigned char* columns = rows + largest * L;                             // largest * L
+    unsigned char* panelEmpty = columns + largest * L;                       // largest * L: by block row
+    const int tiles = (width + L - 1) / L;
+    const int t = blockIdx.x / tiles;
+    const int a = (blockIdx.x - t * tiles) * L + threadIdx.x;
+    const int x = threadIdx.x;
+    const int y = threadIdx.y;
+    const bool active = a < width;
+    const int s = supernodes[t];
+    const int f = supernodeStart[s];
+    const int b = supernodeStart[s + 1] - f;
+    double* block = lu + static_cast<size_t>(diagonalBase[s]) * capacity + a;
+    auto D = [&](int r, int c) -> double& { return d[(r * largest + c) * L + x]; };
+    if (active && y < b) {
+        for (int c = 0; c < b; c++) {
+            D(y, c) = block[static_cast<size_t>(y * b + c) * capacity];
+        }
+        rows[y * L + x] = static_cast<unsigned char>(y);
+        columns[y * L + x] = static_cast<unsigned char>(y);
+        bool empty = true;
+        const int count = rowStart[s + 1] - rowStart[s];
+        const double* upper = lu + static_cast<size_t>(upperBase[s]) * capacity + a;
+        for (int column = 0; column < count && empty; column++) {
+            empty = upper[(static_cast<size_t>(column) * b + y) * capacity] == 0.0;
+        }
+        panelEmpty[y * L + x] = empty ? 1 : 0;
+    }
+    int clamps = 0;
+    for (int k = 0; k < b; k++) {
+        __syncthreads();
+        if (active && y >= k && y < b) {                                     // row y's candidacies
+            int column = -1;
+            int nonZeros = 0;
+            double best = -1.0;
+            int bestColumn = k;
+            for (int c = k; c < b; c++) {
+                const double v = D(y, c);
+                if (v != 0.0) {
+                    nonZeros++;
+                    column = c;
+                }
+                const double m = fabs(v);
+                if (m > best) {
+                    best = m;
+                    bestColumn = c;
+                }
+            }
+            singletonColumn[y * L + x] = panelEmpty[rows[y * L + x] * L + x] && nonZeros == 1 ? column : -1;
+            rowBest[y * L + x] = best;
+            rowBestColumn[y * L + x] = bestColumn;
+        }
+        __syncthreads();
+        if (active && y == 0) {                                              // the pivot, as factorBlocks picks it
+            int pr = -1;
+            int pc = -1;
+            for (int r = k; r < b && pr < 0; r++) {
+                if (singletonColumn[r * L + x] >= 0) {
+                    pr = r;
+                    pc = singletonColumn[r * L + x];
+                }
+            }
+            if (pr < 0) {
+                pr = k;
+                pc = k;
+                double best = -1.0;
+                for (int r = k; r < b; r++) {
+                    if (rowBest[r * L + x] > best) {
+                        best = rowBest[r * L + x];
+                        pr = r;
+                        pc = rowBestColumn[r * L + x];
+                    }
+                }
+            }
+            pivotRow[x] = pr;
+            pivotColumn[x] = pc;
+        }
+        __syncthreads();
+        const int pr = active ? pivotRow[x] : k;
+        const int pc = active ? pivotColumn[x] : k;
+        if (active && y < b && pr != k) {                                    // the rows k and pr, column y
+            const double v = D(k, y);
+            D(k, y) = D(pr, y);
+            D(pr, y) = v;
+        }
+        if (active && y == 0 && pr != k) {
+            const unsigned char v = rows[k * L + x];
+            rows[k * L + x] = rows[pr * L + x];
+            rows[pr * L + x] = v;
+        }
+        __syncthreads();
+        if (active && y < b && pc != k) {                                    // the columns k and pc, row y
+            const double v = D(y, k);
+            D(y, k) = D(y, pc);
+            D(y, pc) = v;
+        }
+        if (active && y == 0 && pc != k) {
+            const unsigned char v = columns[k * L + x];
+            columns[k * L + x] = columns[pc * L + x];
+            columns[pc * L + x] = v;
+        }
+        __syncthreads();
+        if (active && y == 0) {                                              // the pivot, clamped as factorBlocks does
+            double pivot = D(k, k);
+            if (!(fabs(pivot) >= LU_PIVOT_EPSILON)) {
+                if (!isnan(pivot)) {
+                    pivot = pivot < 0.0 ? -LU_PIVOT_EPSILON : LU_PIVOT_EPSILON;
+                    D(k, k) = pivot;
+                }
+                clamps++;
+            }
+        }
+        __syncthreads();
+        if (active && y > k && y < b) {                                      // row y's elimination
+            const double pivot = D(k, k);
+            const double multiplier = D(y, k) / pivot;
+            D(y, k) = multiplier;
+            for (int c = k + 1; c < b; c++) {
+                D(y, c) = fma(-multiplier, D(k, c), D(y, c));
+            }
+        }
+    }
+    __syncthreads();
+    if (active && y < b) {
+        for (int c = 0; c < b; c++) {
+            block[static_cast<size_t>(y * b + c) * capacity] = D(y, c);
+        }
+        rowPermutation[static_cast<size_t>(f + y) * capacity + a] = rows[y * L + x];
+        columnPermutation[static_cast<size_t>(f + y) * capacity + a] = columns[y * L + x];
+    }
+    if (active && y == 0 && clamps > 0) {
         atomicAdd(pivotClamps + a, clamps);
     }
 }
@@ -703,6 +866,32 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
             }
         }
     }
+    std::vector<int> smallSupernode;
+    std::vector<int> wideSupernode;
+    lu.smallStart.assign(1, 0);
+    lu.wideStart.assign(1, 0);
+    lu.wideLargest.assign(plan.levels(), 0);
+    for (int l = 0; l < plan.levels(); l++) {
+        for (int k = plan.levelStart[l]; k < plan.levelStart[l + 1]; k++) {
+            const int s = plan.levelSupernode[k];
+            if (plan.supernodeSize(s) >= FACTOR_ROWS_MIN) {
+                wideSupernode.push_back(s);
+                lu.wideLargest[l] = std::max(lu.wideLargest[l], plan.supernodeSize(s));
+            } else {
+                smallSupernode.push_back(s);
+            }
+        }
+        lu.smallStart.push_back(static_cast<int>(smallSupernode.size()));
+        lu.wideStart.push_back(static_cast<int>(wideSupernode.size()));
+    }
+    uploadVector(lu.dSmallSupernode, smallSupernode);
+    uploadVector(lu.dWideSupernode, wideSupernode);
+    static const bool sharedOptIn = [] {                     // a 16-row block's lanes take 75.5 KB
+        CUDA_CHECK(cudaFuncSetAttribute(factorBlocksRows, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        static_cast<int>(factorRowsSharedBytes(B))));
+        return true;
+    }();
+    (void) sharedOptIn;
     std::vector<char> fromA(plan.nStored, 0);
     for (int e : plan.storedOfA) {
         fromA[e] = 1;
@@ -790,11 +979,28 @@ void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout 
                     lu.dStoredSource.as<int>(), lu.dLaneMap.as<int>(), lu.dLu.as<double>());
         }
         const int supernodes = lu.levelStart[l + 1] - lu.levelStart[l];
-        factorBlocks<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes, width,
-                lu.capacity, lu.dLevelSupernode.as<int>() + lu.levelStart[l], lu.dSupernodeStart.as<int>(),
-                lu.dDiagonalBase.as<int>(), lu.dRowStart.as<int>(), lu.dUpperBase.as<int>(), lu.dLu.as<double>(),
-                lu.dRowPermutation.as<unsigned char>(),
-                lu.dColumnPermutation.as<unsigned char>(), lu.dPivotClamps.as<int>());
+        const int wide = gOneThreadKernelsForTests ? 0 : lu.wideStart[l + 1] - lu.wideStart[l];
+        const int small = gOneThreadKernelsForTests ? supernodes : lu.smallStart[l + 1] - lu.smallStart[l];
+        const int* smallList = gOneThreadKernelsForTests ? lu.dLevelSupernode.as<int>() + lu.levelStart[l]
+                                                         : lu.dSmallSupernode.as<int>() + lu.smallStart[l];
+        if (wide > 0) {
+            gBatchedLuSupernodalRowFactorizations += wide;
+            const int largest = lu.wideLargest[l];
+            const unsigned int tiles = static_cast<unsigned int>((width + SPLIT_LANES - 1) / SPLIT_LANES);
+            factorBlocksRows<<<static_cast<unsigned int>(wide) * tiles, dim3(SPLIT_LANES, largest),
+                               factorRowsSharedBytes(largest), stream>>>(wide, width, lu.capacity, largest,
+                    lu.dWideSupernode.as<int>() + lu.wideStart[l], lu.dSupernodeStart.as<int>(),
+                    lu.dDiagonalBase.as<int>(), lu.dRowStart.as<int>(), lu.dUpperBase.as<int>(), lu.dLu.as<double>(),
+                    lu.dRowPermutation.as<unsigned char>(), lu.dColumnPermutation.as<unsigned char>(),
+                    lu.dPivotClamps.as<int>());
+        }
+        if (small > 0) {
+            factorBlocks<<<blocksFor(static_cast<size_t>(small) * width), LU_BLOCK, 0, stream>>>(small, width,
+                    lu.capacity, smallList, lu.dSupernodeStart.as<int>(), lu.dDiagonalBase.as<int>(),
+                    lu.dRowStart.as<int>(), lu.dUpperBase.as<int>(), lu.dLu.as<double>(),
+                    lu.dRowPermutation.as<unsigned char>(), lu.dColumnPermutation.as<unsigned char>(),
+                    lu.dPivotClamps.as<int>());
+        }
         const int panels = lu.levelPanelStart[l + 1] - lu.levelPanelStart[l];
         if (panels > 0) {
             applyPanels<<<blocksFor(static_cast<size_t>(panels) * width), LU_BLOCK, 0, stream>>>(panels, width,

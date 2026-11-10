@@ -29,18 +29,19 @@ std::vector<int> intsOf(JNIEnv* env, jintArray a) {
 // the fast-engine orders built with learned pivot delays, the fast-engine steps and levels launched with their long
 // rows split, the pivoting-engine forward levels launched with their long rows split, the lanes sent straight to the
 // pivoting engine, past the fast one, the lanes the fast engine's triangular solves ran on, the pivoting-engine backward
-// levels solved a supernode row per warp, and its split forward levels summed a supernode row per block (tests: a run
-// really used it, and how).
+// levels solved a supernode row per warp, its split forward levels summed a supernode row per block, and its diagonal
+// blocks factorized a row per warp (tests: a run really used it, and how).
 extern "C" JNIEXPORT jlongArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizationCounts)(JNIEnv* env, jclass) {
-    const jlong counts[9] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
-                             static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches),
-                             static_cast<jlong>(gBatchedLuSupernodalSplitLaunches),
-                             static_cast<jlong>(gBatchedLuRoutedLanes), static_cast<jlong>(gBatchedLuFastLaneSolves),
-                             static_cast<jlong>(gBatchedLuSupernodalRowLaunches),
-                             static_cast<jlong>(gBatchedLuSupernodalForwardRowLaunches)};
-    jlongArray out = env->NewLongArray(9);
-    env->SetLongArrayRegion(out, 0, 9, counts);
+    const jlong counts[10] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
+                              static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches),
+                              static_cast<jlong>(gBatchedLuSupernodalSplitLaunches),
+                              static_cast<jlong>(gBatchedLuRoutedLanes), static_cast<jlong>(gBatchedLuFastLaneSolves),
+                              static_cast<jlong>(gBatchedLuSupernodalRowLaunches),
+                              static_cast<jlong>(gBatchedLuSupernodalForwardRowLaunches),
+                              static_cast<jlong>(gBatchedLuSupernodalRowFactorizations)};
+    jlongArray out = env->NewLongArray(10);
+    env->SetLongArrayRegion(out, 0, 10, counts);
     return out;
 }
 

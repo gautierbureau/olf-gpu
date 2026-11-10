@@ -468,6 +468,115 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 
+    /** A strategy condition on a generator's active power reads the target OLF's post-contingency load flow leaves it
+     *  (ThresholdConditionEvaluator): the loss pre-distribution and the distributed-slack passes. A line outage loses no
+     *  injection, so B6-G's target moves by the passes alone, which the device ran; the host network held the base
+     *  target. The threshold sits half-way between B6-G's base target and the one the outage leaves it (both read from
+     *  plain CPU load flows: a non-slack generator's P is its target). B3, B6 and B8 get 20 MW and B1-G is out of the
+     *  distribution, as in GpuSaDistributedSlackTest's loss replay test. */
+    @Test
+    void injectionConditionReadsTheDevicesSlackDistribution() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> fixture = () -> {
+            Network n = IeeeCdfNetworkFactory.create14();
+            for (String g : List.of("B3-G", "B6-G", "B8-G")) {
+                n.getGenerator(g).setTargetP(20);
+            }
+            n.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(false).add();
+            return n;
+        };
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(
+                new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        Network base = fixture.get();
+        org.junit.jupiter.api.Assertions.assertTrue(runner.run(base, lfp).isFullyConverged());
+        double baseTarget = -base.getGenerator("B6-G").getTerminal().getP();
+        Network outage = fixture.get();
+        outage.getLine("L1-2-1").disconnect();
+        org.junit.jupiter.api.Assertions.assertTrue(runner.run(outage, lfp).isFullyConverged());
+        double outageTarget = -outage.getGenerator("B6-G").getTerminal().getP();
+        org.junit.jupiter.api.Assertions.assertTrue(Math.abs(outageTarget - baseTarget) > 0.2,
+                "the outage must move B6-G's target: " + baseTarget + " -> " + outageTarget);
+        Network network = fixture.get();
+        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("redispatch3")
+                        .withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(10).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sB6Moved",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("L1-2-1"),
+                        new com.powsybl.contingency.strategy.condition.InjectionThresholdCondition("B6-G",
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.Variable.ACTIVE_POWER,
+                                outageTarget > baseTarget
+                                        ? com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.ComparisonType.GREATER_THAN
+                                        : com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.ComparisonType.LESS_THAN,
+                                (baseTarget + outageTarget) / 2),
+                        List.of("redispatch3")));
+        // the contingency and its pair on the device (the conditional pair speculatively)
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2, lfp);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "OLF's condition reads the target its slack distribution left");
+    }
+
+    /** OLF still evaluates the strategies of a contingency whose load flow ran out of Newton iterations
+     *  (MAX_ITERATION_REACHED), and a branch threshold reads the flows of that run's last iterate (NewtonRaphson leaves
+     *  the state vector there). The device answered such a contingency without injecting anything, so the condition read
+     *  the flows the network held before it: the base's here. The budget is one step short of what L1-2-1 needs (as in
+     *  GpuSaSolverTest's budget tests), so the last iterate is close to the outage's solution and L1-5-1 carries far more
+     *  than in the base; the strategy recloses L1-2-1, a pair the device answers. */
+    @Test
+    void thresholdConditionAfterAnExhaustedContingencyReadsOlfsLastIterate() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        com.powsybl.loadflow.LoadFlowParameters plain = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(false);
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(
+                new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        Network outage = IeeeCdfNetworkFactory.create14();
+        outage.getLine("L1-2-1").disconnect();
+        org.junit.jupiter.api.Assertions.assertTrue(runner.run(outage, plain).isFullyConverged());
+        double after = outage.getLine("L1-5-1").getTerminal1().getP();
+        // the solved base on the network, so both arms' base load flow needs a single step
+        Network network = IeeeCdfNetworkFactory.create14();
+        org.junit.jupiter.api.Assertions.assertTrue(runner.run(network, plain).isFullyConverged());
+        double before = network.getLine("L1-5-1").getTerminal1().getP();
+        org.junit.jupiter.api.Assertions.assertTrue(after > before + 20, "L1-2-1's outage must load L1-5-1: " + before + " -> " + after);
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(false)
+                .setVoltageInitMode(com.powsybl.loadflow.LoadFlowParameters.VoltageInitMode.PREVIOUS_VALUES);
+        com.powsybl.openloadflow.OpenLoadFlowParameters ext = com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        int budget = -1;                                     // the smallest budget the CPU converges L1-2-1 under
+        for (int m = 2; m <= 30 && budget < 0; m++) {
+            ext.setMaxNewtonRaphsonIterations(m);
+            if (runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap).getPostContingencyResults().get(0)
+                    .getStatus() == com.powsybl.security.PostContingencyComputationStatus.CONVERGED) {
+                budget = m;
+            }
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(budget >= 3, "L1-2-1 must need at least two steps, smallest converging budget " + budget);
+        ext.setMaxNewtonRaphsonIterations(budget - 1);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionAction("reclose", "L1-2-1", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOnL15Flow",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("L1-2-1"),
+                        new com.powsybl.contingency.strategy.condition.BranchThresholdCondition("L1-5-1",
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.Variable.ACTIVE_POWER,
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.ComparisonType.GREATER_THAN,
+                                (before + after) / 2, com.powsybl.iidm.network.TwoSides.ONE),
+                        List.of("reclose")));
+        // the pair on the device (the contingency ran out of iterations there too)
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 1, lfp);
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.MAX_ITERATION_REACHED,
+                cpu.getPostContingencyResults().get(0).getStatus());
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "OLF's condition reads the flows of its failed run's last iterate");
+    }
+
     @Test
     void thresholdConditionAfterADeviceStrategyReadsThatStrategysFlows() {
         // OLF evaluates a strategy's condition on the network the previous strategy of the contingency left: the restore

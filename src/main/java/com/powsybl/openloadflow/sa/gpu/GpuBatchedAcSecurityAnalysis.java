@@ -13,7 +13,9 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.strategy.ConditionalActions;
 import com.powsybl.contingency.strategy.OperatorStrategy;
+import com.powsybl.contingency.strategy.condition.AbstractThresholdCondition;
 import com.powsybl.contingency.strategy.condition.BranchThresholdCondition;
+import com.powsybl.contingency.strategy.condition.InjectionThresholdCondition;
 import com.powsybl.contingency.strategy.condition.ThreeWindingsTransformerThresholdCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.math.matrix.MatrixFactory;
@@ -24,6 +26,7 @@ import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuDriverOuterLoopEngine;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -538,6 +541,55 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a strategy on the contingency has a stage conditioned on a threshold: a branch's or a three-windings
+     * transformer's flow, or a generator's target. ThresholdConditionEvaluator reads them on the network the
+     * contingency's load flow left; after a load flow that ran out of Newton iterations the flows are those of its last
+     * iterate (NewtonRaphson leaves the state vector there), which only OLF's own run reproduces.
+     */
+    private static boolean strategyConditionReadsNetwork(GpuSaRunState run, String contingencyId) {
+        return strategyConditionOfType(run, contingencyId, AbstractThresholdCondition.class);
+    }
+
+    /** Whether a strategy on the contingency has a stage conditioned on a generator's active power or target P. */
+    private static boolean strategyConditionReadsGeneratorTargets(GpuSaRunState run, String contingencyId) {
+        return strategyConditionOfType(run, contingencyId, InjectionThresholdCondition.class);
+    }
+
+    private static boolean strategyConditionOfType(GpuSaRunState run, String contingencyId,
+                                                   Class<? extends com.powsybl.contingency.strategy.condition.Condition> type) {
+        for (OperatorStrategy strategy : run.operatorStrategies) {
+            if (targets(strategy, contingencyId)) {
+                for (ConditionalActions stage : strategy.getConditionalActions()) {
+                    if (type.isInstance(stage.getCondition())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Gives the participating generators the target P the device's distribution left them for this contingency, which
+     * OLF's own post-contingency load flow leaves on them: a strategy condition on a generator's active power reads it
+     * (ThresholdConditionEvaluator), and so does one on its target P once OLF copies it to the initial target before a
+     * single strategy. The injection writes the state's voltages only, and the network holds the loss pre-distribution
+     * alone. A generator the contingency lost keeps what OLF's contingency left it. OLF's full restore (a contingency
+     * a strategy targets does not take the targeted one) puts the targets back.
+     */
+    private static void applyDeviceGeneratorTargets(LfNetwork network, BatchScenarioResult.GeneratorTargets targets) {
+        if (targets == null) {
+            return;
+        }
+        for (int g = 0; g < targets.generatorIds().length; g++) {
+            com.powsybl.openloadflow.network.LfGenerator generator = network.getGeneratorById(targets.generatorIds()[g]);
+            if (generator != null && !generator.isDisabled() && !Double.isNaN(targets.targetP()[g])) {
+                generator.setTargetP(targets.targetP()[g]);
+            }
+        }
     }
 
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
@@ -1078,13 +1130,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         GpuSaDiagnostics.dumpPostContingencyEquations(context, contingency, lfContingency, network);
         PrecomputedBatch precomputed = runState.get().precomputed;
         if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())
-                && everyStrategyAnsweredOnDevice(runState.get(), contingency.getId(), securityAnalysisParameters)) {
+                && everyStrategyAnsweredOnDevice(runState.get(), contingency.getId(), securityAnalysisParameters)
+                && !strategyConditionReadsNetwork(runState.get(), contingency.getId())) {
             // The device carried this scenario through OLF's whole Newton budget without
             // convergence. OLF's own path (AbstractSecurityAnalysis.runPostContingencySimulation)
             // reports MAX_ITERATION_REACHED with an empty network result and no violations for
             // that outcome; the same result is built here, from the contingency already applied.
             // A strategy of it the device did not answer starts from what OLF's failed run leaves on the network
-            // (its targets, its bus types), which only that run produces: the contingency then runs on the CPU.
+            // (its targets, its bus types), which only that run produces: the contingency then runs on the CPU. So does
+            // one whose strategy is conditioned on a threshold: the condition reads the flows of the failed run's last
+            // Newton iterate (a plateau's last sample is a lottery, which the device does not hand back) or its targets.
             logPostContingencyStart(network, lfContingency);
             return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
                     new LimitViolationsResult(List.of()),
@@ -1155,6 +1210,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     precomputed.islandedBuses().get(contingency.getId()));
         }
         boolean unrealistic = GpuPostContingencyState.updateBusesFromState(state, precomputed, network, context.getParameters(), runState.get());
+        if (strategyConditionReadsGeneratorTargets(runState.get(), contingency.getId())) {
+            applyDeviceGeneratorTargets(network, precomputed.generatorTargets().get(contingency.getId()));
+        }
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tUpd);
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())

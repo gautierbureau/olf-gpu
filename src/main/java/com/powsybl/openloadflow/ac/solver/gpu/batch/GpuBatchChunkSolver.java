@@ -193,6 +193,7 @@ final class GpuBatchChunkSolver {
         double[] distributedByIndex = in.sinks().distributedByIndex();
         int[][] automationSystemSwitchedByIndex = in.sinks().automationSystemSwitchedByIndex();
         double[][] deviceTapMovesByIndex = in.sinks().deviceTapMovesByIndex();
+        double[][] distributedSlackGeneratorMovesByIndex = in.sinks().distributedSlackGeneratorMovesByIndex();
         BatchConfig config = in.config();
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
@@ -279,6 +280,15 @@ final class GpuBatchChunkSolver {
         java.util.Map<String, Integer> indexById = new java.util.HashMap<>();
         for (int i = 0; i < contingencies.size(); i++) {
             indexById.put(contingencies.get(i).contingencyId(), i);
+        }
+        // the contingencies whose strategy pairs this call solves: the host reads their generator targets
+        java.util.Set<Integer> parentsOfPairs = new java.util.HashSet<>();
+        for (int idx : pairIdxList) {
+            String pairId = contingencies.get(idx).contingencyId();
+            Integer parent = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
+            if (parent != null) {
+                parentsOfPairs.add(parent);
+            }
         }
         int nReactiveLimitEntries = gpuData.reactiveLimits().voltageRow().length;
         ParentCaptures captures = new ParentCaptures();
@@ -674,6 +684,16 @@ final class GpuBatchChunkSolver {
                             hasHvdcDriverLoops, monitoringVoltageInKernel);
                     long tOrch0 = System.nanoTime();
                     captureForStrategies(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState, pairIdxList);
+                    if (!chunk.pairPhase()) {
+                        // ...and the generator moves of a contingency with strategy pairs for the host too: a strategy
+                        // condition on a generator's active power reads the target OLF's post-contingency load flow leaves
+                        for (int s = 0; s < harvestedCount; s++) {
+                            double[] moves = run.captures().genMovesByIndex.get(harvested[s].index());
+                            if (moves != null && parentsOfPairs.contains(harvested[s].index())) {
+                                distributedSlackGeneratorMovesByIndex[harvested[s].index()] = moves;
+                            }
+                        }
+                    }
                     // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
                     // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).

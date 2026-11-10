@@ -11,6 +11,40 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #91 — FIXED: what a strategy's threshold condition reads after a device contingency (d, e) (2026-11-10)
+
+Issues d and e of `docs/device-final-results-plan.md` §7 (branch `device-final-results`). OLF evaluates a strategy's
+threshold condition on the network the contingency's load flow left (`ThresholdConditionEvaluator`): a branch's or a
+three-windings transformer's flow from the state vector, a generator's ACTIVE_POWER from its target P, TARGET_P from its
+initial target P (which OLF sets to the target P before a single strategy).
+
+**e — FIXED on the device.** After a device-answered contingency the network held the loss pre-distribution only (OLF's
+own `ContingencyActivePowerLossDistribution` runs for a contingency a strategy targets), not the device's slack passes.
+Measured on IEEE 14 with B3/B6/B8 at 20 MW and B1-G out of the distribution: B6-G's target is 4.929 MW in the base and
+9.865 MW after L1-2-1, a line outage that loses no injection, so the passes alone move it; a condition at 7.397 MW held
+on the CPU and not on the GPU. The chunk solver already read each contingency's final generator moves for its pairs'
+seeding (`genMovesByIndex`); the solver now hands them to the host as absolute targets (`BatchScenarioResult
+.GeneratorTargets`: the anchors read before the solve plus the moves, for the contingencies with strategy pairs), and
+`runPostContingencySimulation` gives them to the participating generators when a strategy on the contingency has an
+`InjectionThresholdCondition` (a lost generator keeps OLF's 0). OLF's full restore (a contingency a strategy targets
+never takes the targeted one) and `BusDcState` put the targets and initial targets back.
+`GpuSaOperatorStrategyTest.injectionConditionReadsTheDevicesSlackDistribution` fails without it (0 strategy results
+against OLF's 1).
+
+**d — routed to OLF's path.** A contingency that runs out of Newton iterations (MAX_ITERATION_REACHED) still has its
+strategies evaluated, and NewtonRaphson leaves the state vector at its last iterate: a branch threshold reads that
+iterate's flows. The device answered such a contingency without injecting anything, so the condition read the flows
+the network held before. Measured on IEEE 14 with the budget one step short of the 4 steps L1-2-1 needs: L1-5-1 at
+260.95 MW in the outage's solution against 75.51 MW in the base, a condition at 168.2 MW held on the CPU and not on the
+GPU. The last iterate of a run that does not converge is not something the device reproduces to the bit (a plateau's
+last sample is a lottery, 4c2b48cb9), so a contingency the device exhausted runs on the CPU when a strategy of it has a
+threshold condition (injection conditions included: that combination has no fixture); its pairs stay on the device.
+`GpuSaOperatorStrategyTest.thresholdConditionAfterAnExhaustedContingencyReadsOlfsLastIterate` fails without it.
+
+Not covered: the area interchange control moves the same participating generators, and nothing tests that its moves
+reach the targets handed back. The RTE runs carry no operator strategy, so nothing changes there.
+Gates: `GpuSa*Test` 299/0/2 on cuDSS and on our batched LU; full suite 522/0/6 with checkstyle.
+
 ### #90 — FIXED (in OLF): the network restore left the shunt compensators' sections, so results depended on the order (2026-11-10)
 
 A shunt with sections (a voltage-controlling shunt, or shunt compensators an action operates) keeps the section of each

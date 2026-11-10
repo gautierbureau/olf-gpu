@@ -57,19 +57,6 @@ __global__ void toInterleaved(int count, int stride, int width, int capacity, co
     }
 }
 
-// dst[map[k] * capacity + a] = src[k * stride + laneMap[a]]: values already interleaved by scenario
-// (common/batch_layout.cuh) into the lane-interleaved layout, one thread per (entry, lane), the lanes fastest.
-__global__ void fromScenarioInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                                        const int* __restrict__ map, const double* __restrict__ src,
-                                        double* __restrict__ dst) {
-    const size_t t = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (t < static_cast<size_t>(count) * width) {
-        const int a = static_cast<int>(t % width);
-        const int k = static_cast<int>(t / width);
-        dst[static_cast<size_t>(map[k]) * capacity + a] = src[static_cast<size_t>(k) * stride + laneMap[a]];
-    }
-}
-
 // The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
 __global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
                                 const int* __restrict__ selected, const int* __restrict__ map,
@@ -131,11 +118,25 @@ __device__ __forceinline__ void finishEntry(int e, int a, int capacity, const in
     lu[static_cast<size_t>(e) * capacity + a] = acc;
 }
 
+// An entry's value before its contributions. Values interleaved by scenario (common/batch_layout.cuh) are read in
+// place - src[k * stride + scenario] for the A entry k, 0 for a fill entry - every entry being read once, at the step
+// that finishes it; any other layout was copied into lu first.
+__device__ __forceinline__ double initialEntry(int e, int a, int capacity, const double* __restrict__ src, int stride,
+                                              const int* __restrict__ luSource, const int* __restrict__ laneMap,
+                                              const double* __restrict__ lu) {
+    if (src == nullptr) {
+        return lu[static_cast<size_t>(e) * capacity + a];
+    }
+    const int k = luSource[e];
+    return k >= 0 ? src[static_cast<size_t>(k) * stride + laneMap[a]] : 0.0;
+}
+
 // One factorization step: every (item, lane) gathers its entry's contributions in pivot order, then finishes it.
 __global__ void factorStep(int nItems, int width, int capacity, const int* __restrict__ stepEntry,
                            const int* __restrict__ entryDivisor, const int* __restrict__ contributionStart,
                            const int* __restrict__ contributionL, const int* __restrict__ contributionU,
-                           double* __restrict__ lu, int* __restrict__ trouble) {
+                           const double* __restrict__ src, int stride, const int* __restrict__ luSource,
+                           const int* __restrict__ laneMap, double* __restrict__ lu, int* __restrict__ trouble) {
     const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (g >= static_cast<size_t>(nItems) * width) {
         return;
@@ -143,7 +144,7 @@ __global__ void factorStep(int nItems, int width, int capacity, const int* __res
     const int t = static_cast<int>(g / width);
     const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int e = stepEntry[t];
-    double acc = lu[static_cast<size_t>(e) * capacity + a];
+    double acc = initialEntry(e, a, capacity, src, stride, luSource, laneMap, lu);
     const int cEnd = contributionStart[e + 1];
     for (int c = contributionStart[e]; c < cEnd; c++) {
         acc = fma(-lu[static_cast<size_t>(contributionL[c]) * capacity + a],
@@ -158,7 +159,8 @@ __global__ void factorStep(int nItems, int width, int capacity, const int* __res
 __global__ void factorStepSplit(int nItems, int width, int capacity, const int* __restrict__ stepEntry,
                                 const int* __restrict__ entryDivisor, const int* __restrict__ contributionStart,
                                 const int* __restrict__ contributionL, const int* __restrict__ contributionU,
-                                double* __restrict__ lu, int* __restrict__ trouble) {
+                                const double* __restrict__ src, int stride, const int* __restrict__ luSource,
+                                const int* __restrict__ laneMap, double* __restrict__ lu, int* __restrict__ trouble) {
     extern __shared__ double partial[];                      // [slice][lane of the block]
     const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
     const int t = blockIdx.x / tiles;
@@ -177,7 +179,7 @@ __global__ void factorStepSplit(int nItems, int width, int capacity, const int* 
     partial[threadIdx.y * SPLIT_LANES + threadIdx.x] = sum;
     __syncthreads();
     if (threadIdx.y == 0 && active) {
-        double acc = lu[static_cast<size_t>(e) * capacity + a];
+        double acc = initialEntry(e, a, capacity, src, stride, luSource, laneMap, lu);
         for (int k = 0; k < slices; k++) {
             acc += partial[k * SPLIT_LANES + threadIdx.x];
         }
@@ -362,6 +364,7 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     }
     uploadVector(lu.dEntryOfA, entryOfA);
     uploadVector(lu.dFillEntry, fillEntry);
+    uploadVector(lu.dLuSource, plan.luSource);
     uploadVector(lu.dStepEntry, plan.stepEntry);
     uploadVector(lu.dEntryDivisor, plan.entryDivisor);
     uploadVector(lu.dContributionStart, plan.contributionStart);
@@ -393,18 +396,18 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
     }
     CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
     CUDA_CHECK(cudaMemsetAsync(lu.dTrouble.p, 0, width * sizeof(int), stream));
-    if (layout.interleaved) {
-        fromScenarioInterleaved<<<blocksFor(static_cast<size_t>(lu.nnzA) * width), LU_BLOCK, 0, stream>>>(lu.nnzA,
-                layout.stride, width, lu.capacity, lu.dLaneMap.as<int>(), lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
-    } else {
+    // Values interleaved by scenario are read in place by the steps (initialEntry); scenario-major ones are copied into
+    // the lane-interleaved layout first, the fill entries zeroed.
+    const double* src = layout.interleaved ? vals : nullptr;
+    if (!layout.interleaved) {
         const dim3 tileBlock(TILE, TILE_ROWS);
         const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
         toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
                 nullptr, lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
-    }
-    if (lu.nFill > 0) {
-        zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
+        if (lu.nFill > 0) {
+            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
+                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
+        }
     }
     for (int s = 0; s + 1 < static_cast<int>(lu.stepStart.size()); s++) {
         const int items = lu.stepStart[s + 1] - lu.stepStart[s];
@@ -418,12 +421,14 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
             factorStepSplit<<<blocks, dim3(SPLIT_LANES, slices), slices * SPLIT_LANES * sizeof(double), stream>>>(items,
                     width, lu.capacity, lu.dStepEntry.as<int>() + lu.stepStart[s], lu.dEntryDivisor.as<int>(),
                     lu.dContributionStart.as<int>(), lu.dContributionL.as<int>(), lu.dContributionU.as<int>(),
-                    lu.dLu.as<double>(), lu.dTrouble.as<int>());
+                    src, layout.stride, lu.dLuSource.as<int>(), lu.dLaneMap.as<int>(), lu.dLu.as<double>(),
+                    lu.dTrouble.as<int>());
         } else {
             factorStep<<<blocksFor(static_cast<size_t>(items) * width), LU_BLOCK, 0, stream>>>(items, width,
                     lu.capacity, lu.dStepEntry.as<int>() + lu.stepStart[s], lu.dEntryDivisor.as<int>(),
                     lu.dContributionStart.as<int>(), lu.dContributionL.as<int>(), lu.dContributionU.as<int>(),
-                    lu.dLu.as<double>(), lu.dTrouble.as<int>());
+                    src, layout.stride, lu.dLuSource.as<int>(), lu.dLaneMap.as<int>(), lu.dLu.as<double>(),
+                    lu.dTrouble.as<int>());
         }
     }
     CUDA_CHECK(cudaGetLastError());

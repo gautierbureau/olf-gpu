@@ -32,6 +32,7 @@ struct ScalarLu {
     size_t residentThreads = 0;                              // threads the device holds resident: what a split may use
     int nFill = 0;
     DeviceBuf dEntryOfA, dFillEntry;                         // A entry -> LU entry; the LU entries without an A entry
+    DeviceBuf dLuSource;                                     // LU entry -> A entry, -1 for a fill entry
     DeviceBuf dStepEntry, dEntryDivisor, dContributionStart, dContributionL, dContributionU;
     DeviceBuf dLuRowPtr, dLuCol, dLuDiag, dForwardRow, dBackwardRow;
     DeviceBuf dRowPosition, dColPosition;                   // A row -> B row, A column -> B column

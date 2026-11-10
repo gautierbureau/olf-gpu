@@ -11,14 +11,6 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #95 — PROPOSAL: the outer loops' device design, within this repository (2026-11-10)
-
-Not started. `docs/outer-loop-device-design-improvements.md`: eight refactorings that need nothing from OLF — kernel
-views in place of 50-parameter signatures, one packed table and one generic install per loop, a state object per loop,
-one loop registry, OLF's rule written once with host tests, one placement function (and no Java copy of it), a
-voltage control's layout derived from flags (in shadow first), one status read-back per check. ReactiveLimits first.
-Independent of #94.
-
 ### #94 — PROPOSAL: array-form outer loops, one source for CPU and GPU (2026-11-10)
 
 Not started. The device port of the outer loops is 10,621 lines of code against OLF's 3,286 (ReactiveLimits alone:

@@ -45,6 +45,12 @@ struct BatchedLu {
     bool fastHasEveryLane = true;                            // ...the last factorization sent no lane straight past it
     std::vector<char> pivotingRoute;                         // per scenario: the pivoting engine factorized it last
     DeviceBuf laneFactors;                                   // one lane's fast factors, read to learn from
+    DeviceBuf laneValues;                                    // ...and its values, when they are interleaved
+    std::vector<char> fastFlagged;                           // per position of the fast engine's lane map: it flagged
+                                                             // the lane, so the pivoting engine solves it
+    int fastTrusted = 0;                                     // the positions it did not flag, how many
+    std::vector<int> hFastTrusted;                           // ...and which, when it flagged any
+    DeviceBuf dFastTrusted;
     std::vector<int> hSelected;                              // selectLanes': positions in the fast engine's lane map,
     int selectedFast = 0;                                    // ...how many of them, then positions in hPivoted
     DeviceBuf dSelected;
@@ -63,8 +69,9 @@ void factorizeLanes(BatchedLu& lu, const double* vals, BatchLayout layout, const
 // The scenarios now installed in slots: each starts again on the fast engine.
 void forgetLaneRouting(BatchedLu& lu, const std::vector<int>& slots);
 
-// Solve with the last factorization's lanes, each on the engine that factorized it: x[s * n ..] = A_s^-1 b[s * n ..]
-// for every s of its lane map. Scenarios outside the lane map keep their x.
+// Solve with the last factorization's lanes, each on the engine whose factors it keeps (a lane the fast engine
+// flagged on the pivoting engine alone): x[s * n ..] = A_s^-1 b[s * n ..] for every s of its lane map. Scenarios
+// outside the lane map keep their x.
 void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
 
 // Select the lanes of the last factorization whose scenario is set in scenarios (host, one entry per scenario) for

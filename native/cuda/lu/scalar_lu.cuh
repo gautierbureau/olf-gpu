@@ -68,6 +68,11 @@ std::vector<int> readScalarTrouble(ScalarLu& lu, cudaStream_t stream);
 // stream; scratch holds them on the device on the way).
 std::vector<double> readScalarLaneFactors(ScalarLu& lu, int lane, DeviceBuf& scratch, cudaStream_t stream);
 
+// One scenario's count values out of values interleaved by scenario: values[e * stride + scenario], gathered on the
+// device into scratch and copied in one piece (synchronizes the stream).
+std::vector<double> readInterleavedScenario(const double* values, int count, int stride, int scenario, DeviceBuf& scratch,
+                                            cudaStream_t stream);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_LU_SCALAR_LU_CUH

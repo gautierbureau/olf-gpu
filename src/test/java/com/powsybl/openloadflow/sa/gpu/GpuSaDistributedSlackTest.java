@@ -642,26 +642,17 @@ class GpuSaDistributedSlackTest extends AbstractGpuSaTest {
     }
 
     @Test
-    void l121SevereContingencyMatchesCpuAtTightSlackTol() {
-        // The L1-2-1 outage (main B1-B2 tie) switches ALL PV buses to PQ — an ill-conditioned state where the
-        // DS stopping band (slackBusPMaxMismatch, default 1 MW) leaves ~0.1 kV of legitimate
-        // ambiguity between arms (measured: 0.105 kV @1 MW, 0.055 @0.1, match @0.01 — scales with
-        // the band, NOT a defect). This regression asserts exact machinery parity with the band
-        // narrowed; the ambiguity analysis lives in docs/gpu-vs-cpu-capabilities.md §A.
+    void l121SevereContingencyMatchesCpu() {
+        // The L1-2-1 outage (main B1-B2 tie) switches ALL PV buses to PQ, an ill-conditioned state. The arms once ended
+        // 0.105 kV apart there at OLF's default 1 MW slack band, which was put down to the band; both now take the same
+        // iterates and match at OLF's default criteria (docs/gpu-vs-cpu-capabilities.md §A).
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        System.setProperty("olf.gpu.test.slackTol", "0.01");
-        System.setProperty("olf.gpu.test.convEps", "1e-9");
-        try {
-            Network network = IeeeCdfNetworkFactory.create14();
-            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
-            Network network2 = IeeeCdfNetworkFactory.create14();
-            network2.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
-                    .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
-            assertGpuMatchesCpu(network2, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
-        } finally {
-            System.clearProperty("olf.gpu.test.slackTol");
-            System.clearProperty("olf.gpu.test.convEps");
-        }
+        Network network = IeeeCdfNetworkFactory.create14();
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
+        Network network2 = IeeeCdfNetworkFactory.create14();
+        network2.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
+                .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
+        assertGpuMatchesCpu(network2, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
     }
 }

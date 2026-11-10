@@ -1415,36 +1415,29 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     void generatorActionStressAcrossContingencies() {
         // Freeze-semantics hunt: every non-fragmenting ieee14 line contingency x a LARGE redispatch
         // (+60 MW on B2-G) that pushes controllers switched to PQ around. Any surviving CPU-vs-device RL
-        // freeze divergence must surface as a >0.05 kV bus mismatch on some pair.
+        // freeze divergence must surface as a bus voltage mismatch on some pair, at OLF's default criteria.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        System.setProperty("olf.gpu.test.slackTol", "0.01");
-        System.setProperty("olf.gpu.test.convEps", "1e-9");
         List<String> lineIds = IeeeCdfNetworkFactory.create14().getLineStream()
                 .map(l -> l.getId()).toList();
-        try {
-            for (String lineId : lineIds) {
-                Network network = IeeeCdfNetworkFactory.create14();
-                // extra fixed-Q gen at B10 (the #21 shape): a non-voltage-capable gen in the RL mix
-                network.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
-                        .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
-                List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
-                List<com.powsybl.action.Action> actions = List.of(
-                        new com.powsybl.action.GeneratorActionBuilder().withId("redispatch2")
-                                .withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(60).build());
-                List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
-                        new com.powsybl.contingency.strategy.OperatorStrategy("sGen",
-                                com.powsybl.contingency.ContingencyContext.all(),
-                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("redispatch2")));
-                try {
-                    assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1);
-                } catch (AssertionError e) {
-                    throw new AssertionError("ctg " + lineId + ": " + e.getMessage(), e);
-                }
+        for (String lineId : lineIds) {
+            Network network = IeeeCdfNetworkFactory.create14();
+            // extra fixed-Q gen at B10 (the #21 shape): a non-voltage-capable gen in the RL mix
+            network.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
+                    .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
+            List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+            List<com.powsybl.action.Action> actions = List.of(
+                    new com.powsybl.action.GeneratorActionBuilder().withId("redispatch2")
+                            .withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(60).build());
+            List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                    new com.powsybl.contingency.strategy.OperatorStrategy("sGen",
+                            com.powsybl.contingency.ContingencyContext.all(),
+                            new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("redispatch2")));
+            try {
+                assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1);
+            } catch (AssertionError e) {
+                throw new AssertionError("ctg " + lineId + ": " + e.getMessage(), e);
             }
-        } finally {
-            System.clearProperty("olf.gpu.test.slackTol");
-            System.clearProperty("olf.gpu.test.convEps");
         }
     }
 

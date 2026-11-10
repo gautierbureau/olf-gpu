@@ -11,6 +11,26 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #93 — DONE: the SA test helpers' tolerance switches are gone (2026-11-10)
+
+`AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to
+`OLF_GPU_DBG_CONV_EPS` / `OLF_GPU_DBG_SLACK_TOL`) and tightened OLF's Newton criterion and slack band on both arms; the
+rte6515 harness read `OLF_GPU_DBG_CONV_EPS` too. A switch that selects a computation has no place in the final design,
+tests included, and tightening hides where the arms' trajectories part instead of answering it. The reads are gone.
+- Two tests set the properties in code (slack 0.01 MW, Newton 1e-9). Each read called `OpenLoadFlowParameters.create`,
+  which replaces the extension, so the slack read wiped the Newton one: both tests ran at OLF's default Newton
+  criterion and a 0.01 MW band.
+- Both pass at OLF's default criteria at 1e-12 kV, on cuDSS and on our batched LU, and now run there:
+  `GpuSaDistributedSlackTest.l121SevereContingencyMatchesCpu` (was `l121SevereContingencyMatchesCpuAtTightSlackTol`,
+  whose comment called the 0.105 kV it once measured at the default band "legitimate ambiguity, NOT a defect") and
+  `GpuSaOperatorStrategyTest.generatorActionStressAcrossContingencies`.
+- `docs/env-vars.md` lists the two variables as removed; §A of `docs/gpu-vs-cpu-capabilities.md` no longer calls the
+  stopping band's 0.1 kV inherent.
+- Still read, the same kind of switch: `OLF_GPU_CENSUS_CONV_EPS` (`GpuRteScopeCensusTest`) and `OLF_GPU_DISC_EPS` /
+  `OLF_GPU_DISC_SLACKTOL` (`GpuSingleSolveRejectReasonProbe`).
+
+Gates: `GpuSa*Test` 299/0/2 on cuDSS and on our batched LU; full suite 523/0/6 with checkstyle.
+
 ### #92 — DONE: the violation screen's band, existence tests, scan order and doc (h–k) (2026-11-10)
 
 Issues h–k of `docs/device-final-results-plan.md` §7 (branch `device-final-results`).

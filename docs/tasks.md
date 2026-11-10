@@ -11,6 +11,21 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #94 — OPEN: where the GPU security analysis's warm time goes on network.xiidm, and the leads (2026-11-10)
+
+`docs/network-xiidm-gpu-profile.md` records the profile of the three network.xiidm scopes on `main` at 031d7b31 with our
+batched LU (phase timers, Nsight Systems, Java Flight Recorder): warm SA 12.7 / 21.4 / 135.0 s (every branch, the JSON
+list, the full list with busbar sections), against 170.8 / 214.2 / 667.2 s for OLF on 20 CPU threads. The state
+copy-back plan (`docs/device-final-results-plan.md`, branch `device-final-results`) covers about 4.4 / 6.9 / 35 s of it.
+The leads outside that plan, with their measured costs (no gain measured yet):
+- L1 refinement, about half of the LU (1.0 / 2.8 / 25.9 s); L2 launch-bound levels;
+- L3 the pivoting engine, which takes 99.98 % of the full list's lane factorizations (44.3 s);
+- L4 the fast engine's work on lanes it flags and pivot-delay learning that never stops (3.2 + 2.4 s on the full list);
+- L5 `ZeroImpedanceTreeReplay.nonTree()` in the planning (6.1 s of the full list's 8 s);
+- L6 the refill pauses (1.5 / 2.6 / 11.6 s of device idle); L7 per-scenario CUDA calls; L8 fill and bookkeeping;
+- L9 the device's rejects; L10 the loop's `toLfContingency`; L11 common to both arms; L12 the ReactiveLimits
+  oscillation (#84, 71–75 % of the lane iterations, an upstream question).
+
 ### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to

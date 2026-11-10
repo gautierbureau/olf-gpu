@@ -427,14 +427,17 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
     flow-observed loops use), so only sensitivity values cross PCIe and nothing per contingency waits for OLF's loop; a
     compacted solve for refills; couplers and remote voltage control (the relocated rows); the adjoint direction
     (`runAdjoint`, VJP) is the transposed solve of #40 / PR 25.
-- **M4 - DONE on the host, device code syntax-checked only (branch `gpu-sensitivity-values`, on `gpu-sensitivity-solves`;
-  needs the fork's `calculateSensi` hook, branch `olf-local-patches-sensi-values`): the sensitivity values computed on the
+- **M4 - DONE on the host, device code syntax-checked only (branch `gpu-sensitivity-values`, on `gpu-sensitivity-solves`,
+  PR #34; needs the fork's `calculateSensi` hook, now on `olf-local-patches`): the sensitivity values computed on the
   device; only they come back.**
   - **What crosses PCIe per contingency:** its factors' sensitivities, then two row modes per unit column (the modes the
     device chose its coefficients from, which the host checks): `nFactors + 2 x nUnits` doubles instead of
     `columns x gather rows`. The function references stay OLF's (`calculateSensi` only is hooked).
-  - **Fork hook** (one commit on top of `olf-local-patches`): `AcSensitivityAnalysis.calculateSensi(factor, states, column,
-    contingencyIndex)`, called where `calculateSensitivityValues` read `getFunctionEquationTerm().calculateSensi`.
+  - **Fork hook** (branch `olf-local-patches-sensi-values` of the OLF fork, commit "Let a subclass give a factor's
+    sensitivity in the AC sensitivity analysis", ad530ff3: rebased onto `olf-local-patches` 3d9e6d64 once that moved, then
+    fast-forwarded onto `olf-local-patches` 2026-11-10, so olf-gpu and its CI build against it):
+    `AcSensitivityAnalysis.calculateSensi(factor, states, column, contingencyIndex)`, called where
+    `calculateSensitivityValues` read `getFunctionEquationTerm().calculateSensi`.
     `GpuBatchedAcSensitivityAnalysis` overrides it with the device's value of a contingency it brought, matched by factor
     identity (OLF's valid factors, in order) and contingency index; anything else goes to OLF's.
   - **The coefficients without OLF's equation system:** a group's right-hand side is a combination of its basis columns,

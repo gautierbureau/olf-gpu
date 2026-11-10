@@ -25,9 +25,10 @@ import org.jgrapht.graph.AsWeightedGraph;
 import org.jgrapht.graph.Pseudograph;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +47,7 @@ import java.util.Set;
  * {@code removeBranchAndTryToSplit} on every BOTH_SIDES-disabled zero-impedance branch of the
  * contingency's {@link LfContingency} in its own order, then the {@code NetworkState} restore in branch
  * number order ({@code addBranch} within a network, {@code addBranchAndMerge} across two). Nothing on the
- * {@link LfNetwork} is mutated: the tree flags live in {@link #inTree}, the graphs are copies, and the
+ * {@link LfNetwork} is mutated: the tree flags live in {@link #outOfTree}, the graphs are copies, and the
  * connectivity analysis is wrapped in OLF's own temporary changes.
  *
  * <p>It replaces a map that kept ONE non-tree coupler per network: a network with several independent
@@ -59,27 +60,46 @@ public final class ZeroImpedanceTreeReplay {
 
     private final LfNetwork network;
     private final Map<LfBus, Graph<LfBus, LfBranch>> netOf = new HashMap<>();
-    private final Set<LfBranch> inTree = new HashSet<>();
     private final List<LfBranch> zeroImpedanceBranches;
+    private final int[] positionOfNum;                       // a branch's number -> its position in zeroImpedanceBranches
+    // The positions of the zero-impedance branches out of OLF's tree right now. nonTree() reads it once per contingency:
+    // a set of the branches IN the tree, every zero-impedance branch looked up in it, cost network.xiidm's full list
+    // 4.9 s of its 8 s of planning (38,441 contingencies x about 4,900 couplers).
+    private final BitSet outOfTree;
 
     public ZeroImpedanceTreeReplay(LfNetwork network) {
         this.network = network;
+        this.zeroImpedanceBranches = network.getBranches().stream().filter(b -> b.isZeroImpedance(AC)).toList();
+        this.positionOfNum = new int[network.getBranches().stream().mapToInt(LfBranch::getNum).max().orElse(-1) + 1];
+        Arrays.fill(positionOfNum, -1);
+        for (int p = 0; p < zeroImpedanceBranches.size(); p++) {
+            positionOfNum[zeroImpedanceBranches.get(p).getNum()] = p;
+        }
+        this.outOfTree = new BitSet(zeroImpedanceBranches.size());
+        outOfTree.set(0, zeroImpedanceBranches.size());          // out of the tree until elected or flagged in
         for (LfZeroImpedanceNetwork zn : network.getZeroImpedanceNetworks(AC)) {
             Graph<LfBus, LfBranch> copy = new Pseudograph<>(LfBranch.class);
             Graphs.addGraph(copy, zn.getGraph());           // same vertex and edge iteration order
             register(copy);
         }
-        this.zeroImpedanceBranches = network.getBranches().stream().filter(b -> b.isZeroImpedance(AC)).toList();
         for (LfBranch b : zeroImpedanceBranches) {
             if (b.isSpanningTreeEdge(AC)) {
-                inTree.add(b);
+                setInTree(b, true);
             }
         }
     }
 
     /** The zero-impedance branches out of OLF's tree right now (branch order), the base's included. */
     List<LfBranch> nonTree() {
-        return zeroImpedanceBranches.stream().filter(b -> !inTree.contains(b)).toList();
+        return outOfTree.stream().mapToObj(zeroImpedanceBranches::get).toList();
+    }
+
+    private boolean isInTree(LfBranch b) {
+        return !outOfTree.get(positionOfNum[b.getNum()]);
+    }
+
+    private void setInTree(LfBranch b, boolean in) {
+        outOfTree.set(positionOfNum[b.getNum()], !in);   // an edge of the replay's graphs: a zero-impedance branch
     }
 
     /**
@@ -180,7 +200,7 @@ public final class ZeroImpedanceTreeReplay {
         graph.removeEdge(b);
         List<Set<LfBus>> sets = new ConnectivityInspector<>(graph).connectedSets();
         if (sets.size() > 1) {
-            inTree.remove(b);
+            setInTree(b, false);
             for (Set<LfBus> set : sets) {
                 Set<LfBus> sorted = new LinkedHashSet<>();
                 set.stream().sorted(Comparator.comparing(LfBus::getId)).forEach(sorted::add);
@@ -188,7 +208,8 @@ public final class ZeroImpedanceTreeReplay {
                 Graphs.addGraph(subGraph, new AsSubgraph<>(graph, sorted));
                 register(subGraph);
             }
-        } else if (inTree.remove(b)) {
+        } else if (isInTree(b)) {
+            setInTree(b, false);
             elect(graph);
         }
     }
@@ -207,11 +228,7 @@ public final class ZeroImpedanceTreeReplay {
         Set<LfBranch> tree = new KruskalMinimumSpanningTree<>(new AsWeightedGraph<>(graph, b -> (double) b.getNum(), true, false))
                 .getSpanningTree().getEdges();
         for (LfBranch e : graph.edgeSet()) {
-            if (tree.contains(e)) {
-                inTree.add(e);
-            } else {
-                inTree.remove(e);
-            }
+            setInTree(e, tree.contains(e));
         }
     }
 

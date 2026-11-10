@@ -38,5 +38,8 @@ long long gAnalysesMain = 0;
 long long gAnalysesCompact = 0;
 long gIterativeRefinementExtraSolves = 0;
 long gIterativeRefinementChecks = 0;
+long long gRefinementStartScoreBuckets[REFINEMENT_SCORE_BUCKETS] = {0};
+long long gRefinementLanesAtCorrection[REFINEMENT_TRACKED_CORRECTIONS] = {0};
+long long gRefinementUndone = 0;
 
 std::map<int, std::pair<long long, double>> gAnalysisSites;

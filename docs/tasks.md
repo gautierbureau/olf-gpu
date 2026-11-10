@@ -11,6 +11,14 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #95 — PROPOSAL: the outer loops' device design, within this repository (2026-11-10)
+
+Not started. `docs/outer-loop-device-design-improvements.md`: eight refactorings that need nothing from OLF — kernel
+views in place of 50-parameter signatures, one packed table and one generic install per loop, a state object per loop,
+one loop registry, OLF's rule written once with host tests, one placement function (and no Java copy of it), a
+voltage control's layout derived from flags (in shadow first), one status read-back per check. ReactiveLimits first.
+Independent of the array-form proposal (#94, pull request 50).
+
 ### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to

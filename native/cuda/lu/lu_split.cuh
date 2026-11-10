@@ -4,7 +4,9 @@
 // Long rows split over several warps, in both engines of our batched LU (batchedLuSplitLongRows): a level or step whose
 // rows are few and long leaves most of the GPU idle with one thread per (row, lane), so each row's terms are shared
 // between the warps of a block, each summing a fixed slice for 32 lanes, and the first warp adds the partial sums in
-// warp order - deterministic, whatever the timing.
+// warp order - deterministic, whatever the timing. The same parameter puts the rows of the pivoting engine's supernodes
+// on separate warps in a backward solve level too narrow to fill the GPU (supernodal_lu.cu, backwardLevelRows), which
+// keeps each row's arithmetic as it is.
 #ifndef OLF_GPU_LU_LU_SPLIT_CUH
 #define OLF_GPU_LU_LU_SPLIT_CUH
 

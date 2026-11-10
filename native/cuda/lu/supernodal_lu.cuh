@@ -30,6 +30,7 @@ struct SupernodalLu {
     int width = 0;                                           // lanes of the last factorization
     std::vector<int> levelStart, levelEntryStart, levelPanelStart;
     std::vector<int> forwardLevelLongest;                    // per level: its longest row's L terms (forward solve)
+    std::vector<int> levelLargest;                           // per level: its largest supernode (backward solve)
     size_t residentThreads = 0;                              // threads the device holds resident: what a split may use
     int nFill = 0;
     DeviceBuf dStoredOfA, dFillEntry;                        // A entry -> stored entry; the stored entries without one
@@ -65,6 +66,10 @@ void solveSupernodalSelectedLanes(SupernodalLu& lu, const int* selected, int cou
 
 // The last factorization's clamp counts, per lane of its lane map (synchronizes the stream).
 std::vector<int> readSupernodalClamps(SupernodalLu& lu, cudaStream_t stream);
+
+// Tests: true runs the pivoting engine's one-thread-per-supernode kernels where it would spread a supernode's rows
+// (backward and split forward solve levels) - the forms the others must match bit for bit.
+void setPivotingEngineOneThreadKernelsForTests(bool on);
 
 }  // namespace olfgpu
 

@@ -6,6 +6,7 @@
 #include "jni_common.cuh"
 #include "../solver/batched_lu_solve.cuh"
 #include "../lu/minimum_degree.cuh"
+#include "../lu/supernodal_lu.cuh"
 
 namespace {
 
@@ -27,17 +28,26 @@ std::vector<int> intsOf(JNIEnv* env, jintArray a) {
 // The factorizations our batched LU ran in this process, the lanes of them its pivoting engine factorized again, and
 // the fast-engine orders built with learned pivot delays, the fast-engine steps and levels launched with their long
 // rows split, the pivoting-engine forward levels launched with their long rows split, the lanes sent straight to the
-// pivoting engine, past the fast one, and the lanes the fast engine's triangular solves ran on (tests: a run really
-// used it, and how).
+// pivoting engine, past the fast one, the lanes the fast engine's triangular solves ran on, the pivoting-engine backward
+// levels solved a supernode row per warp, and its split forward levels summed a supernode row per block (tests: a run
+// really used it, and how).
 extern "C" JNIEXPORT jlongArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizationCounts)(JNIEnv* env, jclass) {
-    const jlong counts[7] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
+    const jlong counts[9] = {static_cast<jlong>(gBatchedLuFactorizations), static_cast<jlong>(gBatchedLuPivotedLanes),
                              static_cast<jlong>(gBatchedLuPivotDelayOrders), static_cast<jlong>(gBatchedLuSplitLaunches),
                              static_cast<jlong>(gBatchedLuSupernodalSplitLaunches),
-                             static_cast<jlong>(gBatchedLuRoutedLanes), static_cast<jlong>(gBatchedLuFastLaneSolves)};
-    jlongArray out = env->NewLongArray(7);
-    env->SetLongArrayRegion(out, 0, 7, counts);
+                             static_cast<jlong>(gBatchedLuRoutedLanes), static_cast<jlong>(gBatchedLuFastLaneSolves),
+                             static_cast<jlong>(gBatchedLuSupernodalRowLaunches),
+                             static_cast<jlong>(gBatchedLuSupernodalForwardRowLaunches)};
+    jlongArray out = env->NewLongArray(9);
+    env->SetLongArrayRegion(out, 0, 9, counts);
     return out;
+}
+
+// Tests: the pivoting engine's one-thread-per-supernode solve kernels (setPivotingEngineOneThreadKernelsForTests).
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, setPivotingEngineOneThreadKernelsForTests)(JNIEnv*, jclass, jboolean on) {
+    setPivotingEngineOneThreadKernelsForTests(on == JNI_TRUE);
 }
 
 // The fast engine's plan: {LU entries, contributions, factorization steps, forward levels, backward levels}

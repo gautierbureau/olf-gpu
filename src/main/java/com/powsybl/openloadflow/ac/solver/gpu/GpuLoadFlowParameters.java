@@ -72,7 +72,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
         new Parameter(BATCHED_LU_ORDERING_PARAM_NAME, ParameterType.STRING, "Elimination order of the batched LU",
             BATCHED_LU_ORDERING_DEFAULT_VALUE.name(), names(GpuBatchedLuOrdering.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(BATCHED_LU_SPLIT_LONG_ROWS_PARAM_NAME, ParameterType.BOOLEAN,
-            "Batched LU rows with long term runs summed by several warps when the GPU has threads to spare",
+            "Batched LU narrow levels spread over several warps: long rows' terms, pivoting-engine backward supernode rows",
             BATCHED_LU_SPLIT_LONG_ROWS_DEFAULT_VALUE, ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(MATCHING_ALGORITHM_PARAM_NAME, ParameterType.STRING, "cuDSS matching algorithm (robust single-matrix solve)",
             MATCHING_ALGORITHM_DEFAULT_VALUE.name(), names(GpuMatchingAlgorithm.values()), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),

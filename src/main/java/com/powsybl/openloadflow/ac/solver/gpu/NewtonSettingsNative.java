@@ -75,7 +75,8 @@ public final class NewtonSettingsNative {
 
     /** The run's linear-solver settings (GpuLoadFlowParameters.install): -1 reorder / pivot type = AUTO, NaN threshold =
      *  cuDSS's own, batchedLuOrdering a GpuBatchedLuOrdering's native code, batchedLuSplitLongRows whether the batched
-     *  LU may sum a long row with several warps. Read by every context built afterwards and by every solve's iterative
+     *  LU may spread a narrow level over several warps (a long row's terms, the pivoting engine's backward supernode
+     *  rows). Read by every context built afterwards and by every solve's iterative
      *  refinement. */
     public static native void setLinearSolverSettings(int reorder, int matching, int pivotType, double pivotThreshold,
                                                       int iterativeRefinementBaseSteps, int iterativeRefinementMaxSteps, double iterativeRefinementTolerance,

@@ -19,7 +19,7 @@ void initInterleavedMismatch(int n, BatchLayout layout, const double* target, do
                              double* qbuf, cudaStream_t stream);
 
 // The scenario-major copy of an interleaved array of n entries per scenario: every scenario's, or the active ones'
-// when active is set.
+// when active is set (the others are neither read nor written).
 void copyToScenarioMajor(int n, BatchLayout layout, const double* from, double* to, const char* active,
                          cudaStream_t stream);
 

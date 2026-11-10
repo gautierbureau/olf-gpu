@@ -15,6 +15,10 @@
 #                      OLF's own hand-written Jacobian, the rendered kernels ==
 #                      the committed ones, and the scatter stamps == the real
 #                      equation-system wiring.
+#                      For a RULE family (an outer loop's decisions): parse ==
+#                      golden, render == committed, and the committed header
+#                      compiled for the host (g++, no GPU) gives the Java's
+#                      result on every reference vector OLF's own test keeps.
 #
 # This is the ONLY place python touches the project; the normal Maven build and
 # every contributor stay python-free.
@@ -24,10 +28,14 @@ on:
   push:
   pull_request:
 
-# The OLF Java the kernels are generated from: the powsybl-open-loadflow branch the extension builds on (maven.yml),
-# checked out next to the sources at OLF_SRC.
+# The OLF Java the kernels are generated from, checked out next to the sources at OLF_SRC. It is normally the
+# powsybl-open-loadflow branch the extension builds on (maven.yml: olf-local-patches).
+# TEMPORARY: OLF_REF is the reactive limits pilot's branch, olf-local-patches plus ReactiveLimitsDecisions and its
+# reference vectors, which the reactive_limits_decisions rule family is generated from and proven against. Put
+# olf-local-patches back once those commits are on it — and not before: the family's Java is not there yet.
 env:
   OLF_SRC: ${{ github.workspace }}/deps/powsybl-open-loadflow
+  OLF_REF: claude/hopeful-edison-8lqr3p
 
 jobs:
   render-up-to-date:
@@ -38,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: gautierbureau/powsybl-open-loadflow
-          ref: olf-local-patches
+          ref: ${{ env.OLF_REF }}
           path: deps/powsybl-open-loadflow
 
       - uses: actions/setup-python@v5
@@ -71,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: gautierbureau/powsybl-open-loadflow
-          ref: olf-local-patches
+          ref: ${{ env.OLF_REF }}
           path: deps/powsybl-open-loadflow
 
       - uses: actions/setup-python@v5

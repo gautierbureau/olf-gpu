@@ -1,0 +1,283 @@
+{
+  "java_class": "ReactiveLimitsDecisions",
+  "constants": [
+    [
+      "DECISION_NONE",
+      0
+    ],
+    [
+      "DECISION_TO_PQ_MIN_Q",
+      1
+    ],
+    [
+      "DECISION_TO_PQ_MAX_Q",
+      2
+    ],
+    [
+      "DECISION_TO_PQ_MIN_REALISTIC_V",
+      3
+    ],
+    [
+      "DECISION_TO_PQ_MAX_REALISTIC_V",
+      4
+    ],
+    [
+      "DECISION_TO_PV",
+      5
+    ],
+    [
+      "DECISION_REFREEZE_AT_LIMIT",
+      6
+    ],
+    [
+      "DECISION_TO_PV_BLOCKED",
+      7
+    ],
+    [
+      "DECISION_KEPT_PV",
+      8
+    ],
+    [
+      "LIMIT_NONE",
+      0
+    ],
+    [
+      "LIMIT_MIN_Q",
+      1
+    ],
+    [
+      "LIMIT_MAX_Q",
+      2
+    ],
+    [
+      "LIMIT_MIN_REALISTIC_V",
+      3
+    ],
+    [
+      "LIMIT_MAX_REALISTIC_V",
+      4
+    ]
+  ],
+  "methods": [
+    {
+      "name": "pvBusDecision",
+      "returns": "int",
+      "params": [
+        [
+          "double",
+          "q"
+        ],
+        [
+          "double",
+          "minQ"
+        ],
+        [
+          "double",
+          "maxQ"
+        ],
+        [
+          "double",
+          "tol"
+        ],
+        [
+          "boolean",
+          "robustRemote"
+        ],
+        [
+          "double",
+          "v"
+        ],
+        [
+          "double",
+          "vLow"
+        ],
+        [
+          "double",
+          "vHigh"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "q < minQ - tol ? DECISION_TO_PQ_MIN_Q : q > maxQ + tol ? DECISION_TO_PQ_MAX_Q : robustRemote && v < vLow ? DECISION_TO_PQ_MIN_REALISTIC_V : robustRemote && v > vHigh ? DECISION_TO_PQ_MAX_REALISTIC_V : DECISION_NONE"
+        ]
+      ]
+    },
+    {
+      "name": "resetsV",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "decision"
+        ],
+        [
+          "boolean",
+          "robustRemote"
+        ],
+        [
+          "double",
+          "v"
+        ],
+        [
+          "double",
+          "vLow"
+        ],
+        [
+          "double",
+          "vHigh"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "decision != DECISION_NONE && robustRemote && (v < vLow || v > vHigh)"
+        ]
+      ]
+    },
+    {
+      "name": "frozenQ",
+      "returns": "double",
+      "params": [
+        [
+          "int",
+          "decision"
+        ],
+        [
+          "double",
+          "minQ"
+        ],
+        [
+          "double",
+          "maxQ"
+        ],
+        [
+          "double",
+          "initialTargetQ"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "decision == DECISION_TO_PQ_MIN_Q ? minQ : decision == DECISION_TO_PQ_MAX_Q ? maxQ : initialTargetQ"
+        ]
+      ]
+    },
+    {
+      "name": "isMinLimit",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "qLimitType"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "qLimitType == LIMIT_MIN_Q || qLimitType == LIMIT_MIN_REALISTIC_V"
+        ]
+      ]
+    },
+    {
+      "name": "pqBusDecision",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "qLimitType"
+        ],
+        [
+          "double",
+          "controlledV"
+        ],
+        [
+          "double",
+          "targetV"
+        ],
+        [
+          "boolean",
+          "canSwitchToPv"
+        ],
+        [
+          "double",
+          "minQ"
+        ],
+        [
+          "double",
+          "maxQ"
+        ],
+        [
+          "double",
+          "frozenTargetQ"
+        ],
+        [
+          "double",
+          "tol"
+        ]
+      ],
+      "statements": [
+        [
+          "local",
+          "boolean",
+          "atMin",
+          "isMinLimit(qLimitType)"
+        ],
+        [
+          "local",
+          "boolean",
+          "wantsBack",
+          "atMin ? controlledV < targetV : controlledV > targetV"
+        ],
+        [
+          "local",
+          "double",
+          "limit",
+          "atMin ? minQ : maxQ"
+        ],
+        [
+          "local",
+          "boolean",
+          "limitMoved",
+          "(qLimitType == LIMIT_MIN_Q || qLimitType == LIMIT_MAX_Q) && fabs(limit - frozenTargetQ) > tol"
+        ],
+        [
+          "return",
+          "wantsBack && canSwitchToPv ? DECISION_TO_PV : limitMoved ? DECISION_REFREEZE_AT_LIMIT : DECISION_NONE"
+        ]
+      ]
+    },
+    {
+      "name": "isSwitchToPq",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "decision"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "decision >= DECISION_TO_PQ_MIN_Q && decision <= DECISION_TO_PQ_MAX_REALISTIC_V"
+        ]
+      ]
+    },
+    {
+      "name": "limitTypeOf",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "switchToPqDecision"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "switchToPqDecision"
+        ]
+      ]
+    }
+  ]
+}

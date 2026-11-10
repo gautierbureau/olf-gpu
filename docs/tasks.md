@@ -11,6 +11,22 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #96 — reactive limits decisions generated from OLF's Java: pilot stage 2 (2026-11-10)
+
+The array-form proposal (#94, pull request 50), stage 2. OLF's fork branch `claude/hopeful-edison-8lqr3p` (two commits
+over `olf-local-patches`) holds `ReactiveLimitsDecisions` — the rules of ReactiveLimitsOuterLoop as functions of
+numbers — and reference vectors of them (2,644 calls with the Java's result). Here, a new java2cuda shape, the RULE
+family (`codegen/java2cuda/rules.py`), transpiles its seven expression functions and fourteen constants into
+`native/cuda/outerloop/generated/reactive_limits_decisions.cuh`, statement for statement, and proves them: parse ==
+golden, render == committed, and the committed header compiled for the host gives the Java's result on every vector,
+bit for bit. No GPU involved; four mutations of the header are caught.
+
+**Not done, in order:**
+- **Before merging:** the two OLF commits must reach `olf-local-patches`, then `OLF_REF` in `codegen-check.yml` goes
+  back to it. Until then a codegen run needs `OLF_SRC` on the pilot branch.
+- **Stage 3:** `reactiveLimitsBatch` still has its comparisons inline, twice. Calling the generated functions from it
+  needs the device (GPU suite, decision records identical on rte6515 and network.xiidm) — not attempted here.
+
 ### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to

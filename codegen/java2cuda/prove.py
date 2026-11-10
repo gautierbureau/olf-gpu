@@ -360,8 +360,11 @@ def main():
         check_dropin(mod, rendered)
         check_rendered_vs_golden(mod, rendered, out, golden_eval)
         check_signature_lock(mod, rendered, golden)
+    for mod in java2cuda.RULE_MODULES:
+        java2cuda.rules.prove_family(mod)
     print("PROVEN — every Java-parsed fused kernel equals its golden manifest and the committed "
-          "residual-pipeline kernel; OLF's hand Jacobians survive the FD audit.")
+          "residual-pipeline kernel; OLF's hand Jacobians survive the FD audit; every rule function "
+          "equals its golden manifest, its committed header and the Java on OLF's reference vectors.")
 
 
 if __name__ == "__main__":

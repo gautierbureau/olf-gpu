@@ -50,11 +50,16 @@ import spec_shunt  # noqa: E402
 import spec_hvdc_ac_emulation  # noqa: E402
 import spec_closed_branch_current_magnitude  # noqa: E402
 import spec_load_model  # noqa: E402
+import rules  # noqa: E402  (the rule families: an outer loop's decisions)
+import spec_reactive_limits_decisions  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
            spec_shunt.MODULE, spec_hvdc_ac_emulation.MODULE,
            spec_closed_branch_current_magnitude.MODULE,
            spec_load_model.MODULE]
+
+# RULE families (rules.py): the decisions of an outer loop, typed functions kept statement for statement.
+RULE_MODULES = [spec_reactive_limits_decisions.MODULE]
 
 # Math calls a flattened body may legitimately keep (extract_golden strips the
 # Math./FastMath. prefix); anything else left as a call is an unresolved helper.
@@ -540,6 +545,11 @@ def main():
             _write(mod["scatter_path"],
                    json.dumps(scatter_descriptor(mod, out), indent=2, ensure_ascii=False))
             _write(mod["scatter_header_path"], render_scatter_header(mod, out))
+    for mod in RULE_MODULES:
+        parsed = rules.parse(mod)
+        print(f"{mod['family']}: parsed {len(parsed['methods'])} rule functions + {len(parsed['constants'])} "
+              "constants, straight from the OLF Java")
+        _write(mod["cuda_path"], rules.render(mod, parsed))
 
 
 if __name__ == "__main__":

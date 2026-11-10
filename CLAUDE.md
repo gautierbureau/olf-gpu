@@ -40,6 +40,12 @@ scatter) + closed_branch_current_magnitude (current magnitude, read by the curre
 per-method functions and calculateSensi's private components, no assembler
 routine; outerloop/flow_observation.cuh mirrors calculateSensi line for line).
 
+RULE family (`codegen/java2cuda/rules.py`, a second shape): reactive_limits_decisions — the decisions of
+ReactiveLimitsOuterLoop, from OLF's `ReactiveLimitsDecisions` (typed functions kept statement for statement, into
+`native/cuda/outerloop/generated/`; proven against the reference vectors OLF's own test keeps, compiled for the host).
+NO kernel calls them yet. The class is on the OLF fork's pilot branch `claude/hopeful-edison-8lqr3p`, NOT yet on
+`olf-local-patches`: `OLF_SRC` must point at that branch for the codegen, and `codegen-check.yml` checks it out.
+
 Parser mechanisms (all general, no special cases): local-decl + recursive
 helper/sibling inlining, per-file helper scope (defining file wins — HVDC's two
 isController, open-i's two gres/bres), alpha-equivalent cross-file dedup
@@ -65,8 +71,8 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 
 ## Conventions & gotchas
 
-- **Never hand-edit** `native/cuda/equations/generated/*` / `codegen/scatter/*.scatter.json` — they are generated
-  from the Java (CI flags any diff).
+- **Never hand-edit** `native/cuda/equations/generated/*` / `native/cuda/outerloop/generated/*` /
+  `codegen/scatter/*.scatter.json` — they are generated from the Java (CI flags any diff).
 - Diagnostics read the environment only through the trace channels: `util.gpu.GpuTrace` (Java) and
   `native/cuda/common/trace.cuh` (native), each read once. A new trace is a new channel there plus its row in
   `docs/env-vars.md`, never a direct `getenv`; and a channel only prints, it never changes a result.

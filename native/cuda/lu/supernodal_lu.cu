@@ -586,7 +586,7 @@ __global__ void forwardLevelSplit(int width, int capacity, const int* __restrict
 
 // forwardLevelSplit with a supernode's rows on separate blocks: block (supernode, row, 32 lanes) sums its row's L terms
 // as forwardLevelSplit does - the same slices, the partial sums added in warp order - and leaves the row's value in z,
-// then forwardLevelLower does the supernode's row order and L^-1. The same arithmetic, bit for bit, without the rows of a
+// then forwardLevelLowerRows does the supernode's row order and L^-1. The same arithmetic, bit for bit, without the rows of a
 // supernode (up to LU_MAX_SUPERNODE of them near the root, each holding every descendant's L run) waiting on each other.
 __global__ void forwardLevelSplitRows(int width, int capacity, int largest, const int* __restrict__ selected,
                                       const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
@@ -634,36 +634,41 @@ __global__ void forwardLevelSplitRows(int width, int capacity, int largest, cons
     }
 }
 
-// The end of a forward level whose rows forwardLevelSplitRows summed: every (supernode, lane) takes its rows' values
-// from z, then its row order and L^-1, as forwardLevel and forwardLevelSplit do.
-__global__ void forwardLevelLower(int nItems, int width, int capacity, const int* __restrict__ selected,
-                                  const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
-                                  const int* __restrict__ diagonalBase, const unsigned char* __restrict__ rowPermutation,
-                                  const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
-        return;
-    }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
+// The end of a forward level forwardLevelSplitRows summed: the supernode's row order and L^-1, as forwardLevelSplit ends,
+// its rows on separate warps. Block (supernode, 32 lanes), warp k holds row k's value; at step q row q's value is final
+// and every row below it takes its term. Each row sums its terms in forwardLevelSplit's order, so the result is the
+// same, bit for bit, without the rows of a 16-row supernode waiting on one thread.
+__global__ void forwardLevelLowerRows(int width, int capacity, const int* __restrict__ selected,
+                                      const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
+                                      const int* __restrict__ diagonalBase,
+                                      const unsigned char* __restrict__ rowPermutation, const double* __restrict__ lu,
+                                      double* __restrict__ z) {
+    extern __shared__ double solved[];                       // [row][lane of the block]: the rows done
+    const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
+    const int t = blockIdx.x / tiles;
+    const int slot = (blockIdx.x - t * tiles) * SPLIT_LANES + threadIdx.x;
+    const bool active = slot < width;
+    const int a = active ? laneOf(slot, selected) : 0;
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
-    double v[B];
-    for (int r = 0; r < b; r++) {
-        v[r] = z[static_cast<size_t>(f + r) * capacity + a];
+    const int k = threadIdx.y;
+    double x = 0.0;
+    if (active && k < b) {                                   // read before any row of the supernode is written back
+        x = z[static_cast<size_t>(f + rowPermutation[static_cast<size_t>(f + k) * capacity + a]) * capacity + a];
     }
     const double* d = lu + static_cast<size_t>(diagonalBase[s]) * capacity + a;
-    double w[B];
-    for (int k = 0; k < b; k++) {
-        double x = v[rowPermutation[static_cast<size_t>(f + k) * capacity + a]];
-        for (int q = 0; q < k; q++) {
-            x = fma(-d[static_cast<size_t>(k * b + q) * capacity], w[q], x);
+    for (int q = 0; q < b; q++) {
+        if (active && k == q) {
+            solved[q * SPLIT_LANES + threadIdx.x] = x;
         }
-        w[k] = x;
+        __syncthreads();
+        if (active && k > q && k < b) {
+            x = fma(-d[static_cast<size_t>(k * b + q) * capacity], solved[q * SPLIT_LANES + threadIdx.x], x);
+        }
     }
-    for (int k = 0; k < b; k++) {
-        z[static_cast<size_t>(f + k) * capacity + a] = w[k];
+    if (active && k < b) {
+        z[static_cast<size_t>(f + k) * capacity + a] = x;
     }
 }
 
@@ -788,10 +793,11 @@ void solveSupernodal(SupernodalLu& lu, const int* selected, int width, const dou
                     lu.dLevelSupernode.as<int>() + lu.levelStart[l], lu.dSupernodeStart.as<int>(),
                     lu.dForwardRunStart.as<int>(), lu.dForwardRunLower.as<int>(), lu.dForwardRunY.as<int>(),
                     lu.dForwardRunLength.as<int>(), lu.dLu.as<double>(), lu.dWork.as<double>());
-            forwardLevelLower<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes,
-                    width, lu.capacity, selected, lu.dLevelSupernode.as<int>() + lu.levelStart[l],
-                    lu.dSupernodeStart.as<int>(), lu.dDiagonalBase.as<int>(), lu.dRowPermutation.as<unsigned char>(),
-                    lu.dLu.as<double>(), lu.dWork.as<double>());
+            forwardLevelLowerRows<<<static_cast<unsigned int>(supernodes) * tiles, dim3(SPLIT_LANES, largest),
+                                    largest * SPLIT_LANES * sizeof(double), stream>>>(width, lu.capacity, selected,
+                    lu.dLevelSupernode.as<int>() + lu.levelStart[l], lu.dSupernodeStart.as<int>(),
+                    lu.dDiagonalBase.as<int>(), lu.dRowPermutation.as<unsigned char>(), lu.dLu.as<double>(),
+                    lu.dWork.as<double>());
             continue;
         }
         if (slices > 1) {

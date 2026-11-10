@@ -899,6 +899,184 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * The pivoting engine spreads a supernode's rows where a level leaves the GPU threads to spare - over warps in a
+     * backward level, over blocks in a split forward level: each form solves as the one-thread-per-supernode kernels do,
+     * bit for bit, on all 37 lanes and on 5 selected ones (setPivotingEngineOneThreadKernelsForTests). Three systems:
+     * <ul>
+     * <li>40 units of two dense 3-row blocks and 2 border rows joined to both (each block a supernode with the border rows
+     * in its U panel) and a dense block of 16 rows on its own: narrow backward levels, no forward split;</li>
+     * <li>the hub and chain of pivotingEngineSplitsItsLongForwardRows: the hub row's 299 L terms, a split forward level;</li>
+     * <li>a 4-row supernode with a 2-row U panel (it and a 2-row block are the children of the last 2 rows): an identity
+     * row (empty panel) after a row of a single nonzero whose panel is not empty, and 100 in the identity row's column
+     * on another row - complete pivoting would take it first.
+     * The singleton pivot keeps the identity row's value at its right-hand side to the last bit.</li>
+     * </ul>
+     * Every lane goes to the pivoting engine (zero diagonals). Checked to fail with a row's last U panel term left out of
+     * backwardLevelRows and with forwardLevelSplitRows' partial sums added from the last warp.
+     */
+    @Test
+    void pivotingEngineSpreadKernelsSolveAsTheirOneThreadForms() {
+        int capacity = 37;
+        int[] chosen = {capacity - 1, 0, 33, 5, 31};
+        Random random = new Random(81);
+        // narrow backward levels
+        int units = 40;
+        int n = units * 8 + 16;
+        boolean[][] pattern = new boolean[n][n];
+        for (int u = 0; u < units; u++) {
+            int first = u * 8;
+            for (int i = first; i < first + 8; i++) {
+                for (int j = first; j < first + 8; j++) {
+                    boolean blockA = i < first + 3 && j < first + 3;
+                    boolean blockB = i >= first + 3 && i < first + 6 && j >= first + 3 && j < first + 6;
+                    pattern[i][j] = blockA || blockB || i >= first + 6 || j >= first + 6;
+                }
+            }
+        }
+        for (int i = units * 8; i < n; i++) {
+            Arrays.fill(pattern[i], units * 8, n, true);
+        }
+        Csr units8 = toCsr(pattern);
+        double[] unitValues = withZeroDiagonalCorner(units8, diagonallyDominantValues(units8, capacity, 71), capacity, 3, 2);
+        long[] counts = assertSpreadSolvesAsOneThread(units8, unitValues, capacity, chosen, random);
+        assertTrue(counts[7] > 0, "backward levels solved a row per warp: " + counts[7]);
+        assertEquals(0, counts[4], "no forward level is split");
+        // a split forward level
+        int hubN = 300;
+        boolean[][] hub = new boolean[hubN][hubN];
+        for (int i = 0; i < hubN; i++) {
+            hub[i][i] = true;
+            hub[i][hubN - 1] = true;
+            hub[hubN - 1][i] = true;
+            if (i + 1 < hubN) {
+                hub[i][i + 1] = true;
+                hub[i + 1][i] = true;
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            Arrays.fill(hub[i], 0, 4, true);
+        }
+        Csr hubCsr = toCsr(hub);
+        double[] hubValues = withZeroDiagonalCorner(hubCsr, diagonallyDominantValues(hubCsr, capacity, 61), capacity, 4, 3);
+        counts = assertSpreadSolvesAsOneThread(hubCsr, hubValues, capacity, chosen, random);
+        assertTrue(counts[8] > 0, "split forward levels summed a row per block: " + counts[8]);
+        // a singleton row in a supernode with a U panel: block A (rows 0-3) and block B (rows 4-5) are the two children
+        // of rows 6-7, so A is a supernode of its own with rows 6-7 in its U panel; NaN: no entry
+        double x = Double.NaN;
+        double[][] m = {
+            {3, 0, 0, 0, x, x, 1, 0},
+            {0, 1, 0, 0, x, x, 0, 0},
+            {2, 100, 0, 1, x, x, 0, 1},
+            {1, 5, 2, 40, x, x, 2, 0},
+            {x, x, x, x, 10, 1, 1, 0},
+            {x, x, x, x, 1, 10, 0, 1},
+            {1, 0, 0, 1, 1, 0, 10, 1},
+            {0, 0, 1, 0, 0, 1, 1, 10}};
+        boolean[][] singleton = new boolean[8][8];
+        for (int i = 0; i < 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                singleton[i][j] = !Double.isNaN(m[i][j]);
+            }
+        }
+        Csr singletonCsr = toCsr(singleton);
+        double[] singletonValues = new double[capacity * singletonCsr.nnz()];
+        for (int sc = 0; sc < capacity; sc++) {
+            for (int i = 0; i < 8; i++) {
+                for (int k = singletonCsr.rowPtr()[i]; k < singletonCsr.rowPtr()[i + 1]; k++) {
+                    int j = singletonCsr.colIdx()[k];
+                    singletonValues[sc * singletonCsr.nnz() + k] = i == 1 && j == 1 ? 1.0 : m[i][j] * (1 + sc / 64.0);
+                }
+            }
+        }
+        double[] singletonRightHandSides = new double[capacity * 8];
+        for (int k = 0; k < singletonRightHandSides.length; k++) {
+            singletonRightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        double[][] solved = new double[2][];
+        counts = assertSpreadSolvesAsOneThread(singletonCsr, singletonValues, capacity, chosen, singletonRightHandSides, solved);
+        assertTrue(counts[7] > 0, "backward levels solved a row per warp: " + counts[7]);
+        for (int s = 0; s < capacity; s++) {
+            assertEquals(singletonRightHandSides[s * 8 + 1], solved[0][s * 8 + 1], 0.0, "identity row of scenario " + s);
+        }
+    }
+
+    /** values with, on every lane, the first `size` rows' block made of zero diagonals (the first `zeros` rows) and
+     *  strong couplings: every lane goes to the pivoting engine. */
+    private static double[] withZeroDiagonalCorner(Csr csr, double[] values, int capacity, int size, int zeros) {
+        Random corner = new Random(63);
+        for (int s = 0; s < capacity; s++) {
+            for (int i = 0; i < size; i++) {
+                for (int k = csr.rowPtr()[i]; k < csr.rowPtr()[i + 1]; k++) {
+                    int j = csr.colIdx()[k];
+                    if (j < size) {
+                        values[s * csr.nnz() + k] = j == i && i < zeros ? 0.0 : 20 + 5 * corner.nextDouble();
+                    }
+                }
+            }
+        }
+        return values;
+    }
+
+    private static long[] assertSpreadSolvesAsOneThread(Csr csr, double[] values, int capacity, int[] chosen, Random random) {
+        double[] rightHandSides = new double[capacity * csr.n()];
+        for (int k = 0; k < rightHandSides.length; k++) {
+            rightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        return assertSpreadSolvesAsOneThread(csr, values, capacity, chosen, rightHandSides, new double[2][]);
+    }
+
+    /** Solves every lane and the chosen ones with the pivoting engine's spread kernels and with their one-thread forms:
+     *  every lane pivots, the solutions are the dense solve's to rounding and equal bit for bit between the two forms
+     *  (solved: the whole batch's solutions of each, spread first). Returns the counts the spread solve moved; the
+     *  one-thread solve must move neither of the two it replaces. */
+    private static long[] assertSpreadSolvesAsOneThread(Csr csr, double[] values, int capacity, int[] chosen,
+                                                        double[] rightHandSides, double[][] solved) {
+        int n = csr.n();
+        int[] all = new int[capacity];
+        Arrays.fill(all, 1);
+        double[][] whole = new double[2][];
+        double[][] selected = new double[2][];
+        long[] spreadCounts = null;
+        try {
+            for (int form = 0; form < 2; form++) {
+                BatchedLuNative.setPivotingEngineOneThreadKernelsForTests(form == 1);
+                long[] before = BatchedLuNative.factorizationCounts();
+                whole[form] = filled(capacity * n, 7);
+                int[] pivoted = new int[capacity];
+                int[] clamps = new int[capacity];
+                BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity,
+                        values, rightHandSides, identity(capacity), whole[form], pivoted, clamps);
+                assertArrayEquals(all, pivoted, "every lane goes to the pivoting engine");
+                assertArrayEquals(new int[capacity], clamps);
+                selected[form] = filled(capacity * n, 7);
+                BatchedLuNative.factorizeAndSolveSelected(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n),
+                        capacity, values, rightHandSides, identity(capacity), chosen, selected[form]);
+                long[] after = BatchedLuNative.factorizationCounts();
+                long[] moved = new long[after.length];
+                for (int k = 0; k < after.length; k++) {
+                    moved[k] = after[k] - before[k];
+                }
+                if (form == 0) {
+                    spreadCounts = moved;
+                } else {
+                    assertEquals(0, moved[7] + moved[8], "the one-thread forms spread nothing");
+                }
+                for (int s = 0; s < capacity; s++) {
+                    double[] reference = denseSolve(dense(csr, values, s), scenario(rightHandSides, s, n));
+                    assertArrayEquals(reference, scenario(whole[form], s, n), 1e-12, "form " + form + " scenario " + s);
+                }
+            }
+        } finally {
+            BatchedLuNative.setPivotingEngineOneThreadKernelsForTests(false);
+        }
+        assertArrayEquals(whole[1], whole[0], "every lane: spread as one thread, bit for bit");
+        assertArrayEquals(selected[1], selected[0], "the selected lanes: spread as one thread, bit for bit");
+        solved[0] = whole[0];
+        solved[1] = whole[1];
+        return spreadCounts;
+    }
+
+    /**
      * The minimum-degree elimination order (GpuBatchedLuOrdering.MINIMUM_DEGREE) on a hub joined to four leaves: three
      * leaves, then the hub and the last leaf tied at one neighbour each (the lower index first), an elimination tree
      * three levels deep; eliminated first, the hub makes its leaves a clique and a chain of five levels. Our fast

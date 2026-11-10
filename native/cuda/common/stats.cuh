@@ -44,6 +44,8 @@ extern long long gBatchedLuPivotedLanes;                     // ...and the lanes
 extern long long gBatchedLuPivotDelayOrders;                 // fast-engine orders built with learned pivot delays
 extern long long gBatchedLuSplitLaunches;                    // fast-engine steps and levels launched with their long rows split
 extern long long gBatchedLuSupernodalSplitLaunches;          // pivoting-engine forward levels with long rows split
+extern long long gBatchedLuSupernodalRowLaunches;            // pivoting-engine backward levels solved a row per warp
+extern long long gBatchedLuSupernodalForwardRowLaunches;     // pivoting-engine split forward levels summed a row per block
 extern long long gBatchedLuRoutedLanes;                      // lanes sent straight to the pivoting engine, past the fast one
 extern long long gBatchedLuFastLaneSolves;                   // lanes the fast engine's triangular solves ran on
 // Factorizations by kind (the compacted ones are gCompactIters): full-width uniform-batch Newton iterations, robust ones

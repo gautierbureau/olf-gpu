@@ -142,10 +142,10 @@ void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closed
             size_t o = static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on mode 0, corrupts that identity.
+                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
                     relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;
@@ -196,7 +196,7 @@ void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closed
             if (s.role == 1 && rc.col >= 0) {
                 alternateDestination[o] = pos.at(alternateRow, rc.col);
                 selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);   // suppressed frozen dest (remote member):
-            } else if (s.role == 0) {                        // select on the ALT row itself (mode 4)
+            } else if (s.role == 0) {                        // select on the ALT row itself (BUS_TARGET_Q)
                 alternateDestination[o] = -2 - alternateRow;
                 selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);
             }
@@ -273,10 +273,10 @@ void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const 
             size_t o = static_cast<size_t>(e) * SHUNT_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on mode 0, corrupts that identity.
+                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
                     relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;
@@ -385,7 +385,7 @@ void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* 
 
 // Open-branch analogue of shuntAlternateRow / collectShuntRelocationPattern / buildShuntRelocationDestination: the ALTERNATE Q row
 // of each side's bus travels in a SEPARATE openBranchAlternateReactiveDestination array (nOpenBranch*2) rather than inside openBranchIndices —
-// the connected side's half-open charging q follows the mode-4 row of a remote member switched to PQ or a
+// the connected side's half-open charging q follows the BUS_TARGET_Q row of a remote member switched to PQ or a
 // relocation group's carrier exactly like its closed-branch terms.
 inline int openBranchAlternateRow(const OpenBranchScatter& s, const int* alternateQRows, int e) {
     return s.rowEq == 1 ? alternateQRows[e * 2 + s.rowEnd] : -1;
@@ -451,10 +451,10 @@ void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranch
             size_t o = static_cast<size_t>(e) * OPEN_BRANCH_OUTPUT_COUNT + k;
             if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
                 // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
                 // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
                 // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on mode 0, corrupts that identity.
+                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
                     relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;

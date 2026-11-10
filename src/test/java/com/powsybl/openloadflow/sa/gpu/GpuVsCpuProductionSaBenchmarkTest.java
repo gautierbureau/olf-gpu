@@ -72,7 +72,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         assumeTrue(System.getenv("OLF_GPU_CONT_FILE") != null, "OLF_GPU_CONT_FILE not set");
         // Env-to-property plumbing (env is inherited by the surefire fork). Only override when the
-        // env var IS set: a bare run must measure the PRODUCTION defaults (mode 3 UBATCH, memory
+        // env var IS set: a bare run must measure the PRODUCTION defaults (UBATCH, memory
         // auto-sized chunk) — the old hardcoded 0/32 fallbacks made it read ~2x slower than what
         // any real provider user gets.
         if (System.getenv("OLF_GPU_MAXBATCH") != null) {

@@ -306,7 +306,7 @@ final class InjectionOutagePlanner {
                         // Is the bus we are about to give a VOLTAGE IDENTITY already SWITCHED TO PQ at its
                         // reactive limit? Such a bus cannot hold its voltage — OLF has it as PQ —
                         // and the RL kernel's "limit drift while switched to PQ" branch writes only the
-                        // TARGET, leaving the host's mode 0 in place, so the identity then holds v
+                        // TARGET, leaving the host's FIXED_VARIABLE in place, so the identity then holds v
                         // at a reactive value.
                         byte baseLt = gpuData.reactiveLimits().baseQLimitType() != null && reMergedReactiveLimitEntry >= 0
                                 ? gpuData.reactiveLimits().baseQLimitType()[reMergedReactiveLimitEntry] : (byte) -1;
@@ -316,9 +316,9 @@ final class InjectionOutagePlanner {
                     }
                     // A bus SWITCHED TO PQ at its reactive limit cannot also hold its voltage: OLF has it
                     // as PQ, and giving it a V identity here is a state the device cannot represent.
-                    // The RL kernel then never takes the switch path that would set mode 4 — the
+                    // The RL kernel then never takes the switch path that would set BUS_TARGET_Q — the
                     // entry is already PQ, so it takes the "limit drift while switched to PQ" branch,
-                    // which writes only the TARGET. The host's mode 0 stays, and a mode-0 identity
+                    // which writes only the TARGET. The host's FIXED_VARIABLE stays, and a FIXED_VARIABLE identity
                     // means x = target, so the bus's VOLTAGE becomes its reactive limit. Measured on
                     // rte6515 BUS-6194_BBS_2: VL-6194_2 re-merged to a 1.123 pu identity with
                     // baseLimitType=2, row 12938 uploaded at 1.123 and ended at 0.6251 (= maxQ −

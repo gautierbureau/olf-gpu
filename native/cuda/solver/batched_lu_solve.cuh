@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// The linear solves of a mode-7 context on our batched LU (lu/batched_lu.cuh): the Newton step of the scenarios
+// The linear solves of a BATCHED_LU context on our batched LU (lu/batched_lu.cuh): the Newton step of the scenarios
 // still iterating, and the sensitivity solves of the outer loops.
 #ifndef OLF_GPU_SOLVER_BATCHED_LU_SOLVE_CUH
 #define OLF_GPU_SOLVER_BATCHED_LU_SOLVE_CUH
@@ -18,7 +18,7 @@ struct BatchedLu;
 // nS systems on our LU's last factorization, as the Newton step solves and refines them: their CSR pattern and values
 // (nnz each, laid out by layout), whether the structure has zero-impedance couplers (the refinement runs on those only),
 // the solved lanes' mask, the stream, and the scratch of n x nS each (the refinement's residual and correction, the
-// internal steps' inside a correction) plus the refinement's per-lane score and mask. A mode-7 context's, or a test's.
+// internal steps' inside a correction) plus the refinement's per-lane score and mask. A BATCHED_LU context's, or a test's.
 struct BatchedLuSystems {
     BatchedLu* lu;
     int n;

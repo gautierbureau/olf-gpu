@@ -60,7 +60,7 @@ final class GenOutageSeed {
                 }
                 if (go.killsPilotVoltageIdentity()) {
                     // The pilot's voltage identity goes NOW, with the member's
-                    // mode-4 row, so the two halves of the dead control land in
+                    // BUS_TARGET_Q row, so the two halves of the dead control land in
                     // the same fill.
                     int[] row = rs.rowModePerScenario[s] == baseRowMode
                             ? baseRowMode.clone() : rs.rowModePerScenario[s];
@@ -139,7 +139,7 @@ final class GenOutageSeed {
                         // left live: no channel
                     } else if (go.flipsPilotRowWithoutEnabledController() || gpuData.switchedPvToPqInBase(go.reactiveLimitEntry())) {
                         // ...and a MEMBER the base SWITCHED TO PQ: its reactive balance already sits on
-                        // its own mode-4 row (its target Q row), and OLF recomputes that balance's
+                        // its own BUS_TARGET_Q row (its target Q row), and OLF recomputes that balance's
                         // target over the generators left - none - the moment the last one goes
                         // (setGeneratorVoltageControlEnabledAndRecomputeTargetQ). Frozen gen-lost,
                         // the seed stamps 0 - loadQ there and the check never touches it again;
@@ -179,25 +179,25 @@ final class GenOutageSeed {
                         int distrQRowMode = rs.rowModePerScenario[s] != null
                                 ? rs.rowModePerScenario[s][distrQTargetRow] : baseRowMode[distrQTargetRow];
                         // Seed only where the row still HOSTS a DISTR_Q equation this
-                        // scenario. Mode 4 means it hosts its own reactive balance (a PV -> PQ
+                        // scenario. BUS_TARGET_Q means it hosts its own reactive balance (a PV -> PQ
                         // switch, or a control the contingency killed and whose BUS_TARGET_Q
-                        // the injection override owns); mode 0 means it is an IDENTITY —
+                        // the injection override owns); FIXED_VARIABLE means it is an IDENTITY —
                         // a re-merged control's voltage target (reMergedPvEntry, the remote
                         // main of a split group) or a frozen/outaged row. updateDistrQ-
                         // TargetsBatch refuses to maintain a DISTR_Q target on either ("A
                         // DISTR_Q target has no business here"), so uploading one is a
                         // write this code does not own: it lands as a SECOND override on a
                         // row that already has one. Measured over the full busbar scope:
-                        // 26 mode-4 rows across 24 contingencies
+                        // 26 BUS_TARGET_Q rows across 24 contingencies
                         // disagreed, all from this site — BUS-1359_BBS_1 and BUS-1869_BBS_1
                         // (the +-2 violation pair), BUS-1599_BBS_1. Then, once the split
-                        // re-merges batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's
+                        // re-merges batched (tasks #70), the FIXED_VARIABLE case: BUS-2640_BBS_1's
                         // elected main VL-2640_1 got its 1.034 identity on row 5956 AND
                         // this seed's 0.0 (its renormalized DISTR_Q target); the device
                         // picked 0.0 in the full 6667-contingency batch (slot 1844: V
                         // driven to 0, 193.85 MW of distributed power, +197 violations)
                         // and 1.034 in a 3-contingency batch (slot 0, bit-identical to
-                        // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
+                        // OLF). The earlier "FIXED_VARIABLE is NOT skipped: skipping it moved
                         // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
                         // noise being guarded.
                         if (distrQRowMode == GpuRowMode.BUS_TARGET_Q || distrQRowMode == GpuRowMode.FIXED_VARIABLE || distrQRowMode == GpuRowMode.CROSS_FIXED_VARIABLE) {

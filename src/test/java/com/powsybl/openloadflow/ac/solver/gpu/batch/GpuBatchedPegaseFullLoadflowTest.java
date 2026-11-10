@@ -96,7 +96,7 @@ class GpuBatchedPegaseFullLoadflowTest {
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         // Only override when the env var IS set — a bare run measures the production defaults
-        // (mode 3 UBATCH, memory auto-sized chunk).
+        // (UBATCH, memory auto-sized chunk).
         if (System.getenv("OLF_GPU_MAXBATCH") != null) {
             GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
         }

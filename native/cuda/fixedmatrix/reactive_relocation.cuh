@@ -89,7 +89,7 @@ __device__ inline int chooseCarrierRowInSubgroup(int g, const int* reactiveReloc
 // The pilot of an ENROLLED pilot-self group (rotation property): its Q is re-routed through the candidate
 // table, so a switch to PQ must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while its own
 // reactive balance rides the carrier (updateDistrQTargetsBatch puts the limit there). Measured before this:
-// the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
+// the pilot's row went BUS_TARGET_Q with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
 // pilotEntryOfPilotSelfGroup marker: a PILOT-SELF group whose pilot has no reactive-limit entry (see pilotSelfGateBatch).
 // Distinct from -1 ("not a pilot-self group"), and negative so every `pe >= 0` test still reads it as "no entry".
 static constexpr int PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY = -2;
@@ -107,7 +107,7 @@ __device__ inline bool isEnrolledPilot(const int* pilotSelfReactiveLimitEntry, i
 // parent coupler's dummy row while that coupler lives, its own row once the coupler is dead - UNLESS its own
 // row has become the voltage identity (OLF re-elected it the main of the survivors): then its balance rides the
 // first free member row of its group, exactly as the base pilot's does, and so does a cross identity on the
-// dummy row (mode 6, the main under a live coupler). A root (no relocation) reads its own row the same way.
+// dummy row (CROSS_FIXED_VARIABLE, the main under a live coupler). A root (no relocation) reads its own row the same way.
 __device__ inline int dependentPilotDestination(int slot, int frozen, int alternateDestination, int selectorRow, const int* mode, ReactiveRelocationTables rt) {
     int fr = selectorRow <= -2 ? -2 - selectorRow : selectorRow;
     int mf = mode[fr];

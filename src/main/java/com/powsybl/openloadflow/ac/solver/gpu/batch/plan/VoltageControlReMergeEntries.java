@@ -218,7 +218,7 @@ final class VoltageControlReMergeEntries {
     }
 
     /** A re-merged control whose bus the BASE switched to PQ: its own row starts as its reactive balance at the frozen
-     *  value (mode 4, {@code qTarget} = LfBus.getTargetQ(), the frozen generation minus the load) and its entry is a
+     *  value (BUS_TARGET_Q, {@code qTarget} = LfBus.getTargetQ(), the frozen generation minus the load) and its entry is a
      *  LOCAL PV bus at {@code vTarget}, so a switch back to PV restores the identity as OLF re-activates BUS_TARGET_V.
      *  {@code otherControllerEntries} as in {@link #reMergedPvEntry}: the first enabled one holds the target meanwhile. */
     static GenOutage reMergedSwitchedToPqEntry(int vRow, double qTarget, double vTarget, int reactiveLimitEntry, int[] otherControllerEntries) {
@@ -228,7 +228,7 @@ final class VoltageControlReMergeEntries {
     }
 
     /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
-     *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — switched
+     *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (CROSS_FIXED_VARIABLE, the bus's V column), or — switched
      *  to PQ in the base — that row starts as the balance at the frozen value and the entry switches back to PV in the
      *  cross form.
      *  {@code otherControllerEntries} as in {@link #reMergedPvEntry}. */

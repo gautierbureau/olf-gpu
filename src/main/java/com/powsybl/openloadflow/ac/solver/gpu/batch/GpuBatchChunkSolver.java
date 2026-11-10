@@ -209,7 +209,7 @@ final class GpuBatchChunkSolver {
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
         // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
-        // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — mode 6 is mode 0's
+        // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — ROBUST is the single-matrix
         // per-scenario loop with matching and global column pivoting, which is what rte6515's full
         // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
         // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
@@ -427,7 +427,7 @@ final class GpuBatchChunkSolver {
                     if (rs.overrides.conflictingAddCount() > 0) {
                         // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
                         // later one (no row reaches the device twice), but a sound plan has NO such row:
-                        // every one so far was a write that should not exist (a DISTR_Q seed on a mode-0/4
+                        // every one so far was a write that should not exist (a DISTR_Q seed on a FIXED_VARIABLE/BUS_TARGET_Q
                         // row). Name it.
                         LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
                                 + " writer)", rs.overrides.conflictingAddCount(), chunkStart);
@@ -946,7 +946,7 @@ final class GpuBatchChunkSolver {
         byte[] baseLimitTypes = gpuData.reactiveLimits().baseQLimitType();
         for (int i = 0; reactiveLimitsOuterLoop && i < nReactiveLimitEntries; i++) {
             int vrow = gpuData.reactiveLimits().voltageRow()[i];
-            // remote entries (plan-B3): base mode 1 = DISTR_Q share (still PV); only mode 4 is switched to PQ.
+            // remote entries (plan-B3): base EQUATION = DISTR_Q share (still PV); only BUS_TARGET_Q is switched to PQ.
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
             boolean remote = gpuData.reactiveLimits().voltageControlRole().length > i && gpuData.reactiveLimits().voltageControlRole()[i] != GpuVoltageControlRole.LOCAL;

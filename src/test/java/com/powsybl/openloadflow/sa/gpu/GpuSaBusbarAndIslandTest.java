@@ -543,7 +543,7 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
      *  other controller sits on the surviving section (rte6515 BUS-1055_BBS_1, BUS-11_BBS_1,
      *  BUS-1263_BBS, BUS-1282_BBS_1, BUS-1320_BBS_1 - up to 1.3 kV). OLF: the control dies, g2's
      *  section goes PQ at g2's targetQ. On the device the survivor is a packed DISTR_Q member, so its
-     *  row must host its OWN reactive balance (mode 4), not a plain reactive row (mode 1) the DISTR_Q
+     *  row must host its OWN reactive balance (BUS_TARGET_Q), not a plain reactive row (EQUATION) the DISTR_Q
      *  family keeps writing into. Bare section loss: the island-injection path. */
     @Test
     void deviceBusLossIslandingMergedPilotSurvivorMatchesCpu() {

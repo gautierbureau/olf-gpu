@@ -154,7 +154,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  AFTER_GENERATOR carrier-clamp base measured 2.2e-3 kV that way). The rest of the run is OLF's CPU
      *  Newton-Raphson. */
     private boolean driverFallbackForRun;
-    /** Set by the first device reject of a run: the batch-of-one context is rebuilt in mode 6 (the
+    /** Set by the first device reject of a run: the batch-of-one context is rebuilt in ROBUST (the
      *  robust pivoted single-matrix solve) and stays there for the run. See the retry in runImpl. */
     private boolean robustModeForRun;
 
@@ -293,7 +293,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /**
      * Writes the GPU equation system and OLF's own dump of the same state, once, when {@code OLF_GPU_EQ_DUMP}
-     * names a path. Prefers a state that carries a PV -> PQ switch (row mode 4): that is the assembly a rank-deficient
+     * names a path. Prefers a state that carries a PV -> PQ switch (row mode BUS_TARGET_Q): that is the assembly a rank-deficient
      * Jacobian was traced to, and a dump of a healthy pass would not show it.
      */
     private void dumpEquationsOnce(int[] rowMode, int n) {
@@ -537,7 +537,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         try {
             long t0 = System.nanoTime();
             boolean rebuilt = false;
-            // A REACTIVE-LIMIT switch to PQ of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
+            // A REACTIVE-LIMIT switch to PQ of a remote gen-VC member (row mode BUS_TARGET_Q) renormalizes OLF's DISTR_Q reactive
             // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
             // its static qPct from before the switch. Watch the SET of members switched to PQ and re-extract when it
             // changes: the context is rebuilt from the fresh extraction with OLF's renormalized keys. That is what used
@@ -560,10 +560,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // OLF_GPU_EQ_DUMP=<path>: the GPU equation system as TEXT, next to OLF's own write() of the same
             // state (<path>.olf). OLF can print its equations, so a wrong one is readable there; ours only
             // existed as index packs until now. Written once per run, at the FIRST solve carrying a PV -> PQ switch
-            // (row mode 4) when there is one, since that is the assembly under suspicion.
+            // (row mode BUS_TARGET_Q) when there is one, since that is the assembly under suspicion.
             dumpEquationsOnce(activation.rowMode(), n);
-            // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase) solve
-            // on-device. Mode 4 (a remote gen-VC member SWITCHED TO PQ) used to be CPU-routed here because the pack's
+            // Since the batch-of-1 route (2026-09-08) BUS_TARGET_V_WITH_SLOPE (slope-SVC) and BRANCH_TARGET_P (continuous phase) rows solve
+            // on-device. BUS_TARGET_Q (a remote gen-VC member SWITCHED TO PQ) used to be CPU-routed here because the pack's
             // DISTR_Q weights were the STATIC extraction-time qPct while OLF's switch to PQ renormalizes them; the
             // watch above re-extracts when that set changes, so the weights are OLF's and the solve stays on
             // the device. Anything ABOVE the modes the kernels implement is still a fallback, not a guess.
@@ -698,10 +698,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // the device cannot lay out or OLF's own budget, and goes to the CPU as before -
                 // retrying those on the device re-solved bases OLF's loops had to decide, 2.6e-3 kV on
                 // the robust-realistic fixture): retry ON THE DEVICE in the robust single-matrix mode
-                // (mode 6: BTF-COLAMD, global column pivoting, matching) for the rest of the run
+                // (ROBUST: BTF-COLAMD, global column pivoting, matching) for the rest of the run
                 // before any CPU fallback. rte6515's full busbar structure does not factor in the
                 // uniform batch (linear residual ratio 1e12, the base came back MAX_ITERATION_REACHED
-                // and the whole analysis reported nothing) and converges on the device in mode 0.
+                // and the whole analysis reported nothing) and converges on the device in the single-matrix solve.
                 // A base load flow that works on the CPU has to work on the GPU.
                 LOGGER.info("GPU Newton-Raphson: device rejected the batch-of-one solve; retrying on the device in the robust single-matrix mode");
                 if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -939,7 +939,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // gate scopes).
         BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
         // BATCH-OF-1: the load flow runs on a BATCH context of one scenario, so per-row
-        // PER_EQUATION_TYPE criteria, slope-SVC (mode 2), continuous phase (mode 3) and
+        // PER_EQUATION_TYPE criteria, slope-SVC (BUS_TARGET_V_WITH_SLOPE), continuous phase (BRANCH_TARGET_P) and
         // the load model (ZIP) fills come from the batch pipeline instead of being ported twice.
         // The shared structure comes from the per-extraction cache — the batched SA
         // building its context from the SAME extraction reuses it device-side.

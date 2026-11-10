@@ -314,9 +314,9 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  g1 and g2 both regulate b1 (the pilot is one of its own controllers), g1 is lost, and g2 — capped at
      *  30 MVar against b1's 60 MVar load — SWITCHES TO PQ. OLF then drops b1's BUS_TARGET_V and solves its BUS_TARGET_Q
      *  (the dead bus's own balance). The device arms the outaged-pilot row flip for exactly this
-     *  (GenOutage.flipsPilotRowWithoutEnabledController: mode 4, the own-Q balance the member alternate dest routes
+     *  (GenOutage.flipsPilotRowWithoutEnabledController: BUS_TARGET_Q, the own-Q balance the member alternate dest routes
      *  the pilot's q to), but the pilot-self kernel's "control lost" layout ran first and put the row in
-     *  mode 1 — an EMPTY row for a pilot-that-is-its-own-controller — so the voltage stayed exactly at the
+     *  EQUATION — an EMPTY row for a pilot-that-is-its-own-controller — so the voltage stayed exactly at the
      *  identity's value. Measured on rte6515 GEN-1522: VL-1522_0 at 1.122 (its target) against OLF's 1.0811,
      *  3.2 kV at VL-1525 and 1.98e-2 MW of distributed power, with identical switch sets on both arms.
      *  GPU SA == CPU SA at 1e-12, and the outage must BATCH. */
@@ -512,7 +512,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  the islanded-pilot path also seeds with vl12_1's renormalized DISTR_Q target. rte6515 BUS-2640_BBS_1:
      *  the two overrides raced on the device, the 0.0 seed won in the 6667-contingency batch (V driven to 0,
      *  193.85 MW of distributed active power and +197 violations against OLF) and the 1.034 identity won in a
-     *  3-contingency batch. A mode-0 row no longer takes a DISTR_Q seed and GpuBatchOverrides never hands the
+     *  3-contingency batch. A FIXED_VARIABLE row no longer takes a DISTR_Q seed and GpuBatchOverrides never hands the
      *  device one row twice. */
     @Test
     void deviceLostPilotSectionRootMainExplicitIdentityMatchesCpu() {
@@ -744,7 +744,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     /** Remote control + TIGHT reactive limits on a NON-free member (the CPU switches b2 to PQ in the BASE):
-     *  batched on-device since plan-B3 (mode-4 BUS_TARGET_Q rows, dynamic reactive-key renormalization and
+     *  batched on-device since plan-B3 (BUS_TARGET_Q rows, dynamic reactive-key renormalization and
      *  frozen-member target compensation on the survivors' DISTR_Q rows). Since plan-B4 a limited
      *  FREE member batches too; only a group whose enabled members are ALL limited still routes
      *  the whole run to the CPU when unrepresentable; the corner with no enabled controller batches too
@@ -898,7 +898,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     /** Plan-B3/B5: a POST-CONTINGENCY PV -> PQ switch of a NON-free remote group member runs
-     *  on-device (mode-4 transition + own-q accumulation + pilot-referenced switch conditions) at
+     *  on-device (BUS_TARGET_Q transition + own-q accumulation + pilot-referenced switch conditions) at
      *  1e-12. g2 (non-free member: free = g1, unlimited) has maxQ between its base Q (~183 MVAr)
      *  and its post-outage Q (~189 MVAr), so losing one parallel b4-b5 line switches it to PQ — verified on
      *  the CPU side by the differing per-member Q split in the reference results. */
@@ -916,7 +916,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
      *  ~183) and a strongly relieving load contingency (-300 MVAr) hits the group. OLF's remote
      *  switch-back tests the PILOT's V against the GROUP target — the surviving members keep the
      *  pilot AT target, so the member STAYS PQ on the CPU, and the device must reproduce that
-     *  exactly: mode-4 seed, renormalized weights, and the frozen-member TARGET compensation on
+     *  exactly: BUS_TARGET_Q seed, renormalized weights, and the frozen-member TARGET compensation on
      *  the survivors' DISTR_Q rows (qPct x frozen targetQ). A decisive remote switch BACK TO PV requires the
      *  group to lose control margin, which the B4 pre-gate keeps on the CPU (free member limited). */
     @Test
@@ -1110,7 +1110,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
 
     /** The formerly-guarded B3-class gap, now LIFTED by the ob alternate-dest channel: a LIMITED
      *  member with a HALF-OPEN branch at its bus switches to PQ ON-DEVICE — the open line's charging q
-     *  follows the mode-4 row through the ob two-way select (it was 3.3e-4 kV silently MISSING
+     *  follows the BUS_TARGET_Q row through the ob two-way select (it was 3.3e-4 kV silently MISSING
      *  from the member's PQ row before the channel, then whole-run CPU-gated). 1e-12 with engagement. */
     @Test
     void deviceRemoteOpenBranchMemberSwitchToPqMatchesCpu() {
@@ -1128,7 +1128,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     }
 
     /** Zero-impedance twin: a LIMITED member with a ZERO-IMPEDANCE spanning-tree branch at its
-     *  bus — the dummy-Q coupling follows the mode-4 row through the zero-impedance dynamic slots. 1e-12. */
+     *  bus — the dummy-Q coupling follows the BUS_TARGET_Q row through the zero-impedance dynamic slots. 1e-12. */
     @Test
     void deviceRemoteZeroImpMemberSwitchToPqMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

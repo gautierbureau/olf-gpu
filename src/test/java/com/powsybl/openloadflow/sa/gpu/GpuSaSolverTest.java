@@ -345,8 +345,8 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
     /** The robust solve mode (6: one matrix object repointed per scenario, cuDSS pivoting on the raw matrix - the
      *  retry of a rejected scenario, or a base load flow that fell into it) runs the in-kernel transformer, shunt
      *  and secondary voltage control loops like the UBATCH modes do, solving their sensitivities scenario by
-     *  scenario on its own factors. They used to report themselves STABLE there, so the same fixtures under mode 6
-     *  ended at the pre-loop state: BUS_2 0.6 kV, b2 0.3 kV and B2 0.2 kV off OLF. Mode 3's results are unchanged. */
+     *  scenario on its own factors. They used to report themselves STABLE there, so the same fixtures under ROBUST
+     *  ended at the pre-loop state: BUS_2 0.6 kV, b2 0.3 kV and B2 0.2 kV off OLF. UBATCH's results are unchanged. */
     @Test
     void deviceRobustModeRunsTheInKernelLoops() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -363,7 +363,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         }
     }
 
-    /** Our batched LU (mode 7) runs the in-kernel transformer, shunt and secondary voltage control loops too, their
+    /** Our batched LU (BATCHED_LU mode) runs the in-kernel transformer, shunt and secondary voltage control loops too, their
      *  sensitivities solved on its own factors of every slot. */
     @Test
     void deviceBatchedLuRunsTheInKernelLoops() {
@@ -427,7 +427,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
     /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
      *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
      *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;
-     *  the whole run, base load flow included, is solved in mode 6. */
+     *  the whole run, base load flow included, is solved in ROBUST. */
     @Test
     void robustModeClampsTheStepLikeOlf() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

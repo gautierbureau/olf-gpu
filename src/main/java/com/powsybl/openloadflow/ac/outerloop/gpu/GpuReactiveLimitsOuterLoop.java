@@ -87,16 +87,16 @@ public final class GpuReactiveLimitsOuterLoop {
 
     /** The row whose target holds the frozen target Q of RL entry {@code i}, switched to PQ ({@code target + loadQ =
      *  the limit}). Its own V row, except for a pilot-self pilot enrolled in the candidate table (its V row is
-     *  candidate 0 of a group and still a V identity, mode 0, while PQ): then the same pick the
+     *  candidate 0 of a group and still a V identity, FIXED_VARIABLE, while PQ): then the same pick the
      *  device's {@code chooseCarrierRow} makes — the first OTHER candidate whose row is neither an identity nor
      *  a BUS_TARGET_Q balance (the carrier) — and its own row when none is live (the group lost control and the device
-     *  flipped that row to a power row, mode 1). */
+     *  flipped that row to a power row, EQUATION). */
     private static int frozenTargetQRow(GpuAcData data, int i, int vRowIn, int[] devModes) {
         int vRow = vRowIn;
         // First, the COUPLER-TREE RELOCATION: a relocated child's reactive balance — and so the target the switch to
         // PQ wrote — lives on its parent coupler's DUMMY_Q row, which is exactly where the native pass put it
         // (reactiveLimitReactivePowerRow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
-        // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
+        // froze that on the bus. FIXED_VARIABLE at the relocated row means the coupler is open here, so the equations
         // are back home and the own row is right (the same per-scenario test the device makes).
         int relocated = CouplerTreeReHoming.relocatedTargetQRow(data.zeroImpedanceBranch().indices(), vRow);
         if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != GpuRowMode.FIXED_VARIABLE) {

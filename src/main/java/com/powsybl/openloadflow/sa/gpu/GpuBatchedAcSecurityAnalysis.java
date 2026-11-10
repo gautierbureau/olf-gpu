@@ -729,9 +729,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // route (2026-09-08): the VoltageMonitoring loop's activation flips es equations, the
         // activation re-extract carries the new row modes — no CPU-base condition anymore
         // (GpuLoadFlowTest.monitoringSvcActivatesInBase).
-        // SLOPE-SVC rows (row mode 2) solve on the sequential path since the batch-of-1 route
+        // SLOPE-SVC rows (row mode BUS_TARGET_V_WITH_SLOPE) solve on the sequential path since the batch-of-1 route
         // (2026-09-08) — no CPU-base condition anymore.
-        // CONTROLLER-mode phase control (row mode 3) solves on the sequential path since the
+        // CONTROLLER-mode phase control (row mode BRANCH_TARGET_P) solves on the sequential path since the
         // batch-of-1 route (2026-09-08) — no CPU-base condition anymore.
         // PER_EQUATION_TYPE stopping criteria run on the sequential path since the batch-of-1
         // route (2026-09-08): the batch-of-1 solve installs the per-row thresholds

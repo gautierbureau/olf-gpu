@@ -73,7 +73,7 @@ class GpuTransformerSharedControlTest {
      *  DISTR_RHO pack must STILL carry the group's all-enabled coupling (existence-keyed — the
      *  e82290f audit found the activation-keyed pack silently empty), the packed rows must exclude
      *  the FREE member (first enabled), and the toggled-ALL-ON activation must extract as: pilot V
-     *  row identity, non-free member rho rows mode 1 with the DISTR_RHO targets, the pilot's Q
+     *  row identity, non-free member rho rows EQUATION with the DISTR_RHO targets, the pilot's Q
      *  remapped onto the free member's rho row. Host-only — no device needed. */
     @Test
     void sharedGroupPackAtDisabledBaseAndOnActivation() {

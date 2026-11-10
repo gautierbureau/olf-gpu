@@ -342,7 +342,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
      *  GeneratorVoltageControlManager walks {@code getMergedControllerElements()} and freezes every
      *  enabled one at {@code getQ().eval()}, local or remote alike; the device used to gate the whole
      *  run to the CPU because a remote controller's own row is the group's DISTR_Q SHARE, not a V
-     *  identity. It is now frozen the way the reactive-limits pass switches one to PQ — row mode 4 with the
+     *  identity. It is now frozen the way the reactive-limits pass switches one to PQ — row mode BUS_TARGET_Q with the
      *  current injection as the target — and marked with limit type 5, which is what makes the group's
      *  DISTR_Q shares renormalize over the members that are left. */
     @Test

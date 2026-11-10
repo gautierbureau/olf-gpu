@@ -8,7 +8,7 @@
 
 // plan-B4 (JAVA hybrid): install ONLY the carrier-row suppression tables — distrQInjectionMember (per DISTR_Q
 // contribution: row-owner member) + distrQMemberRelocationGroup (per member: pilot's relocation group) — so a
-// pushed mode-4 free-member row gates the re-picked carrier's DISTR_Q row off in fillDistrQBatch.
+// pushed BUS_TARGET_Q free-member row gates the re-picked carrier's DISTR_Q row off in fillDistrQBatch.
 // Does NOT touch nDistrQDynamicKeys: the hybrid's weights stay static-pack + distrQWeightOverrideTable (OLF renormalizes and the
 // engine pushes live values). Nulls clear.
 extern "C" JNIEXPORT void JNICALL

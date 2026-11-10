@@ -101,8 +101,8 @@ class GpuSaContingencyKindsTest extends AbstractGpuSaTest {
      *  BUS-1263_BBS, BUS-1282_BBS_1, BUS-1320_BBS_1 - up to 1.3 kV): b1 (main, the pilot) and b2
      *  (dependent) are merged by the coupler c12; b2 keeps its own line to b0. OLF: the control dies,
      *  b2 goes PQ at its own generation Q. On the device the survivor is a member of the pilot's
-     *  relocation group, so its row must host its OWN reactive balance (mode 4), not a plain reactive
-     *  row (mode 1) the mode scan takes for a live carrier and lands the frozen pilot's balance on.
+     *  relocation group, so its row must host its OWN reactive balance (BUS_TARGET_Q), not a plain reactive
+     *  row (EQUATION) the mode scan takes for a live carrier and lands the frozen pilot's balance on.
      *  <pre>
      *    ld0
      *     |

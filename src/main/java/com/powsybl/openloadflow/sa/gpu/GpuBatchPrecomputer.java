@@ -525,8 +525,8 @@ final class GpuBatchPrecomputer {
      * and two thirds of those rejects sit within ONE DECADE of the acceptance gate
      * ({@code lastSolveRatio} 1e-2..1e-1 against a 1e-2 threshold), with no NaN/Inf — inaccurate
      * solves, not divergences. The remedy already exists and is proven on the BASE load flow, which
-     * falls into mode 6 automatically after a linear-solve reject ({@code GpuNewtonRaphson}); a chunk
-     * scenario simply had no route to it. Mode 6 is a per-scenario loop with matching and global
+     * falls into ROBUST automatically after a linear-solve reject ({@code GpuNewtonRaphson}); a chunk
+     * scenario simply had no route to it. ROBUST is a per-scenario loop with matching and global
      * column pivoting, which is what rte6515's 366 retained couplers need to factor at all.
      *
      * <p>Only scenarios that would otherwise LEAVE the device are retried, so the pass cannot change
@@ -535,7 +535,7 @@ final class GpuBatchPrecomputer {
      * result) rather than a reject. A retried scenario that still fails falls back to the CPU exactly
      * as before.
      *
-     * <p><b>DEFAULT ON since 2026-10-02, and what it actually buys:</b> mode 6 turns 39 of the 113
+     * <p><b>DEFAULT ON since 2026-10-02, and what it actually buys:</b> ROBUST turns 39 of the 113
      * from a bad solve into {@code GpuAcSolverStatus.MAX_ITERATION_REACHED} with a SOUND last solve
      * ({@code GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}}), taking CPU
      * replays from 113 to 74. None of them CONVERGE — but that is the right answer: OLF does not

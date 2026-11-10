@@ -3,7 +3,7 @@
 //
 // docs/gpu-vs-olf.md section 2.4 (cross identity): a fixed variable whose own row is taken. A re-merged
 // voltage-controlled bus whose own V row carries a live coupler's ZERO_V keeps its BUS_TARGET_V on the parent
-// coupler's DUMMY_Q row (row mode 6, GpuRowMode::CROSS_FIXED_VARIABLE), on the bus's own V column. Device inline,
+// coupler's DUMMY_Q row (GpuRowMode::CROSS_FIXED_VARIABLE), on the bus's own V column. Device inline,
 // shared by the fills (applyRowModeBatch), the reactive-limit pass and seed, the pilot voltage kernels and the
 // relocated destination of a dependent pilot (reactive_relocation.cuh).
 #ifndef OLF_GPU_FIXEDMATRIX_CROSS_IDENTITY_CUH
@@ -15,14 +15,14 @@
 
 namespace olfgpu {
 
-// The row holds a fixed variable this scenario: a plain identity (mode 0) or a cross identity (mode 6).
+// The row holds a fixed variable this scenario: a plain identity (FIXED_VARIABLE) or a cross identity (CROSS_FIXED_VARIABLE).
 // updateDistrQTargetsBatch (outerloop/remote_voltage_control.cu) writes the same test out: through this helper the
-// compiler lowers its mode 0 / 6 / 4 exits to a jump table instead of one bit-mask test.
+// compiler lowers its FIXED_VARIABLE / CROSS_FIXED_VARIABLE / BUS_TARGET_Q exits to a jump table instead of one bit-mask test.
 __device__ inline bool holdsFixedVariable(int mode) {
     return mode == GpuRowMode::FIXED_VARIABLE || mode == GpuRowMode::CROSS_FIXED_VARIABLE;
 }
 
-// The fixed-variable form of a row: cross (mode 6) when it is not the variable's own row.
+// The fixed-variable form of a row: cross (CROSS_FIXED_VARIABLE) when it is not the variable's own row.
 __device__ inline int fixedVariableMode(bool crossRow) {
     return crossRow ? GpuRowMode::CROSS_FIXED_VARIABLE : GpuRowMode::FIXED_VARIABLE;
 }

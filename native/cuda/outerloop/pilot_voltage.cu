@@ -169,7 +169,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     // lost" is OLF's "no enabled controller" — every OTHER member switched to PQ/off AND the pilot itself switched to PQ.
     // The candidate scan must skip the pilot's row: once flipped to a power row it reads as a live member
     // and the next pass restores it — the kernel toggling its own verdict (rte6515 busbar base, groups 17
-    // and 19: mode 1/0 every pass to the outer-loop budget). And the flipped row hosts the pilot's
+    // and 19: EQUATION/FIXED_VARIABLE every pass to the outer-loop budget). And the flipped row hosts the pilot's
     // BUS_TARGET_Q, whose target is its Q LIMIT (the target Q the RL switch froze), not the group's captured pilot-Q
     // target (0 here — a PV -> PQ switch with the wrong target moved V past the group target and switched it back to PV).
     int pe = pilotSelfReactiveLimitEntry != nullptr ? pilotSelfReactiveLimitEntry[g] : -1;
@@ -214,7 +214,7 @@ __global__ void updatePilotTargetVEquationBatch(int nReactiveRelocationGroups, i
     // (VoltageControl.isControllerEnabled -> isGeneratorVoltageControlEnabled). On the device that fact is the
     // members' REACTIVE-LIMIT state, which is per (scenario, entry) and current from the seeding onwards —
     // unlike the row modes this kernel used to infer it from, which at seed time are still ambiguous (a member
-    // row reads mode 0 both for a frozen island and for an identity that means the member controls). With the
+    // row reads FIXED_VARIABLE both for a frozen island and for an identity that means the member controls). With the
     // fact in hand the layout can follow it from the FIRST fill, which is where OLF has it: a pilot whose only
     // sibling this contingency islands, and which the base itself switched to PQ, has no BUS_TARGET_V at all in OLF,
     // while the device used to hold that identity until its reactive-limits phase (rte6515 BUS-6112_BBS_2: the

@@ -36,7 +36,7 @@ import java.util.Map;
  * <ul>
  *   <li>CONTROLLER mode — the Simple-TVC shape over a1: {@code initialize()} enables phase control
  *       BEFORE the first solve (per scenario, the a1-paired row flips to the P-flow equation, row
- *       mode 3 — the cb family re-emits the controlled side's P outputs there and a1 solves free);
+ *       BRANCH_TARGET_P — the cb family re-emits the controlled side's P outputs there and a1 solves free);
  *       the loop's first check switches control OFF and rounds a1 to the CLOSEST TAP
  *       ({@code roundA1ToClosestTap}) → one warm re-solve with the a1 identity fixed at the rounded
  *       tap and the tap's full pi row (per-step R/X/G/B) applied;</li>
@@ -105,7 +105,7 @@ public final class GpuPhaseControlOuterLoop {
                 }
             }
             if (phaseControl.getMode() == TransformerPhaseControl.Mode.CONTROLLER) {
-                // VC-ON activation diff: what enabling the phase control changes (a1 row -> mode 3 + target)
+                // VC-ON activation diff: what enabling the phase control changes (a1 row -> BRANCH_TARGET_P + target)
                 boolean was = branch.isPhaseControlEnabled();
                 branch.setPhaseControlEnabled(true);
                 GpuAcActivation onAct = GpuAcActivation.fromEquationSystem(network, es);
@@ -137,7 +137,7 @@ public final class GpuPhaseControlOuterLoop {
     }
 
     /** Pre-solve (OLF initialize): enable every live CONTROLLER-mode phase control — the a1 row
-     *  becomes the P-flow equation (row mode 3) for the first solve. */
+     *  becomes the P-flow equation (row mode BRANCH_TARGET_P) for the first solve. */
     public static void applyPhaseOn(int realCount, int n, List<Controller> controllers,
                              int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
                              ScenarioTargetOverrides overrides) {

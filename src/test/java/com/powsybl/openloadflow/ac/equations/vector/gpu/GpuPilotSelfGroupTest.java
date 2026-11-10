@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code DISTR_Q} for every enabled one except the FIRST — so which controller is "free" changes every time
  * one switches to PQ.
  *
- * <p>In this layout rows are VARIABLES, so the rotation cannot move {@code BUS_TARGET_V} (a mode-0 identity
+ * <p>In this layout rows are VARIABLES, so the rotation cannot move {@code BUS_TARGET_V} (a FIXED_VARIABLE identity
  * constrains its OWN row's variable; on a member's row it would hold that member's v at the pilot's target).
  * What moves is the reactive balance of a pilot SWITCHED TO PQ, onto the first ENABLED member's row. {@code computeQRow}
  * already places it there, but frozen at extraction, while the device's reactive-limits loop switches buses
@@ -42,7 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>This fixture exists because rte6515's instances of the shape are buried in a 13k-variable system: here
  * the group is three buses and the table can be asserted directly. The pack is keyed by RL ENTRY rather than
- * by row precisely because the row to pick is mode 4 BECAUSE it carries the relocated balance, which is
+ * by row precisely because the row to pick is BUS_TARGET_Q BECAUSE it carries the relocated balance, which is
  * circular — {@code limitType} per entry is the ground truth OLF itself uses.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}

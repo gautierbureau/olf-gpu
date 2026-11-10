@@ -187,11 +187,11 @@ public final class ReactiveRelocation {
     /** The member row that HOSTS the pilot's DISTR_Q when the pilot is one of its own controllers:
      *  OLF's reference controller (the first ENABLED merged controller), else - no enabled
      *  controller in the base state - the first merged controller. In that case the pilot's DISTR_Q is
-     *  inactive and only needs a slot; the row modes carry the PQ state (mode 4 on every row).
+     *  inactive and only needs a slot; the row modes carry the PQ state (BUS_TARGET_Q on every row).
      *  Measured on rte6515's full busbar scope: the base switches EVERY controller of VL-6003_0's
      *  group to PQ, "first enabled" found none and the whole precompute fell to the CPU.
      *  NOT the free-member predicate below: a member switched to PQ is never free (its row hosts its own
-     *  Q balance, canonical encoding) - calling it free left a singleton switched to PQ at mode 1 with the
+     *  Q balance, canonical encoding) - calling it free left a singleton switched to PQ at EQUATION with the
      *  structure-frozen encoding (deviceRemoteSingletonMemberSwitchToPq, deviceRemoteRobustRealisticVoltage). */
     static LfBus distrQHostMember(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> es) {
         List<LfBus> members = voltageControl.getMergedControllerElements();
@@ -207,7 +207,7 @@ public final class ReactiveRelocation {
      * {@code BUS_V} row, or its parent coupler's {@code DUMMY_Q} row when the relocation moved its power
      * equations there. Every consumer of "where does this bus's q live" has to ask this — the reactive-limit
      * pass switches that row to PQ and reads the q there (native {@code reactiveLimitReactivePowerRow}), the candidate table enrols it, the
-     * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
+     * activation extractor targets it, the families write the bus's own q to it in BUS_TARGET_Q, and the diagnostic
      * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
      */
     public static int relocatedQRow(int busNum, int[] spanningTreeParentBranch, int[] dummyQCol, int[] vCol) {

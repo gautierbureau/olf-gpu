@@ -37,13 +37,13 @@ public final class PilotSelfPacker {
      * SWITCHED TO PQ gets its own {@code BUS_TARGET_Q}, and {@code DISTR_Q} is active for every enabled
      * controller except the FIRST — so which controller is "free" changes each time one switches to PQ. In this
      * layout (rows are VARIABLES) that means: {@code BUS_TARGET_V} stays on the controlled bus's own row, because a
-     * mode-0 identity constrains its OWN row's variable and moving it would fix a member's v at the pilot's
+     * FIXED_VARIABLE identity constrains its OWN row's variable and moving it would fix a member's v at the pilot's
      * target; and the reactive balance of a pilot SWITCHED TO PQ has to ride the first ENABLED member's row instead.
      * {@code computeQRow} already places it there, but statically, frozen at extraction — while the device's
      * reactive-limits loop changes PV/PQ states mid-solve. That mismatch is the rank-deficient base on
      * rte6515's busbar windows.
      *
-     * <p>The choice cannot be read off the row modes: the row to pick is mode 4 BECAUSE it carries the
+     * <p>The choice cannot be read off the row modes: the row to pick is BUS_TARGET_Q BECAUSE it carries the
      * relocated balance, which is circular. {@code limitType} per RL entry is the ground truth OLF itself
      * uses, hence the entry keying here. {@code memberEntry} is {@code -1} for a controller with no RL entry
      * (it never switches to PQ), and a group is dropped when the pilot has no entry or no row.

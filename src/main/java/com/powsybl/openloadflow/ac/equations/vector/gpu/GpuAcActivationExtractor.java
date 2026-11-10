@@ -126,7 +126,7 @@ public final class GpuAcActivationExtractor {
                     // A group with a candidate table is extracted CANONICALLY (whichever controllers are PQ: every
                     // controller's frozen q row suppressed, the pilot's on the FIRST member), but this target map
                     // is per scenario, so the row is the one the in-kernel mode scan picks in THIS state: for a member
-                    // switched to PQ, its own V row (mode 4 below, its alternate dest); the pilot's balance on the first
+                    // switched to PQ, its own V row (BUS_TARGET_Q below, its alternate dest); the pilot's balance on the first
                     // ENABLED member's V row (the carrier), or on its own V row once no controller is enabled
                     // (its V identity gone, the row is a power row). Measured: the canonical row collided with the
                     // own Q of the first member, switched to PQ (deviceRemoteFreeMemberSwitchedToPqInBaseMatchesCpu & co., 12 tests).
@@ -134,33 +134,33 @@ public final class GpuAcActivationExtractor {
                 }
                 assign(es, targetMap, targetQRow, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the SWITCHED-TO-PQ state:
-                // row mode 4, so the family fills route the member's own q here (the frozen dest is
+                // row mode BUS_TARGET_Q, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
                 // The SAME predicate computeQRow used to hand this bus its own Q row. It used
                 // isRemoteGeneratorVoltageControlControllerElement, which INCLUDES a controller that is also the
                 // group's controlled bus (its javadoc says so); this used isRemoteGenVcMember,
                 // which is controlledBus != bus and therefore EXCLUDES the pilot. For a pilot-that-is-also-a-controller
                 // SWITCHED TO PQ the two disagreed: computeQRow gave it its own Q
-                // row, this left the row at mode 1, so the mode-4 gate in fillDistrQBatch never
+                // row, this left the row at EQUATION, so the BUS_TARGET_Q gate in fillDistrQBatch never
                 // fired and the existence-keyed DISTR_Q kind-3 terms stayed live ALONGSIDE the
                 // zero-impedance family's direct +-DUMMY_Q into the same row. The two cancel: on
                 // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zero-impedance coupling's
                 // -1.0, leaving the coupler's DUMMY_Q in NO equation. 45 such columns at 2000
                 // busbar sections, which is what collapsed batching above ~1000.
-                // A pilot that is one of its OWN controllers gets mode 4 whenever its own Q balance
+                // A pilot that is one of its OWN controllers gets BUS_TARGET_Q whenever its own Q balance
                 // is active, free member or not: the free-member exception exists for the member
                 // whose row carries the pilot's Q in a pilot-is-not-a-controller group, which is not
-                // this shape (the pilot's q feeds the DISTR_Q rows and the row's mode-4 alternate is
-                // its own row). Left at mode 1, the base seeding (which keys a remote switch to PQ on mode 4)
+                // this shape (the pilot's q feeds the DISTR_Q rows and the row's BUS_TARGET_Q alternate is
+                // its own row). Left at EQUATION, the base seeding (which keys a remote switch to PQ on BUS_TARGET_Q)
                 // read a group with no enabled controller as "pilot still PV" (no-enabled-controller remote group fixture).
                 boolean pilotSelf = bus.getGeneratorVoltageControl()
                         .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                         .map(c -> c.getControlledBus() == bus).orElse(false);
                 // ...EXCEPT a pilot-self pilot ENROLLED in the candidate table (rotation): its own balance, once
                 // switched to PQ, is a POWER row — the carrier's row while a sibling controls, its own row once the group lost
-                // control — routed to by the in-kernel mode scan, and mode 4 there is what the scan SKIPS. The
+                // control — routed to by the in-kernel mode scan, and BUS_TARGET_Q there is what the scan SKIPS. The
                 // same predicate ExtractionColumns enrols with. Measured on rte6515's [5000,6000) busbar batch:
-                // the carriers of VL-5997 and VL-6112 came in at mode 4, the scan fell back to the identity pilot
+                // the carriers of VL-5997 and VL-6112 came in at BUS_TARGET_Q, the scan fell back to the identity pilot
                 // rows, the raw q and the couplers' DUMMY_Q vanished (dead columns 13171/13207) and every
                 // scenario failed its first linear solve (976 x LINEAR_SOLVE_FAILED).
                 boolean enrolled = pilotSelf
@@ -169,17 +169,17 @@ public final class GpuAcActivationExtractor {
                                 .map(c -> c.getMergedControllerElements().size() >= 2
                                         && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
                                 .orElse(false);
-                // `enrolled` requires pilotSelf, so for a MEMBER mode4 reduces to
+                // `enrolled` requires pilotSelf, so for a MEMBER hostsOwnReactiveBalance reduces to
                 // !isFreeRemoteGeneratorVoltageControlMember, and "free" is the FIRST ENABLED member — a group whose members
-                // are all switched to PQ has no free member and every member's row is stamped mode 4 into
+                // are all switched to PQ has no free member and every member's row is stamped BUS_TARGET_Q into
                 // baseRowMode, which every scenario without an explicit per-scenario mode inherits. That is
                 // CORRECT for a genuine Q-limit switch to PQ (the 20 fixtures switched to PQ in the base rely on it). What used to
                 // reach here wrongly was a TRANSIENT MIN_REALISTIC_V freeze the device should never have
                 // made: see RemoteMemberQPacker.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
                 // by exempting a merged member from robust mode as OLF's own predicate does, not here.
-                boolean mode4 = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus)
+                boolean hostsOwnReactiveBalance = GeneratorVoltageControlRoles.isRemoteGeneratorVoltageControlControllerElement(bus)
                         && (pilotSelf || !GeneratorVoltageControlRoles.isFreeRemoteGeneratorVoltageControlMember(bus)) && !enrolled;
-                if (mode4) {
+                if (hostsOwnReactiveBalance) {
                     mode[targetQRow] = GpuRowMode.BUS_TARGET_Q;
                 }
             }
@@ -222,7 +222,7 @@ public final class GpuAcActivationExtractor {
             }
             if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
                 // CONTINUOUS phase control enabled: the controlled branch's P-flow equation sits at the
-                // CONTROLLER's a1-paired row (row mode 3 — the cb family re-emits the P outputs there,
+                // CONTROLLER's a1-paired row (row mode BRANCH_TARGET_P — the cb family re-emits the P outputs there,
                 // closedBranchPhaseControlSide carrying the controller's a1 column, LOCAL and REMOTE alike).
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
@@ -232,7 +232,7 @@ public final class GpuAcActivationExtractor {
                 assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
                 continue;
             }
-            // IDENTITY rows (mode 0): the device row-mode mask writes diag 1 and F = x − target.
+            // IDENTITY rows (FIXED_VARIABLE): the device row-mode mask writes diag 1 and F = x − target.
             AcVariableType vt = switch (e.getType()) {
                 case BUS_TARGET_V -> AcVariableType.BUS_V;
                 case BUS_TARGET_PHI -> AcVariableType.BUS_PHI;
@@ -255,7 +255,7 @@ public final class GpuAcActivationExtractor {
             if (vt != null) {
                 int r = StableRowIndexing.col(es, e.getElementNum(), vt);
                 // SLOPE-SVC V row (V + slope*sumQ = target): the natural reactive fill STAYS in the row,
-                // scaled by the slope and completed with the +v diagonal (row mode 2) — not an identity.
+                // scaled by the slope and completed with the +v diagonal (row mode BUS_TARGET_V_WITH_SLOPE) — not an identity.
                 boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
                         && network.getBus(e.getElementNum()).hasGeneratorsWithSlope();
                 mode[r] = slopeRow ? GpuRowMode.BUS_TARGET_V_WITH_SLOPE : GpuRowMode.FIXED_VARIABLE;
@@ -292,7 +292,7 @@ public final class GpuAcActivationExtractor {
                 }
                 case BRANCH_ALPHA1 -> {
                     fixedVariableRowMaxMismatch[r] = maxAngle;                  // BRANCH_TARGET_ALPHA1
-                    equationRowMaxMismatch[r] = maxP / sb;                 // BRANCH_TARGET_P (row mode 3)
+                    equationRowMaxMismatch[r] = maxP / sb;                 // BRANCH_TARGET_P (row mode BRANCH_TARGET_P)
                 }
                 case BRANCH_RHO1 -> {
                     fixedVariableRowMaxMismatch[r] = maxRatio;                  // BRANCH_TARGET_RHO1 / DISTR_RHO
@@ -304,7 +304,7 @@ public final class GpuAcActivationExtractor {
                 }
                 case DUMMY_P -> {
                     fixedVariableRowMaxMismatch[r] = maxP / sb;                 // DUMMY_TARGET_P (identity, held at 0)
-                    equationRowMaxMismatch[r] = maxAngle;                  // ZERO_PHI coupling (mode 1)
+                    equationRowMaxMismatch[r] = maxAngle;                  // ZERO_PHI coupling (EQUATION)
                 }
                 case DUMMY_Q -> {
                     fixedVariableRowMaxMismatch[r] = maxQ / sb;                 // DUMMY_TARGET_Q
@@ -339,7 +339,7 @@ public final class GpuAcActivationExtractor {
      * PER_EQUATION_TYPE thresholds per device row, from the EQUATION each row hosts rather than from the variable at
      * its column: the variable-based defaults of {@link #extractRowCriteria(EquationSystem, int, double, double,
      * double, double, double, double, double)} for the slot a row does not use in the base, and, for the slot it does
-     * use (identity for row mode 0 and 2, power for 1, 3 and 4), the threshold of the equation the activation placed
+     * use (identity for FIXED_VARIABLE and BUS_TARGET_V_WITH_SLOPE, power for EQUATION, BRANCH_TARGET_P and BUS_TARGET_Q), the threshold of the equation the activation placed
      * there. A relocated row then carries its own equation's threshold: a coupler-tree child's P balance on its
      * parent's DUMMY_P row (maxP, not the ZERO_PHI angle), the coupler's ZERO_V on the child's V row (maxV, not maxQ),
      * a transformer- or shunt-controlled bus's Q balance on the control variable's row (maxQ, not the ratio or
@@ -347,7 +347,7 @@ public final class GpuAcActivationExtractor {
      *
      * <p>Two placements change per scenario and get an ALTERNATE threshold with a SELECTOR row: a relocated child whose
      * parent coupler opens comes back HOME (its PHI / V rows hold its own balances again, the selector being the
-     * coupler's dummy row, an identity in that scenario), and a cross identity (row mode 6: a child's voltage target on
+     * coupler's dummy row, an identity in that scenario), and a cross identity (row mode CROSS_FIXED_VARIABLE: a child's voltage target on
      * its parent's DUMMY_Q row) is a voltage equation. Returns {fixedVariableRowMaxMismatch, equationRowMaxMismatch, alternateRowMaxMismatch, alternateRowMaxMismatchSelector (as double, -1 when
      * none)}.
      */
@@ -404,7 +404,7 @@ public final class GpuAcActivationExtractor {
                 alternateRowMaxMismatch[v] = maxQ / 100.0;                    // its reactive balance back home (its voltage target,
             }                                                // an identity, keeps the V row's identity threshold)
             if (dummyQRow >= 0) {
-                alternateRowMaxMismatch[dummyQRow] = maxV;                           // the child's voltage target written crosswise (mode 6)
+                alternateRowMaxMismatch[dummyQRow] = maxV;                           // the child's voltage target written crosswise (CROSS_FIXED_VARIABLE)
                 equationRowMaxMismatch[dummyQRow] = maxQ / 100.0;                 // its reactive balance there, shared or its own (PQ)
             }
             if (dummyPRow >= 0) {
@@ -432,7 +432,7 @@ public final class GpuAcActivationExtractor {
 
     /**
      * The remote generator-voltage-control members currently SWITCHED TO PQ — exactly the set this extractor
-     * gives row mode 4 above. A switch to PQ is a REACTIVE-LIMIT event: OLF renormalizes the group's reactive keys
+     * gives row mode BUS_TARGET_Q above. A switch to PQ is a REACTIVE-LIMIT event: OLF renormalizes the group's reactive keys
      * ({@code updateReactiveKeys}) and fires NO equation-system event, so a cached extraction would keep its
      * {@code qPct} from before the switch and the device would distribute reactive power with stale weights. A caller that
      * caches an extraction across solves therefore watches this set and re-extracts when it changes, and the

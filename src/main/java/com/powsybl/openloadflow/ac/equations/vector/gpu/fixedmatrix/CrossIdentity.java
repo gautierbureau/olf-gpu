@@ -11,7 +11,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix;
  * docs/gpu-vs-olf.md section 2.4 (cross identity): a fixed variable whose own row is taken. A re-merged
  * voltage-controlled bus whose own {@code BUS_V} row carries a LIVE coupler's {@code ZERO_V} (the coupler-tree
  * relocation put it there, {@link CouplerTreeRelocation}) keeps its {@code BUS_TARGET_V} on the parent coupler's
- * {@code DUMMY_Q} row, on the bus's own V column: row mode 6, {@code GpuRowMode.CROSS_FIXED_VARIABLE}. The planners
+ * {@code DUMMY_Q} row, on the bus's own V column: {@code GpuRowMode.CROSS_FIXED_VARIABLE}. The planners
  * choose the row here; the device writes it in four kernels (native {@code fixedmatrix/cross_identity.cuh}): the
  * fills' {@code applyRowModeBatch}, the reactive-limit pass and its seed (the target Q row), and the pilot voltage and
  * remote voltage control kernels (a row holding a fixed variable).

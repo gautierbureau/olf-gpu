@@ -86,7 +86,7 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
         }
 
         /** The row the side-1 P target is written to THIS scenario: the relocated row, or the bus's own PHI row
-         *  once the scenario has opened the parent coupler (that dummy row is then a mode-0 identity and the
+         *  once the scenario has opened the parent coupler (that dummy row is then a FIXED_VARIABLE identity and the
          *  balance is back home — the stock placement the kernels follow through relocatedChildOwnRow). */
         public int bus1WriteRow(int[] rowMode) {
             return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == GpuRowMode.FIXED_VARIABLE ? bus1PhiCol : bus1PRow;

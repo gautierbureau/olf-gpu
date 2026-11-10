@@ -92,11 +92,11 @@ public record BatchConfig(int stateVectorScalingMode, double maxDv, double maxDp
             false, null, null, null, null, false);
 
     /**
-     * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
+     * This config with the ROBUST single-matrix solve selected, for the SECOND device pass over
      * scenarios the uniform batch could not solve.
      *
      * <p>A phase marker rather than a run setting, which is why it is derived here instead of being set
-     * at the two construction sites: the retry pass re-solves only the rejected scenarios, in mode 6's
+     * at the two construction sites: the retry pass re-solves only the rejected scenarios, in ROBUST's
      * per-scenario loop with matching and global column pivoting. The base load flow already falls into
      * that mode automatically after a linear-solve reject ({@code GpuNewtonRaphson}); this is the same
      * remedy for a CHUNK scenario, which previously had no route to it and went to the CPU instead.

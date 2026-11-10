@@ -76,7 +76,7 @@ ReactiveRelocationTables zeroImpedanceRelocationTables(SharedStructure* structur
 }
 
 // Per-scenario slack/PV identity rows (rowMode is per scenario: a contingency can change
-// which buses are PV/slack): a row in identity mode (mode 0) is zeroed, its diagonal set to 1 and its
+// which buses are PV/slack): a row in identity mode (FIXED_VARIABLE) is zeroed, its diagonal set to 1 and its
 // mismatch overwritten with x - target. It runs after the fills and overwrites them, which keeps the
 // structure (and cuDSS's analysis) immutable across PV->PQ switching.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
@@ -126,9 +126,9 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 }
 
 // Seed the per-(controller, scenario) limitType from the BASE state, so a controller that OLF had already
-// switched to PQ in the base case (packed by the extractor as a voltage-CAPABLE PQ bus, base row mode 1)
+// switched to PQ in the base case (packed by the extractor as a voltage-CAPABLE PQ bus, base row mode EQUATION)
 // starts PQ at the RIGHT limit and can be switched BACK to PV by a relieving contingency. A base-PV
-// controller (mode 0) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
+// controller (FIXED_VARIABLE) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
 // max reactive yet cannot reach target ⇒ PQ at maxQ (2); v above target ⇒ PQ at minQ (1). switchCount
 // starts at 0 either way (a separate memset).
 const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx) {

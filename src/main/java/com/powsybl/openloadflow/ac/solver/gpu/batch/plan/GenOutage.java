@@ -136,7 +136,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * When this outage kills the group's control, the PILOT loses its voltage identity and goes back
      * to solving its own reactive balance — {@code deadPilotVRow} is its BUS_V row and
      * {@code deadPilotQTarget} that balance's target. It has to be installed at SETUP, not left to
-     * {@code updatePilotTargetVEquationBatch} in the reactive-limits phase: this bus's row is mode 4 from the
+     * {@code updatePilotTargetVEquationBatch} in the reactive-limits phase: this bus's row is BUS_TARGET_Q from the
      * first fill, so the group's mode scan already sends the pilot's q to the pilot's own row, and a
      * row that still carries the voltage identity would receive both.
      */
@@ -144,19 +144,19 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return deadPilotVRow >= 0;
     }
 
-    /** {@code pqRowMode} value meaning "the V row becomes a VOLTAGE IDENTITY (mode 0)": a merged voltage
+    /** {@code pqRowMode} value meaning "the V row becomes a VOLTAGE IDENTITY (FIXED_VARIABLE)": a merged voltage
      *  control re-merged to this bus by a zero-impedance split (see VoltageControlReMerge.reMergedControls),
      *  with {@code qTarget} then carrying the bus's own voltage target. 0 is the "default" (1). */
     public static final int ROW_V_IDENTITY = -1;
     /** A re-merged control whose bus is SWITCHED TO PQ at a reactive limit in the base: the row starts as its own
-     *  reactive balance (mode 4) at {@code qTarget} (the frozen generation minus the load), and its reactive-limit
+     *  reactive balance (BUS_TARGET_Q) at {@code qTarget} (the frozen generation minus the load), and its reactive-limit
      *  entry is checked as a LOCAL PV bus at {@code deadPilotQTarget}, which here carries the VOLTAGE target —
      *  a switch back to PV restores the voltage identity exactly as OLF re-activates BUS_TARGET_V (tasks #70;
      *  rte6515 BUS-6157_BBS_1 switches back to PV and to PQ again at the other limit). */
     public static final int ROW_SWITCHED_TO_PQ_V = -5;
     /** A re-merged control whose own V row hosts a LIVE coupler's ZERO_V: the voltage identity goes on the parent
      *  coupler's DUMMY_Q row (where the bus's reactive equation lives) as a CROSS identity on the bus's own V
-     *  column — device row mode 6 — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
+     *  column — device row mode CROSS_FIXED_VARIABLE — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
      *  (tasks #70, VC_REMERGE_RELOC_VROW). */
     public static final int ROW_CROSS_V_IDENTITY = -7;
     /** A remote controller re-merged onto a NEW pilot: no row of its own changes (its row stays the sharing row
@@ -166,11 +166,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
 
     /**
      * The row mode the PV-&gt;PQ flip installs on this bus's BUS_V row: 1 (a plain reactive-power
-     * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. Mode 4
+     * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. BUS_TARGET_Q
      * means "this row hosts its own Q balance", which is what OLF re-activates there — and it is also
      * what makes the group's relocation mode-scan skip the row, so the pilot's own reactive balance
      * falls back to the pilot's row and {@code updatePilotTargetVEquationBatch} drops its now-meaningless voltage
-     * identity. Installing mode 1 instead would leave the row looking like a live carrier, and the
+     * identity. Installing EQUATION instead would leave the row looking like a live carrier, and the
      * pilot's balance would land on top of the member's own.
      */
     public int pqRowModeOrDefault() {
@@ -203,11 +203,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     /**
      * The pilot's own BUS_V row and the reactive
      * balance it must carry once every surviving controller has switched to PQ. While the group still holds
-     * the pilot's voltage, setup correctly leaves this row a mode-0 BUS_TARGET_V identity and the
+     * the pilot's voltage, setup correctly leaves this row a FIXED_VARIABLE BUS_TARGET_V identity and the
      * balance rides a survivor's row. When the last survivor switches to PQ, that row takes its own
      * balance and the pilot's is evicted; OLF drops the now-uncontrollable BUS_TARGET_V and activates
      * the pilot's own BUS_TARGET_Q on the freed row. The device makes the same move IN the solve, by
-     * putting the row in mode 4 — which reaches the pilot's q only because the extraction now gives a
+     * putting the row in BUS_TARGET_Q — which reaches the pilot's q only because the extraction now gives a
      * pilot-that-is-its-own-controller the member ALTERNATE dest.
      */
     public boolean flipsPilotRowWithoutEnabledController() {

@@ -26,7 +26,7 @@ public final class GeneratorVoltageControlRoles {
     /** True when {@code bus} is a member of a MAIN remote generator voltage-control group (its
      *  controlled bus is another bus). The FREE member (first controller-ENABLED, matching
      *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
-     *  structure-frozen encoding; the others take the canonical suppressed-dest/mode-4 one. The reactive-limit
+     *  structure-frozen encoding; the others take the canonical suppressed-dest/BUS_TARGET_Q one. The reactive-limit
      *  pack enumerates its remote member entries with it and ReactiveCapabilityCurves REPLAYS that enumeration,
      *  so both must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteGenVcMember(LfBus bus) {
@@ -41,7 +41,7 @@ public final class GeneratorVoltageControlRoles {
      * answers "not a member" for every member of a merged group but one.
      *
      * <p>Both predicates here did filter that way, so {@code ExtractionColumns}'s own-row alternate loop
-     * skipped those members and left them with {@code alternateQRow = -1}. A row then put in mode 4 by a
+     * skipped those members and left them with {@code alternateQRow = -1}. A row then put in BUS_TARGET_Q by a
      * reactive-limit switch to PQ assembles EMPTY: measured on rte6515's base, where the pass with that switch gave F = -target
      * exactly on both members of a pilot-self group, two identical rows and a dead DUMMY_Q column — a
      * singular matrix KLU refuses to factor.
@@ -50,7 +50,7 @@ public final class GeneratorVoltageControlRoles {
      * a DEPENDENT control that regulates ITSELF. Asking {@code bus.getGeneratorVoltageControl()} therefore
      * answered "I control my own bus" for every member, so each one was classified as the pilot
      * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "still PV, my row is
-     * the group's voltage IDENTITY (mode 0)" while a member's row actually carries DISTR_Q (mode 1), the
+     * the group's voltage IDENTITY (FIXED_VARIABLE)" while a member's row actually carries DISTR_Q (EQUATION), the
      * reactive-limit kernel's {@code if (mode[ridx] != pvForm) return;} dropped every member before it ever
      * looked at q: rte6515's base switched 16 to PQ where OLF switched 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
      * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.

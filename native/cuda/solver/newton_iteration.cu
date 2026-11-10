@@ -507,7 +507,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
-        //      (honest Newton). Our batched LU (mode 7) factorizes the active scenarios only; the inactive ones
+        //      (honest Newton). Our batched LU (BATCHED_LU mode) factorizes the active scenarios only; the inactive ones
         //      get the same identity systems, so every buffer holds what it holds under cuDSS. ----
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                 ctx->structure->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>(),
@@ -542,7 +542,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         int ubPhase = CUDSS_PHASE_SOLVE | CUDSS_PHASE_FACTORIZATION;
         // ---- solve-only COMPACTION: when few scenarios remain active, gather their vals/B into
         //      compact buffers and solve a NARROWER ubatch on the dedicated dsCompacted context, then
-        //      scatter dx back. mode 3 only (factorizes every iteration — stateless across width
+        //      scatter dx back. UBATCH only (factorizes every iteration — stateless across width
         //      changes); width quantized to power-of-2 tiers so the cheap single-block re-ANALYSIS
         //      runs only on tier change. Pad slots duplicate the first active scenario (keeps the
         //      batch non-singular) and are discarded by the scatter. dDx is zeroed first so

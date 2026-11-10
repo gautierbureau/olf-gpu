@@ -45,13 +45,13 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
             mInf = fmax(mInf, fabs(v));
             ssq += v * v;
             if (fixedVariableRowMaxMismatch != nullptr) {
-                // PER_EQUATION_TYPE: identity/slope rows (mode 0/2) use the row's identity-type
-                // threshold; power rows (mode 1), the phase P row (mode 3) and the BUS_TARGET_Q
-                // row of a remote member switched to PQ (mode 4) the power-type one
+                // PER_EQUATION_TYPE: identity/slope rows (FIXED_VARIABLE/BUS_TARGET_V_WITH_SLOPE) use the row's identity-type
+                // threshold; power rows (EQUATION), the phase P row (BRANCH_TARGET_P) and the BUS_TARGET_Q
+                // row of a remote member switched to PQ (BUS_TARGET_Q) the power-type one
                 int m = mode[(size_t) s * n + i];
                 double thr = (m == GpuRowMode::EQUATION || m == GpuRowMode::BRANCH_TARGET_P || m == GpuRowMode::BUS_TARGET_Q) ? equationRowMaxMismatch[i] : fixedVariableRowMaxMismatch[i];
                 if (alternateRowMaxMismatch != nullptr) {
-                    // the row's equation in THIS lane: a cross identity (mode 6) is a voltage target; a
+                    // the row's equation in THIS lane: a cross identity (CROSS_FIXED_VARIABLE) is a voltage target; a
                     // relocated child's own row hosts its balance again once its coupler's dummy row (the
                     // selector) is an identity
                     if (m == GpuRowMode::CROSS_FIXED_VARIABLE) {

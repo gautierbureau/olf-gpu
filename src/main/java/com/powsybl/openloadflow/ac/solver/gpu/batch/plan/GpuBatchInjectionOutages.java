@@ -69,9 +69,9 @@ public final class GpuBatchInjectionOutages {
     }
 
     /** The row mode a surviving member of a DEAD voltage control gets on its BUS_V row. A DISTR_Q
-     *  member's row must be mode 4 ("hosts its own reactive balance"): fillDistrQBatch skips every
-     *  contribution whose F row is mode 4 and the member's own q rides its alternate dest, which is
-     *  keyed on mode 4. Mode 1 left the DISTR_Q family writing into the row on top of nothing that
+     *  member's row must be BUS_TARGET_Q ("hosts its own reactive balance"): fillDistrQBatch skips every
+     *  contribution whose F row is BUS_TARGET_Q and the member's own q rides its alternate dest, which is
+     *  keyed on BUS_TARGET_Q. EQUATION left the DISTR_Q family writing into the row on top of nothing that
      *  balanced the bus: rte6515 BUS-1055_BBS_1 (pilot VL-1055_0 islanded, merged section VL-1055_1
      *  surviving) - OLF's BUS_TARGET_Q at the survivor off by 0.039 pu, 1.3 kV. A survivor that is
      *  not a packed DISTR_Q member keeps the plain reactive row. */
@@ -352,7 +352,7 @@ public final class GpuBatchInjectionOutages {
         boolean deadRemoteMember = fate.deadRemoteMember();
         int deadPilotVRow = fate.deadPilotVRow();
         double deadPilotQTarget = fate.deadPilotQTarget();
-        if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the mode-2 row's fate on a
+        if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the BUS_TARGET_V_WITH_SLOPE row's fate on a
             return null;             // gen loss is not modeled — CPU
         }
         if (distributedSlackParameters.isLoadBased() && !lostLoads.isEmpty()) {   // a lost/shifted load changes the LOAD
@@ -424,7 +424,7 @@ public final class GpuBatchInjectionOutages {
         // ...and `!busPv` alone is the WRONG proxy for that. busPv asks "is this bus a CONTROLLER",
         // but a bus REMOTELY controlled by a generator group elsewhere (a pilot) owns no generators, so
         // busPv is false while its V row still holds BUS_TARGET_V — it does not solve a reactive
-        // equation at all. Stamping a Q target over that identity leaves mode 0 with target 0 against a
+        // equation at all. Stamping a Q target over that identity leaves FIXED_VARIABLE with target 0 against a
         // state of 1.111 pu, and the Newton then drives the bus's VOLTAGE toward zero: measured on
         // rte6515 LOAD-5958, the solve oscillates (1.111 -> 0.995 -> 0.880 -> 0.765 -> 1.598 -> 1.410
         // ...) and exhausts its iterations instead of converging.
@@ -578,7 +578,7 @@ public final class GpuBatchInjectionOutages {
         int qTargetRow = busRows[2][busNum] >= 0 && busRows[1][busNum] >= 0 && busRows[1][busNum] != vRow
                 ? busRows[1][busNum] : -1;
         // A relocated DISTR_Q member the BASE SWITCHED TO PQ has no static Q row (its balance rides the group's rows)
-        // but a mode-4 ALTERNATE row - its coupler's DUMMY_Q - that hosts its own balance from the start, with
+        // but a BUS_TARGET_Q ALTERNATE row - its coupler's DUMMY_Q - that hosts its own balance from the start, with
         // the frozen limit as target. That is the row the override belongs on: OLF recomputes the target over the
         // generators left the moment the last one goes, and nothing on the device rewrites a base-set target
         // otherwise. Written at the bus's own V row (the coupler's ZERO_V, target 0) the override was a no-op:
@@ -649,7 +649,7 @@ public final class GpuBatchInjectionOutages {
         // Admit exactly the shape the degeneration argument covers, and no more:
         //  (a) another controller survives, so the group still holds this bus's voltage;
         //  (b) the survivors MAY all switch to PQ: the row of a survivor switched to PQ takes its own
-        //      balance (mode 4), and a pilot's switched to PQ too, so nothing is evicted - a runtime reject
+        //      balance (BUS_TARGET_Q), and a pilot's switched to PQ too, so nothing is evicted - a runtime reject
         //      used to replay such a scenario on the CPU, for the case where the outaged bus
         //      IS the pilot and its balance rode a survivor's row (GEN-1522: q 0.601 vs OLF's 0);
         //      that case flips the pilot's own row in the solve since (flipsPilotRowWithoutEnabledController),
@@ -661,10 +661,10 @@ public final class GpuBatchInjectionOutages {
         //      GEN-1263 at 0.247 kV, and every INPUT to that row has been verified correct:
         //        weights  - distrQWeightOverrideTable never fires here (nDistrQWeightOverrides=0); the inactive mask supplies them and
         //                   they are exactly right (w=0 from the survivor, w=-1 from the dead bus);
-        //        target   - computed AND persisted: final -0.060 against a base of 0.016, mode 1.
+        //        target   - computed AND persisted: final -0.060 against a base of 0.016, EQUATION.
         //      The converged state still violates that row by 0.076 (the probe's distrQResid), so
         //      the row as ASSEMBLED is not the equation those inputs describe. The next layer is
-        //      what F contributions actually land on a mode-1 row here — not the inputs, which are
+        //      what F contributions actually land on a EQUATION row here — not the inputs, which are
         //      settled. Same unidentified cause as LOAD-1263 (0.105 kV), a pure load loss on this
         //      same group, where both buses carry reactive load (-0.092 and -0.060).
         // With qPct renormalized to 1 on the survivors, DISTR_Q (qPct_k·Σq − q_k) on this bus's own
@@ -675,8 +675,8 @@ public final class GpuBatchInjectionOutages {
         // The group's control DIES with this bus (no controller anywhere keeps a VOLTAGE
         // generator). OLF then deactivates the pilot's BUS_TARGET_V and re-activates a reactive
         // balance at BOTH the pilot and this member. The device reaches the same layout through
-        // the relocation it already has, provided this row goes to mode 4 rather than mode 1:
-        // mode 4 means "this row hosts its own Q balance", and it is also what makes the group's
+        // the relocation it already has, provided this row goes to BUS_TARGET_Q rather than EQUATION:
+        // BUS_TARGET_Q means "this row hosts its own Q balance", and it is also what makes the group's
         // mode scan skip the row, so the pilot's balance falls back to the pilot's own row and
         // updatePilotTargetVEquationBatch drops the voltage identity. Needs a pilot that is NOT one of its own
         // controllers — that shape has no relocation table for the fallback to land in.

@@ -152,9 +152,9 @@ public final class ReactiveLimitsPacker {
                 boolean remoteMember = GeneratorVoltageControlRoles.isRemoteGenVcMember(bus);
                 // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
                 // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
-                // pack, not its row), a PV -> PQ switch puts its own Q balance on its row (mode 4, alternate dest),
-                // and a switch BACK TO PV gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
-                // a LOCAL entry its switch to PQ used to land on mode 1, an EMPTY row: measured on the
+                // pack, not its row), a PV -> PQ switch puts its own Q balance on its row (BUS_TARGET_Q, alternate dest),
+                // and a switch BACK TO PV gives the row back its voltage IDENTITY (FIXED_VARIABLE), not a DISTR_Q form. As
+                // a LOCAL entry its switch to PQ used to land on EQUATION, an EMPTY row: measured on the
                 // no-enabled-controller remote group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = PilotSelfPacker.isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
@@ -211,7 +211,7 @@ public final class ReactiveLimitsPacker {
                     double minQ;
                     double maxQ;
                     if (monitoringSvc != null) {
-                        // A standing-by monitored bus never reads its RL limits (mode 1, seeded with limit type NONE) —
+                        // A standing-by monitored bus never reads its RL limits (EQUATION, seeded with limit type NONE) —
                         // it reads them only AFTER the VoltageMonitoring activation turns it PV, when the
                         // CPU evaluates them with the SVC in VOLTAGE control. Capture the ACTIVATED limits
                         // (a standby capture of ~[0,0] would switch the bus right back to PQ, undoing the activation).

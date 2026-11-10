@@ -144,7 +144,7 @@ final class GpuSaRunScope {
         boolean simpleTransformerVoltageControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
-        // PV -> PQ / PQ -> PV switch dynamics: NON-free members via mode-4 transitions + own-q accumulation
+        // PV -> PQ / PQ -> PV switch dynamics: NON-free members via BUS_TARGET_Q transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
         // the NO-ENABLED-CONTROLLER corner (control lost) via the pilot-vEq flip — on-device by
         // updatePilotTargetVEquationBatch (mode-scan fallback = candidate 0, the pilot's own row). Still whole-run CPU:

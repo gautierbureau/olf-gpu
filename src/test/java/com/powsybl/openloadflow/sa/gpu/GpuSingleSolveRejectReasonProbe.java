@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The experiment: single GPU LF of a disconnected branch vs CPU, ON DEVICE (fallback DISABLED so a
  * rejection throws instead of silently faking CPU-identical results). Reports worst per-bus |v| gap
- * and the top divergent buses. eps/slackTol overridable via OLF_GPU_DISC_EPS / OLF_GPU_DISC_SLACKTOL.
+ * and the top divergent buses. Both arms run the RTE parameters.
  */
 class GpuSingleSolveRejectReasonProbe {
 
@@ -51,16 +51,7 @@ class GpuSingleSolveRejectReasonProbe {
     }
 
     private static LoadFlowParameters params() throws Exception {
-        LoadFlowParameters lfp = JsonLoadFlowParameters.read(Path.of("rte-loadflow-default-parameters.json"));
-        String eps = System.getenv("OLF_GPU_DISC_EPS");
-        if (eps != null && !eps.isBlank()) {
-            OpenLoadFlowParameters.create(lfp).setNewtonRaphsonConvEpsPerEq(Double.parseDouble(eps));
-        }
-        String slackBusPMaxMismatch = System.getenv("OLF_GPU_DISC_SLACKTOL");
-        if (slackBusPMaxMismatch != null && !slackBusPMaxMismatch.isBlank()) {
-            OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(Double.parseDouble(slackBusPMaxMismatch) * 100.0);
-        }
-        return lfp;
+        return JsonLoadFlowParameters.read(Path.of("rte-loadflow-default-parameters.json"));
     }
 
     private static Map<String, Double> solve(boolean gpu, String branchId) throws Exception {
@@ -72,7 +63,12 @@ class GpuSingleSolveRejectReasonProbe {
         }
         LoadFlowParameters lfp = params();
         if (gpu) {
-            OpenLoadFlowParameters.create(lfp).setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+            // on the loaded extension: OpenLoadFlowParameters.create() replaces it with OLF's defaults, and the GPU arm
+            // then ran other parameters than the CPU arm
+            OpenLoadFlowParameters olfParameters = lfp.getExtension(OpenLoadFlowParameters.class);
+            org.junit.jupiter.api.Assertions.assertNotNull(olfParameters,
+                    "the RTE parameter file must carry an open-load-flow-parameters extension");
+            olfParameters.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         }
         LoadFlowResult r = new LoadFlow.Runner(new OpenLoadFlowProvider(new SparseMatrixFactory())).run(net, lfp);
         System.out.printf("  %s converged=%s%n", gpu ? "GPU" : "CPU", r.isFullyConverged());
@@ -88,9 +84,7 @@ class GpuSingleSolveRejectReasonProbe {
     @Test
     void probe() throws Exception {
         String branchId = System.getenv().getOrDefault("OLF_GPU_DISC_CTG", "LINE-4985-165");
-        System.out.printf("%n=== SINGLE-LF GPU-vs-CPU (on device) %s | eps=%s slackTol=%s ===%n", branchId,
-                System.getenv().getOrDefault("OLF_GPU_DISC_EPS", "prod"),
-                System.getenv().getOrDefault("OLF_GPU_DISC_SLACKTOL", "prod-1MW"));
+        System.out.printf("%n=== SINGLE-LF GPU-vs-CPU (on device) %s | RTE parameters ===%n", branchId);
         Map<String, Double> cpu = solve(false, branchId);
         Map<String, Double> gpu = solve(true, branchId);
         List<Map.Entry<String, Double>> diffs = new ArrayList<>();

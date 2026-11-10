@@ -87,10 +87,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
         assumeTrue(Files.exists(paramsFile), "rte-loadflow-default-parameters.json not found");
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
-        // OLF_GPU_CENSUS_CONV_EPS: DIAGNOSTIC ONLY — tighten the inner-Newton stopping criterion on BOTH
-        // arms to ask whether a residual GPU/CPU difference is just the slack each solver is allowed at
-        // the production tolerance (1e-4 per equation by default). Never a production setting, and never
-        // a way to claim agreement: the production comparison is the one at the production tolerance.
         if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_RL"))) {
             lfp.setUseReactiveLimits(false);                  // diagnostic: is a gap the reactive-limits loop?
         }
@@ -104,11 +100,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // saturation granularity is wrong".
         if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_ACTIVE_LIMITS"))) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseActiveLimits(false);
-        }
-        String convEps = System.getenv("OLF_GPU_CENSUS_CONV_EPS");
-        if (convEps != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEps));
         }
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);

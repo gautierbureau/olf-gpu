@@ -177,9 +177,10 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
             double threshold = limThreshold[l];
             if (value > threshold - fabs(threshold) * band) {
                 emit(records, counts, s, capacity, l);
-                // Exceeded BEYOND the band: the host's exact re-test (its value differs from ours by ~1e-16
-                // relative, the band is 1e-9) confirms this limit, and it reports the first confirmed limit of a
-                // group and never looks further — so the group's remaining limits can never be reported.
+                // Exceeded BEYOND the band: the host's exact re-test (its value differs from ours by up to 2.1e-10
+                // relative, measured on currents; the band is 1e-7) confirms this limit, and it reports the first
+                // confirmed limit of a group and never looks further — so the group's remaining limits can never be
+                // reported.
                 if (value > threshold + fabs(threshold) * band) {
                     break;
                 }

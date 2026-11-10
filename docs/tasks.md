@@ -11,7 +11,7 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #93 — DONE: the SA test helpers' tolerance switches are gone (2026-11-10)
+### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to
 `OLF_GPU_DBG_CONV_EPS` / `OLF_GPU_DBG_SLACK_TOL`) and tightened OLF's Newton criterion and slack band on both arms; the
@@ -26,10 +26,17 @@ tests included, and tightening hides where the arms' trajectories part instead o
   `GpuSaOperatorStrategyTest.generatorActionStressAcrossContingencies`.
 - `docs/env-vars.md` lists the two variables as removed; §A of `docs/gpu-vs-cpu-capabilities.md` no longer calls the
   stopping band's 0.1 kV inherent.
-- Still read, the same kind of switch: `OLF_GPU_CENSUS_CONV_EPS` (`GpuRteScopeCensusTest`) and `OLF_GPU_DISC_EPS` /
-  `OLF_GPU_DISC_SLACKTOL` (`GpuSingleSolveRejectReasonProbe`).
+- The same kind of switch went in a second commit: `OLF_GPU_CENSUS_CONV_EPS` (`GpuRteScopeCensusTest`) and
+  `OLF_GPU_DISC_EPS` / `OLF_GPU_DISC_SLACKTOL` (`GpuSingleSolveRejectReasonProbe`). The probe's GPU arm selected the
+  GPU solver with `OpenLoadFlowParameters.create`, which dropped the RTE parameters' OLF extension: it ran OLF's
+  defaults against the CPU arm's RTE parameters. It now sets the solver on the loaded extension. On its default case
+  (PEGASE 9241, LINE-4985-165 out) the worst bus gap is 2.425e-12 pu before and 2.430e-12 pu after.
+- `OLF_GPU_CENSUS_NO_ACTIVE_LIMITS` has the same `create` flaw (both census arms lose the RTE extension); it is a
+  switch of another kind, still read.
 
-Gates: `GpuSa*Test` 299/0/2 on cuDSS and on our batched LU; full suite 523/0/6 with checkstyle.
+Gates: `GpuSa*Test` 299/0/2 on cuDSS and on our batched LU; full suite 523/0/6 with checkstyle. After the second
+commit, on `main` at f5f04199 with the native library rebuilt: `GpuSa*Test` 299/0/2 on both, full suite 525/0/6 with
+checkstyle (the census skips without its RTE case; the probe ran by hand, numbers above).
 
 ### #92 — DONE: the violation screen's band, existence tests, scan order and doc (h–k) (2026-11-10)
 

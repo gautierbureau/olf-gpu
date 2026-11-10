@@ -4,8 +4,8 @@ Every one of these is read at runtime. The project's standing goal is to **match
 precision on every difference**, so the dangerous category is the third table: a switch that selects a
 different computation can preserve a wrong answer behind a default, and nothing in CI explores it.
 
-Three were removed on 2026-09-17 for exactly that reason, and two on 2026-11-10 with the `olf.gpu.test.convEps` /
-`olf.gpu.test.slackTol` system properties that were read before them:
+Three were removed on 2026-09-17 for exactly that reason, and five on 2026-11-10, the first two with the
+`olf.gpu.test.convEps` / `olf.gpu.test.slackTol` system properties that were read before them:
 
 | removed | why |
 |---|---|
@@ -14,6 +14,9 @@ Three were removed on 2026-09-17 for exactly that reason, and two on 2026-11-10 
 | `OLF_GPU_SA_NO_BATCH` | duplicated the pre-existing `-Dolf.gpu.sa.disableBatch=true` |
 | `OLF_GPU_DBG_CONV_EPS` | tightened OLF's Newton criterion on both arms (the SA test helpers, the rte6515 harness). Tightening hides where the arms' trajectories part instead of answering it |
 | `OLF_GPU_DBG_SLACK_TOL` | tightened the slack band on both arms (the SA test helpers). The two tests that set it match the CPU at 1e-12 kV at OLF's default criteria |
+| `OLF_GPU_CENSUS_CONV_EPS` | tightened OLF's Newton criterion on both arms of the scope census (`GpuRteScopeCensusTest`) |
+| `OLF_GPU_DISC_EPS` | tightened OLF's Newton criterion on both arms of `GpuSingleSolveRejectReasonProbe` |
+| `OLF_GPU_DISC_SLACKTOL` | tightened the slack band on both arms of `GpuSingleSolveRejectReasonProbe` |
 
 Classification below is by NAME and call site, not an individual audit of each one's semantics.
 Anything in the third table should be treated as unverified until someone reads it.
@@ -70,7 +73,7 @@ from those two lists; add a channel there, then here.
 | `OLF_OL_STATS` | java | Each contingency's outer-loop passes and Newton iterations, in the shape of OLF's own `CPU_OL_STATS`. |
 | `OLF_TRACE_CTG` | java | `<contingency id>`: OLF's own filter for its debug dumps, which `OLF_GPU_SA_VAR_DUMP` follows. |
 
-## Test diagnostics (29) — print only, read by the tests
+## Test diagnostics (28) — print only, read by the tests
 
 | variable | read at |
 |---|---|
@@ -79,7 +82,6 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_CENSUS_CASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:69 |
 | `OLF_GPU_CENSUS_CHUNK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:242 |
 | `OLF_GPU_CENSUS_CONNECTIVITY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:342 |
-| `OLF_GPU_CENSUS_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:111 |
 | `OLF_GPU_CENSUS_CPU` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:80 |
 | `OLF_GPU_CENSUS_MONITOR_ALL_VL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:253 |
 | `OLF_GPU_CENSUS_MONITOR_BRANCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:257 |
@@ -155,15 +157,13 @@ Also in the list and wrong by construction, useful only as momentary bisection l
 run with one set cannot match the CPU. They should be deleted once the question that motivated them is
 answered — the three removed above were removed on exactly that ground.
 
-## BEHAVIOUR-CHANGING (20) — REVIEW
+## BEHAVIOUR-CHANGING (18) — REVIEW
 
 Each selects a different computation. Several disable an outer loop or loosen a tolerance, which is wrong by construction (and note the standing rule: never loosen a tolerance to make the GPU agree with the CPU). These should be justified individually or deleted.
 
 | variable | read at |
 |---|---|
 | `OLF_GPU_BASE_ON_GPU` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:149 +2 |
-| `OLF_GPU_DISC_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:60 |
-| `OLF_GPU_DISC_SLACKTOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuSingleSolveRejectReasonProbe.java:64 |
 | `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |
 | `OLF_GPU_MAXBATCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:83 +5 |
 | `OLF_GPU_NO_DIST_SLACK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuCpuOuterLoopTrajectoryProbe.java:55 |

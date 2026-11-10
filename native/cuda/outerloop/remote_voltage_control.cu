@@ -50,7 +50,7 @@ __device__ inline double distrQTargetQOf(const SlotEntries& targetQOverrides, in
 
 // OLF's frozen targetQ (generation minus load) of a reactive-limit entry SWITCHED TO PQ this scenario, the value its peers'
 // DISTR_Q targets sum (AcTargetVector: otherControllerBus.getTargetQ()) and a pilot-self carrier hosts. The
-// entry's own balance row carries that value whenever the switch gave it one (mode 4): the reactive-limit kernel's
+// entry's own balance row carries that value whenever the switch gave it one (BUS_TARGET_Q): the reactive-limit kernel's
 // limit, reactiveLimitInitialTargetQ for a realistic-voltage freeze (OLF freezes at the INITIAL generation target Q), the injection
 // channel's target for a bus that lost generators, the limit drift included - one source for the member's own
 // row and for its peers. An entry switched to PQ whose row is not a balance (a pilot-self pilot keeps its voltage identity)
@@ -130,7 +130,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         return;
     }
     if (mrow >= 0 && mode[(size_t) s * n + mrow] == GpuRowMode::BUS_TARGET_Q) {
-        // The row hosts its OWN reactive balance this scenario (mode 4): an RL PV -> PQ switch (the RL kernel
+        // The row hosts its OWN reactive balance this scenario (BUS_TARGET_Q): an RL PV -> PQ switch (the RL kernel
         // owns the target) or a control the contingency KILLED (the injection override owns it,
         // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
         // skips the row's DISTR_Q emissions for the same reason. Measured on rte6515 BUS-1055_BBS_1:
@@ -245,14 +245,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 
 // A pilot that STOPPED being one of its OWN controllers (this scenario outaged its generators) keeps
 // its BUS_TARGET_V while the surviving controllers still hold its voltage — the reactive balance it
-// just acquired rides one of THEIR rows. When every survivor SWITCHES TO PQ, each of those rows flips to mode 4
+// just acquired rides one of THEIR rows. When every survivor SWITCHES TO PQ, each of those rows flips to BUS_TARGET_Q
 // to host its own reactive balance, and the pilot's balance is evicted with nowhere left to go: the
 // solve converges happily on a system one equation short (rte6515 GEN-1522: OLF's residual 0.601 pu
 // on BUS_TARGET_Q of the pilot, every device equation converged). OLF drops the now-uncontrollable
 // BUS_TARGET_V and activates the pilot's own BUS_TARGET_Q on the freed row; this makes the same move
 // INSIDE the solve, so the re-solve sees it.
 //
-// Mode 4 is "row hosts its own Q balance" via the member ALTERNATE dest. It only reaches the pilot's
+// BUS_TARGET_Q is "row hosts its own Q balance" via the member ALTERNATE dest. It only reaches the pilot's
 // q because the extraction now gives a pilot-that-is-its-own-controller that alternate; without it
 // the row assembles EMPTY and the flip is a measured no-op (state unchanged to 10 digits).
 // Reversible: if a later pass switches a survivor back to PV, the V identity and its target come back.

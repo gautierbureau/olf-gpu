@@ -82,7 +82,7 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
             && mode[(size_t) s * n + distrQSelectorRow[c]] == GpuRowMode::FIXED_VARIABLE && distrQAlternateDestination[c * 6] <= -2) {
         distrQDestination = distrQAlternateDestination;
     }
-    // the row of a remote member the RL check SWITCHED TO PQ (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
+    // the row of a remote member the RL check SWITCHED TO PQ (BUS_TARGET_Q) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
         int d0 = distrQDestination[c * 6];

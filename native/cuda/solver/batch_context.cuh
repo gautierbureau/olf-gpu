@@ -121,7 +121,7 @@ struct BatchSolverContext {
     std::vector<int> hClosedBranchParameterOverrideControllerCounts;                 // the loop sizes the controller tables were built for
     DeviceBuf dClosedBranchParameterOverrideElementControllerStart, dClosedBranchParameterOverrideElementController;
     DeviceBuf dClosedBranchParameterOverrideTapMoved, dClosedBranchParameterOverridePiModel;
-    // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
+    // ---- solve-only batch compaction (UBATCH, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsCompacted, dBCompacted, dDxCompacted, dCompactedScenarioMap;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx compactedSolver;                                            // dedicated handle/config/data for the compact width
     cudssMatrix_t compactedUniformBatchSystemMatrix = nullptr, compactedUniformBatchRightHandSideMatrix = nullptr, compactedUniformBatchSolutionMatrix = nullptr;
@@ -197,7 +197,7 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dReactiveLimitFlags;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
-    DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
+    DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (BUS_TARGET_V_WITH_SLOPE V rows), 0 elsewhere
     int nReactiveLimitRemoteEntries = 0;                                     // remote-member RL entries present (plan-B1/B3)
     int nReactiveLimitPilotSelfEntries = 0;                                  // reactiveLimitVoltageControlRole == 2 entries (a pilot that is its own controller)
     DeviceBuf dPilotSelfMixedPvPqRejected;                                 // nS chars: pilotSelfMixedPvPqGate flags
@@ -243,7 +243,7 @@ struct BatchSolverContext {
     DeviceBuf dRemoteMemberReactiveTermKind;
     DeviceBuf dRemoteMemberReactiveTermWeight;
     DeviceBuf dReactiveLimitSavedTarget;                              // per (controller, scenario): the row target saved at a
-                                                           // PV->PQ switch, restored on switch-back for mode-2 rows
+                                                           // PV->PQ switch, restored on switch-back for BUS_TARGET_V_WITH_SLOPE rows
     DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
     // nS*n: the closed branches' part of dQbuf, written by the Newton fills (each zeroes its active scenarios' rows and
     // adds the p and q it puts in F, on the frozen rows) and copied into dQbuf by every check's refill
@@ -393,7 +393,7 @@ struct BatchSolverContext {
     std::vector<int> hIncrementalFlowControlControlledFlow, hIncrementalFlowControlTargetRow, hIncrementalFlowControlElement, hIncrementalFlowControlTapStart, hIncrementalFlowControlBaseTap;
     std::vector<double> hIncrementalFlowControlTapRows;
     // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
-    // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode 3 for the first
+    // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode BRANCH_TARGET_P for the first
     // solve, then switched off and rounded to the closest tap at the loop's first check), LIMITER (from the second
     // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
     int nPhaseControlControllerBranches = 0;
@@ -537,18 +537,18 @@ struct BatchSolverContext {
     bool analyzed = false;
     int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,
                                                              // 7 = our batched LU
-    std::unique_ptr<BatchedLu> batchedLu;                    // mode 7: the factors, one lane per slot
-    // mode 7 with couplers: the residual and correction of the internal refinement steps inside a refinement's own
+    std::unique_ptr<BatchedLu> batchedLu;                    // BATCHED_LU: the factors, one lane per slot
+    // BATCHED_LU with couplers: the residual and correction of the internal refinement steps inside a refinement's own
     // correction solve (batched_lu_solve.cu solveWithInternalRefinement)
     DeviceBuf dInternalRefinementResidual, dInternalRefinementCorrection;
-    // mode 7: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
+    // BATCHED_LU: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
     DeviceBuf dSingletonHazardSlot, dSingletonColumnStart, dSingletonColumnRow, dSingletonList, dSingletonPendingList,
             dSingletonFixed, dSingletonTouched, dSingletonOwner, dSingletonProposal, dSingletonProposalValue, dSingletonCounters;
     CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
     DeviceBuf dLuComparisonDx, dLuComparisonScore, dLuComparisonValues;   // the values' scenario-major copy, when interleaved
     bool luComparisonAnalyzed = false;
     DeviceBuf dR, dDelta, dIterativeRefinementScore, dIterativeRefinementScenarioMask;                 // adaptive refinement: residual, correction, lane scores/mask
-    // UBATCH single matrices (mode 3 only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
+    // UBATCH single matrices (that mode only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
     // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS
     // analyzes ONE block (cheap) and factorizes/solves all nS via CUDSS_CONFIG_UBATCH_SIZE.
     cudssMatrix_t uniformBatchSystemMatrix = nullptr, uniformBatchRightHandSideMatrix = nullptr, uniformBatchSolutionMatrix = nullptr;

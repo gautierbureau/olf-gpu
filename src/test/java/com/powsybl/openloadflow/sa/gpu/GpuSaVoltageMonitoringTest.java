@@ -234,7 +234,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
      *  PQ to PV for bus with one controller with slope"), so a slope bus switched to PQ NEVER switches back.
      *  The base switches svc1 to PQ absorbing at its min limit (setpoint 385 below what full absorption can
      *  reach: V stays 387.35); the parallel-line outage drops the PQ bus's V below the setpoint — the
-     *  once-divergent condition where the device used to resume the mode-2 slope row. CPU-probed:
+     *  once-divergent condition where the device used to resume the BUS_TARGET_V_WITH_SLOPE slope row. CPU-probed:
      *  a FRESH post-outage LF regulates at 385.06, so an arm that switches it back to PV visibly diverges. 1e-12. */
     @Test
     void deviceSlopeSvcSwitchedToPqStaysPqMatchesCpu() {
@@ -261,7 +261,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
     }
 
     /** DEVICE-mode SLOPE SVC (VoltagePerReactivePowerControl): the bus V row becomes
-     *  V + slope*sumQ = target — the device scales the natural reactive fill (row mode 2);
+     *  V + slope*sumQ = target — the device scales the natural reactive fill (row mode BUS_TARGET_V_WITH_SLOPE);
      *  GPU SA == CPU SA at 1e-12. A slope row switched to PQ never switches back (see
      *  deviceSlopeSvcSwitchedToPqStaysPqMatchesCpu). */
     @Test

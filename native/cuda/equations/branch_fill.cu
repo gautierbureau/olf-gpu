@@ -72,7 +72,7 @@ __device__ __forceinline__ void scatterClosedBranchChecksAndPhaseControl(int e, 
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: emit the controlled
         const int* pd = phaseControlDestination + e * CLOSED_BRANCH_OUTPUT_COUNT;                // side's P outputs AGAIN at the a1 row when this
-        const int* psl = phaseControlSelector + e * CLOSED_BRANCH_OUTPUT_COUNT;                // scenario has the control enabled (row mode 3)
+        const int* psl = phaseControlSelector + e * CLOSED_BRANCH_OUTPUT_COUNT;                // scenario has the control enabled (row mode BRANCH_TARGET_P)
         for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
             int d = pd[k];
             if (d == -1 || mode[(size_t) s * n + psl[k]] != GpuRowMode::BRANCH_TARGET_P) {

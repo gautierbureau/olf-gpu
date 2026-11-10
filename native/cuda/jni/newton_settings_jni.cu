@@ -100,7 +100,7 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
 }
 
 // The per-row ALTERNATE threshold and its selector row (-1: none) of the PER_EQUATION_TYPE criterion, read by
-// residualNormsBatch for a cross identity (mode 6) and for a relocated child's row once its coupler's dummy row
+// residualNormsBatch for a cross identity (CROSS_FIXED_VARIABLE) and for a relocated child's row once its coupler's dummy row
 // is an identity. Nulls clear them. Install after setBatchRowCriteria, which clears them too.
 extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlternate)(

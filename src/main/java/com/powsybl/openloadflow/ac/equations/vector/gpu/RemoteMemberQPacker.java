@@ -46,7 +46,7 @@ public final class RemoteMemberQPacker {
      * {@code reactiveLimitVoltageControlRole} class, built from the MAIN control, calls that member "remote" and applies the
      * rule. That gap is [[#66]]: on rte6515 the device froze VL-2669_1..4 with
      * {@code MIN_REALISTIC_V} (their shared target, 12.4 kV on a 20 kV level = 0.62 pu, is below the
-     * 0.816 pu trip point) where OLF froze nothing, so mode-4 own-Q balances replaced the DISTR_Q
+     * 0.816 pu trip point) where OLF froze nothing, so BUS_TARGET_Q own-Q balances replaced the DISTR_Q
      * sharing in the STRUCTURE and DUMMY_Q ended 8.410878e-03 pu off. Entries that answer false here
      * are packed as class 3 and the kernel's robust gate exempts them.
      */

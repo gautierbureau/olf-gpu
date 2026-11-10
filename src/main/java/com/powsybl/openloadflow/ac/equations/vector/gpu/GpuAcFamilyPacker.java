@@ -146,7 +146,7 @@ final class GpuAcFamilyPacker {
                     alternateQRow[b1.getNum()], alternateQRow[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
                 // re-emitted at the CONTROLLER's a1 row when the control is enabled per scenario
-                // (row mode 3). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide (a GpuTwoSides) —
+                // (row mode BRANCH_TARGET_P). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide (a GpuTwoSides) —
                 // the entry sits on the CONTROLLED element (which, for REMOTE control, has no a1 of
                 // its own), and the emission row is the controller's a1-paired row.
                 int pcCode = -1;

@@ -140,8 +140,8 @@ class GpuPhaseControlTest {
 
     @Test
     void continuousWithDiscretisationSolvesOnGpuAndMatches() {
-        // CONTINUOUS: BRANCH_TARGET_P activates on the controlled branch (row mode 3). Since the
-        // batch-of-1 route (2026-09-08) the sequential solver carries mode-3 rows on-device — this
+        // CONTINUOUS: BRANCH_TARGET_P activates on the controlled branch (row mode BRANCH_TARGET_P). Since the
+        // batch-of-1 route (2026-09-08) the sequential solver carries BRANCH_TARGET_P rows on-device — this
         // shape used to fall back to the CPU NR; now it must SOLVE on the GPU and stay CPU-identical.
         compare(GpuPhaseControlTest::regulatingPst,
             (p, olf) -> {

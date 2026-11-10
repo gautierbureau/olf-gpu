@@ -208,7 +208,7 @@ public final class DistrQPacker {
                     : controllers.stream().filter(b -> !b.isDisabled() && voltageControl.isControllerEnabled(b)).findFirst().orElse(null);
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
-                // EXISTS — the row of a member SWITCHED TO PQ in the base is inactive (mode 4, own Q) but an
+                // EXISTS — the row of a member SWITCHED TO PQ in the base is inactive (BUS_TARGET_Q, own Q) but an
                 // in-flight switch BACK TO PV re-activates it, and the union pattern must already hold its slots. The row-
                 // mode/fill gates decide per scenario which face the row shows.
                 if (gk == freeCtl || gk.isDisabled() || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {

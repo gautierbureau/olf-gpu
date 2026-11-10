@@ -9,7 +9,7 @@
 
 namespace olfgpu {
 
-// Solves the context's systems (dVals, dB) with cuDSS's uniform batch, with the internal refinement steps a mode-3
+// Solves the context's systems (dVals, dB) with cuDSS's uniform batch, with the internal refinement steps a UBATCH
 // context runs (the configured base steps on a zero-impedance structure, none otherwise), and prints one line comparing
 // that with our LU's solution in dDx over the lanes of its last factorization: the worst relative difference, both
 // solves' worst backward error, the lanes with a clamped pivot, and how the differences spread over decades.

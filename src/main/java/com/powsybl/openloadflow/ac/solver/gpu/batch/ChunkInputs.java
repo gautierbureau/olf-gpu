@@ -35,7 +35,7 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
                    BatchConfig config) {
 
     /** The base case every scenario starts from: the extraction, its element numbering, the base state, targets
-     *  and row modes, the state size, the element count, the variable types (line search mode 2 only, else
+     *  and row modes, the state size, the element count, the variable types (MAX_VOLTAGE_CHANGE scaling only, else
      *  null) and each HVDC's element index. */
     record BaseCase(GpuAcElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
                     int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex) {

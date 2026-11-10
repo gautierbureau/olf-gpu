@@ -213,7 +213,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
     /** The generator voltage controls OLF's manager would freeze under the transformer-controlled level:
      *  the controller buses (in merged order) of every generator-controlled bus at or under the limit that
      *  have no step-up exemption. OLF freezes a REMOTE controller exactly like a local one, and so does the
-     *  kernel — through the remote member's switch to PQ (row mode 4) rather than a V identity flip — as long
+     *  kernel — through the remote member's switch to PQ (row mode BUS_TARGET_Q) rather than a V identity flip — as long
      *  as the member has a reactive-limit ENTRY, which is what carries the limit type the DISTR_Q key
      *  renormalization reads. A remote candidate without one (a merged control's) has no slot to mark and
      *  still gates the run: null. */

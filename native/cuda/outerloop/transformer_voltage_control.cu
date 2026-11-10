@@ -55,7 +55,7 @@ struct TransformerVoltageControlTables {
     int* generatorVoltageControlFrozen; int* generatorVoltageControlFreezeSavedMode; double* generatorVoltageControlFreezeSavedTarget;
 };
 
-// Does any generator-voltage-CONTROLLED bus in this mask still carry an ENABLED control? Row mode 0 is
+// Does any generator-voltage-CONTROLLED bus in this mask still carry an ENABLED control? Row mode FIXED_VARIABLE is
 // a plain V identity and 2 a slope SVC — both are voltage control ON; a frozen bus or one its reactive limits
 // switched PV -> PQ is a power row, which is exactly OLF's isGeneratorVoltageControlEnabled() == false.
 __device__ inline bool anyGeneratorVoltageControlEnabled(const TransformerVoltageControlTables& T, size_t sn, const int* mode, const int* mask) {
@@ -249,7 +249,7 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
             if (re >= 0) {
                 // REMOTE controller. OLF freezes it exactly like a local one, but its own row is the
                 // group's DISTR_Q SHARE, not a V identity — so the freeze is the reactive-limit remote
-                // PV -> PQ SWITCH (mode 4, "the row hosts its own Q balance") with the CURRENT injection as the
+                // PV -> PQ SWITCH (BUS_TARGET_Q, "the row hosts its own Q balance") with the CURRENT injection as the
                 // target instead of a Q limit. The limit type is what the DISTR_Q key renormalization
                 // reads to drop a member, so it has to be set, and GpuQLimitType::FROZEN keeps it
                 // distinguishable from a real Q-limit PV -> PQ switch (which the switch-back may undo; this must

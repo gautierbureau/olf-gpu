@@ -101,13 +101,13 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
 
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base PV/PQ
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
-        // selected per scenario by row mode 4 ("member row hosts its own Q balance" — switched to PQ).
+        // selected per scenario by row mode BUS_TARGET_Q ("member row hosts its own Q balance" — switched to PQ).
         // The FREE member joins the canonical encoding when its pilot carries a relocation group
         // (plan-B4: the pilot's Q follows the mode-scan carrier, so the free member's row is free
         // to host its own Q balance when switched to PQ); without a group it keeps the structure-frozen
         // pilot-carrier encoding and a free member's switches to PQ stay whole-run CPU.
         // Every member is canonical since the ob/zero-impedance alternate-dest channels: the half-open
-        // charging and dummy-Q terms of a member switched to PQ (mode 4) follow the same per-scenario routing as
+        // charging and dummy-Q terms of a member switched to PQ (BUS_TARGET_Q) follow the same per-scenario routing as
         // its cb/sh terms (the pre-channel gap measured 3.3e-4 kV on a member switched to PQ with one
         // open line, then guarded — the guard is gone).
         for (LfBus bus : network.getBuses()) {
@@ -125,13 +125,13 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
         // Q scatter (qRow = -1 — its reactive injection feeds the group's DISTR_Q rows), and its own
         // comment names the move that is missing: "if the controller is switched to PQ by reactive
         // limits, BUS_TARGET_Q becomes active again and the bus must recover its own BUS_V-backed Q
-        // row". That recovery is the member ALTERNATE dest + row mode 4, which this bus never got
+        // row". That recovery is the member ALTERNATE dest + row mode BUS_TARGET_Q, which this bus never got
         // because isRemoteGenVcMember is defined as controlledBus != bus and so excludes a pilot by
-        // construction. Give it the alternate; without one, a row put in mode 4 assembles EMPTY (no q
+        // construction. Give it the alternate; without one, a row put in BUS_TARGET_Q assembles EMPTY (no q
         // contributions were ever routed to it), which is measurably a no-op: on rte6515 GEN-1522 the
         // solve was unchanged to 10 digits and the answer stayed 3.2 kV out.
-        // INERT IN THE BASE: the alternate is read only when the row is mode 4, and while the pilot
-        // controls, its row is a mode-0 BUS_TARGET_V identity.
+        // INERT IN THE BASE: the alternate is read only when the row is BUS_TARGET_Q, and while the pilot
+        // controls, its row is a FIXED_VARIABLE BUS_TARGET_V identity.
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             // `== -1` and NOT `< 0`: a group encoding is -2-groupId, which is also negative, so a `< 0`

@@ -41,9 +41,9 @@ __device__ inline int zeroImpedanceRelocationDestination(int frozen, int slot, c
 // Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
 // (mode[selectorRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
 // row-mode slice (length n). dest/alternateDestination/selectorRow share the per-output layout of scatterAdd.
-// Mode 4 ("remote gen-VC member switched to PQ" — the member row hosts its OWN Q balance, plan-B2) also
+// BUS_TARGET_Q ("remote gen-VC member switched to PQ" — the member row hosts its OWN Q balance, plan-B2) also
 // selects the alternate: those entries carry a SUPPRESSED frozen dest and their own row as the
-// alternate, with selectorRow = the member row itself. TVC/shunt select rows never carry mode 4.
+// alternate, with selectorRow = the member row itself. TVC/shunt select rows never carry BUS_TARGET_Q.
 static __device__ void scatterAddRelocated(int outputCount, const int* dest, const int* alternateDestination, const int* selectorRow,
                               const int* mode, const double* o, ScenarioValues vals, ScenarioValues F,
                               ReactiveRelocationTables rt, int eOff) {

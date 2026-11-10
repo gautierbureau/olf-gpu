@@ -60,7 +60,7 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     }
 }
 
-// Mode 7: our batched LU's factors for every slot, and the refinement buffers the cuDSS batch has.
+// BATCHED_LU: our batched LU's factors for every slot, and the refinement buffers the cuDSS batch has.
 void setupBatchedLu(BatchSolverContext* ctx) {
     ctx->batchedLu = std::make_unique<BatchedLu>();
     createBatchedLu(*ctx->batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);

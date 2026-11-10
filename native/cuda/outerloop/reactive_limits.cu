@@ -117,8 +117,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
     // own voltage target. OLF checks it as the PV bus it now is (BUS-6113_BBS_1: VL-6113_1 switched to PQ at RL#1).
     bool localOv = reactiveLimitLocalOverride != nullptr && reactiveLimitLocalOverride[(size_t) s * nReactiveLimitEntries + i];
     if (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL && !localOv) {
-        // REMOTE group member (plan-B3). PV = its DISTR_Q row (mode 1, limitType 0);
-        // switched to PQ = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
+        // REMOTE group member (plan-B3). PV = its DISTR_Q row (EQUATION, limitType 0);
+        // switched to PQ = BUS_TARGET_Q ("row hosts its own Q balance"). BOTH switch conditions test the
         // PILOT's voltage (reactiveLimitComparedVoltageRow) against the GROUP target — B0-verified CPU semantics.
         // The FREE member switches to PQ the same way (plan-B4): the fill kernels re-pick the pilot-Q
         // carrier by mode-scan over the relocation candidates, and updateDistrQTargetsBatch
@@ -129,7 +129,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         // ...and the row its reactive balance and its frozen target Q live on. The coupler-tree relocation moves it to the parent
         // coupler's DUMMY_Q row — but PER SCENARIO: a contingency that OPENS that coupler sends the child's
         // equations back to its own rows and the host fixes the dummy row with a DUMMY_TARGET identity, which is
-        // exactly what mode 0 there means (the same test the zero-impedance scatter's stock-placement fallback uses).
+        // exactly what FIXED_VARIABLE there means (the same test the zero-impedance scatter's stock-placement fallback uses).
         size_t qidx = ridx;
         if (reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] != reactiveLimitVoltageRow[i]) {
             size_t relocatedQRowIndex = (size_t) s * n + reactiveLimitReactivePowerRow[i];
@@ -144,9 +144,9 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
         double remoteMinQ = reactiveLimitMinQ[remoteLimitIndex] + (svcLim ? svcBMin * rdv2 : 0.0);
         double remoteMaxQ = reactiveLimitMaxQ[remoteLimitIndex] + (svcLim ? svcBMax * rdv2 : 0.0);
         // reactiveLimitVoltageControlRole 2 = a PILOT that is one of its own controllers: PV, its row is the group's
-        // voltage IDENTITY (mode 0), not a DISTR_Q share; switched to PQ, its own Q balance (mode 4, the
+        // voltage IDENTITY (FIXED_VARIABLE), not a DISTR_Q share; switched to PQ, its own Q balance (BUS_TARGET_Q, the
         // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
-        // is a remote member's. As a LOCAL entry its PV -> PQ switch landed on mode 1, an EMPTY row.
+        // is a remote member's. As a LOCAL entry its PV -> PQ switch landed on EQUATION, an EMPTY row.
         int pvForm = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF ? GpuRowMode::FIXED_VARIABLE : GpuRowMode::EQUATION;
         bool enrolledPilot = reactiveLimitVoltageControlRole[i] == GpuVoltageControlRole::PILOT_SELF && isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i);
         // its sharing row may hold its re-merged control's voltage target (updateReMergedVoltageTargetRowBatch): it is
@@ -165,7 +165,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             //   3 = a member of a MERGED group whose own (DEPENDENT) control points at ITSELF, which is
             //       every merged member — OLF skips the whole robust block for them (tasks #66; the
             //       device used to freeze rte6515's VL-2669_1..4 with MIN_REALISTIC_V where OLF froze
-            //       nothing, replacing the DISTR_Q sharing with mode-4 own-Q balances in the STRUCTURE).
+            //       nothing, replacing the DISTR_Q sharing with BUS_TARGET_Q own-Q balances in the STRUCTURE).
             bool robustRemote = reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::PILOT_SELF && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::REMOTE_ROBUST_MODE_EXEMPT;
             bool unrealisticLo = robust && robustRemote && x[ridx] < vLoRobust;
             bool unrealisticHi = robust && robustRemote && x[ridx] > vHiRobust;
@@ -277,7 +277,7 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
             ? (size_t) s * n + reactiveLimitReactivePowerRow[i] : idx;
     size_t scenarioEntry = (size_t) s * nReactiveLimitEntries + i;
     size_t li = perScenarioReactiveLimits ? scenarioEntry : (size_t) i;                 // curve limits are per (scenario, entry)
-    bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
+    bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode BUS_TARGET_V_WITH_SLOPE
     double dv2 = svcLim ? x[idx] * x[idx] - reactiveLimitBaseVSquared[i] : 0.0;   // see the remote branch: NaN base v² otherwise
     double liMin = reactiveLimitMinQ[li] + (svcLim ? svcBMin * dv2 : 0.0);
     double liMax = reactiveLimitMaxQ[li] + (svcLim ? svcBMax * dv2 : 0.0);
@@ -309,8 +309,8 @@ __global__ void reactiveLimitsBatch(const double* secondaryVoltageControlReactiv
                  reactiveLimitTargetVOf(reactiveLimitTargetVOverrides, secondaryVoltageControlReactiveLimitTargetV, nReactiveLimitEntries, s, i, reactiveLimitTargetV[i]));
         return;
     }
-    // A re-merged LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (mode 6, on its
-    // own V column) and its own reactive balance (mode 4) on the RELOCATED row — the parent coupler's DUMMY_Q (tasks #70,
+    // A re-merged LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (CROSS_FIXED_VARIABLE, on its
+    // own V column) and its own reactive balance (BUS_TARGET_Q) on the RELOCATED row — the parent coupler's DUMMY_Q (tasks #70,
     // VC_REMERGE_RELOC_VROW). The voltage is still read at the bus's own column (idx).
     size_t targetQIdx = idx;
     if (localOv && reactiveLimitReactivePowerRow != nullptr && reactiveLimitReactivePowerRow[i] >= 0 && reactiveLimitReactivePowerRow[i] != vrow) {
@@ -458,7 +458,7 @@ __global__ void reactiveLimitsForcedPvBatch(int nReactiveLimitEntries, int nScen
 }
 
 // Warm-continuation reconcile: a SEEDED controller switched to PQ (limitType != 0) must also carry its
-// consequences — the BUS_V row flips to the reactive equation (mode 1) with the frozen Q target —
+// consequences — the BUS_V row flips to the reactive equation (EQUATION) with the frozen Q target —
 // else the solve holds the PV setpoint while the RL bookkeeping thinks the bus is at a limit.
 // A pilot SWITCHED TO PQ that is one of its own controllers (reactiveLimitVoltageControlRole 2) while a member of the same group
 // (same compare row = the pilot's V) still controls: OLF then keeps the pilot's V identity AND
@@ -606,11 +606,11 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
         // switched back was handed a target of 0 while the pilot's row was still flipped, its row then
         // hosted the pilot's balance against that 0, and it switched to PQ again every other pass until maxSwitch.
         // A pilot that LOST its own generator (GenOutage.flipsPilotRowWithoutEnabledController) is laid out here, BEFORE
-        // the pilot-self flip below: that kernel's "control lost" layout puts the pilot's row in mode 1, which
+        // the pilot-self flip below: that kernel's "control lost" layout puts the pilot's row in EQUATION, which
         // for a pilot-that-is-its-own-controller is an EMPTY row (no q term is routed to it - the RL kernel's
         // own note), so the voltage stayed exactly at the identity's value while OLF solved the pilot's
         // BUS_TARGET_Q = 0 there. Measured on rte6515 GEN-1522: VL-1522_0 at 1.122 (the target) against OLF's
-        // 1.0811, 3.2 kV at VL-1525 and 1.98e-2 MW of distributed power. Mode 4 - the own-Q balance the
+        // 1.0811, 3.2 kV at VL-1525 and 1.98e-2 MW of distributed power. BUS_TARGET_Q - the own-Q balance the
         // member ALTERNATE dest routes the pilot's q to - is what the outage composer armed; run first, the
         // pilot-self kernel then finds the row already off its identity and leaves it alone.
         // A re-merged control's voltage target follows its first enabled controller first: the DISTR_Q targets below

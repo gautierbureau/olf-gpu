@@ -124,7 +124,7 @@ class GpuRemoteControllerReactiveLimitsTest {
     /** Plan-B2 engagement proof (the deadband-vacuous lesson: never trust a pass without showing
      *  the machinery FIRED): on the remote group with one member switched to PQ in the base, the canonical
      *  encoding must be in force — that member's frozen q dest SUPPRESSED, its own row the
-     *  ALTERNATE, and the activation extractor emitting row mode 4 there (not 1). */
+     *  ALTERNATE, and the activation extractor emitting row mode BUS_TARGET_Q there (not EQUATION). */
     @org.junit.jupiter.api.Test
     void canonicalRemoteMemberEncodingEngages() {
         LfNetwork network = Networks.load(VoltageControlNetworkFactory.createWithGeneratorRemoteControl(),
@@ -148,6 +148,6 @@ class GpuRemoteControllerReactiveLimitsTest {
 
         GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
         assertEquals(4, act.rowMode()[vColSwitchedToPq],
-                "an active BUS_TARGET_Q at a non-free remote member must extract as row mode 4");
+                "an active BUS_TARGET_Q at a non-free remote member must extract as row mode BUS_TARGET_Q");
     }
 }

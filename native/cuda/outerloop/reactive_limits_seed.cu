@@ -64,8 +64,8 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
     // curve-limit drift then re-freezes it AT the limit (rte6515 VL-1251_1: -0.0035 -> -1.0000).
     char olfKind = reactiveLimitBaseQLimitType != nullptr ? reactiveLimitBaseQLimitType[i] : 0;
     if (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL) {
-        // REMOTE group member (plan-B3): base mode 1 at its row is the DISTR_Q share of a member still PV —
-        // only the canonical mode 4 marks a base switch to PQ. The pilot's V equals the group target at the
+        // REMOTE group member (plan-B3): base EQUATION at its row is the DISTR_Q share of a member still PV —
+        // only the canonical BUS_TARGET_Q marks a base switch to PQ. The pilot's V equals the group target at the
         // base solution (the survivors keep controlling), so the v-vs-target heuristic is
         // DEGENERATE here — key the direction on WHICH limit the extracted BUS_TARGET_Q target
         // equals instead (target = limit − loadQ was written by the base activation).
@@ -73,7 +73,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
         if (isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) {
             // An ENROLLED pilot-self pilot (rotation) keeps its V row an identity while SWITCHED TO PQ: its own
             // reactive balance rides the carrier (or its own row flipped to a power row once the group lost control),
-            // so the mode-4 marker below never appears on its row. OLF's own kind is the only record of its
+            // so the BUS_TARGET_Q marker below never appears on its row. OLF's own kind is the only record of its
             // base switch to PQ — and without it the seeding left the pilot PV (pilotSelfCarrierSkip = 1, raw q dropped) on a
             // base that had switched it to PQ: every scenario of the [5000,6000) busbar window failed its first
             // linear solve (976 x LINEAR_SOLVE_FAILED).
@@ -88,7 +88,7 @@ __global__ void initReactiveLimitQLimitTypeBatch(int nReactiveLimitEntries, int 
         return;
     }
     // Read the BASE row mode (length n, contingency-free) — NOT the per-scenario mode: a controller flipped to
-    // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
+    // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base FIXED_VARIABLE and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a PQ limit type so a relieving contingency can switch it back.
     if (baseMode[qrow] == GpuRowMode::EQUATION && (reactiveLimitFlags[i] & GpuReactiveLimitsEntryFlag::STAND_BY_AUTOMATON) == 0) {       // PQ in the base case (a real Q-limit switch —
@@ -143,9 +143,9 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         return;
     }
     // ...and the same for a REMOTE member, as the reactive-limits pass switches one back to PV: its row goes back to its
-    // PV form - the DISTR_Q share (mode 1), whose target the DISTR_Q pass recomputes, or a self-controlling pilot's voltage
-    // identity (mode 0). Left PQ at the base limit, its group shared the pilot's reactive balance one member short
-    // (network.xiidm LLJP, the member on bus 5779: mode 4 at -0.2954 where the parent had released it, 5.46 kV).
+    // PV form - the DISTR_Q share (EQUATION), whose target the DISTR_Q pass recomputes, or a self-controlling pilot's voltage
+    // identity (FIXED_VARIABLE). Left PQ at the base limit, its group shared the pilot's reactive balance one member short
+    // (network.xiidm LLJP, the member on bus 5779: BUS_TARGET_Q at -0.2954 where the parent had released it, 5.46 kV).
     if (qLimitType == GpuQLimitType::NONE && reactiveLimitBaseQLimitType != nullptr && reactiveLimitBaseQLimitType[i] >= GpuQLimitType::MIN_Q && reactiveLimitBaseQLimitType[i] <= GpuQLimitType::MAX_REALISTIC_V && reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL
             && !isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) {
         int vrow = reactiveLimitVoltageRow[i];
@@ -161,7 +161,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
     }
     if (isEnrolledPilot(pilotSelfReactiveLimitEntry, nReactiveRelocationGroups, i)) return;           // its PQ form never lives on its own V row (rotation)
     if (qLimitType != GpuQLimitType::NONE) {
-        // the target Q row (see dReactiveLimitReactivePowerRow), with the relocation's per-scenario diversion: mode 0 at the relocated row
+        // the target Q row (see dReactiveLimitReactivePowerRow), with the relocation's per-scenario diversion: FIXED_VARIABLE at the relocated row
         // means its coupler is open this scenario and the equations are back on the bus's own rows
         int seedRow = reactiveLimitReactivePowerRow != nullptr ? reactiveLimitReactivePowerRow[i] : reactiveLimitVoltageRow[i];
         if (seedRow != reactiveLimitVoltageRow[i] && mode[(size_t) s * n + seedRow] == GpuRowMode::FIXED_VARIABLE) {
@@ -178,7 +178,7 @@ __global__ void seedReactiveLimitRowModeFromState(int nReactiveLimitEntries, int
         // stale slot reached (the KUMF / KUMD pair swapping reactive power).
         savedTarget[(size_t) s * nReactiveLimitEntries + i] = target[idx];
         savedMode[(size_t) s * nReactiveLimitEntries + i] = static_cast<char>(mode[idx]);
-        // a REMOTE member switched to PQ has its row in mode 4 (own Q balance), a local one mode 1
+        // a REMOTE member switched to PQ has its row in BUS_TARGET_Q (own Q balance), a local one EQUATION
         mode[idx] = (reactiveLimitVoltageControlRole != nullptr && reactiveLimitVoltageControlRole[i] != GpuVoltageControlRole::LOCAL) ? GpuRowMode::BUS_TARGET_Q : GpuRowMode::EQUATION;
         // the frozen target Q the previous solve ENDED with, when it exported one: OLF restores the bus's generation
         // target Q from the parent's end, which is not the current limit when that limit moved by less than the

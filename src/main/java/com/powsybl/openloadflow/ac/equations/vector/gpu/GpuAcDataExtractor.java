@@ -67,7 +67,7 @@ public final class GpuAcDataExtractor {
      *
      * @return {@code {pRow, qRow, spanningTreeParentBranch, alternateQRow}} — the third names the coupler hosting each bus's power
      *         equations, or -1 when the bus was not relocated; the fourth is the ALTERNATE reactive row, where a
-     *         reactive-limit switch to PQ puts the bus's own balance (mode 4): a relocated child's is its coupler's DUMMY_Q
+     *         reactive-limit switch to PQ puts the bus's own balance (BUS_TARGET_Q): a relocated child's is its coupler's DUMMY_Q
      *         row, -1 or a negative group code otherwise.
      */
     public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
@@ -109,7 +109,7 @@ public final class GpuAcDataExtractor {
 
         RemoteMemberReactiveTerms remoteMemberReactiveTerms = RemoteMemberQPacker.remoteMemberQPack(network, es, columns, family);
         DistributedSlackParticipants distributedSlackParticipants = DistributedSlackPacker.distributedSlackPack(network, es, columns, distributedSlackParameters);
-        // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
+        // SLOPE-SVC rows (V + slope*sumQ = target, row mode BUS_TARGET_V_WITH_SLOPE): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
         for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
             if (bus.hasGeneratorsWithSlope()) {

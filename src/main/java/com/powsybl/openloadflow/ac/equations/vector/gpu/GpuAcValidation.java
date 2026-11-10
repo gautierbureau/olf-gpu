@@ -149,7 +149,7 @@ final class GpuAcValidation {
                     // shunt susceptance is held constant) — applied device-side by the row-mode mask.
                     // EXCEPTION: a SLOPE-SVC BUS_TARGET_V additionally carries slope-scaled copies of the
                     // bus's reactive flow terms (V + slope*sumQ = target) — re-assembled device-side by
-                    // scaling the natural reactive fill (row mode 2), so those terms are accepted.
+                    // scaling the natural reactive fill (row mode BUS_TARGET_V_WITH_SLOPE), so those terms are accepted.
                     for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
                         if (t.isActive() && !(t instanceof VariableEquationTerm)
                                 && !(e.getType() == AcEquationType.BUS_TARGET_V
@@ -161,7 +161,7 @@ final class GpuAcValidation {
                 }
                 case BRANCH_TARGET_P -> {
                     // CONTINUOUS phase control: the controlled branch's P-flow as its own equation row
-                    // (re-emitted by the cb family at the a1 row, row mode 3). Accept the flow term.
+                    // (re-emitted by the cb family at the a1 row, row mode BRANCH_TARGET_P). Accept the flow term.
                 }
                 default -> throw new PowsyblException("GPU AC solver: unsupported equation type " + e.getType());
             }

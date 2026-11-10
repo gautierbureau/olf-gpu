@@ -49,7 +49,7 @@ struct Family {
     DeviceBuf relocatedElements;                             // ...and those elements, listed
     int relocatedCount = 0;
     DeviceBuf phaseControlDestination, phaseControlSelector; // Continuous phase control (cb only): P-flow row at a1
-    bool hasPhaseControl = false;                            // phase control destinations populated (mode-3 gated emission)
+    bool hasPhaseControl = false;                            // phase control destinations populated (BRANCH_TARGET_P gated emission)
 };
 
 // zeroImpedanceBranchIndices slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
@@ -94,7 +94,7 @@ struct SharedStructure {
     int nElements = 0;                                       // nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation (disabled-mask layout)
     int closedBranchOffset = 0, openBranchOffset = 0, shuntOffset = 0, hvdcAcEmulationOffset = 0;
     std::vector<int> rowMap;                                 // eq row -> paired variable col
-    std::vector<int> rowPtr, colIdx;                         // host CSR pattern (mode-2 blkdiag build)
+    std::vector<int> rowPtr, colIdx;                         // host CSR pattern
     Family closedBranch, openBranch, shunt, hvdcAcEmulation;
     int nDistrQ = 0;                                             // DISTR_Q weighted reactive contributions
     DeviceBuf dDistrQElement, dDistrQSide, dDistrQKind, dDistrQWeight, dDistrQDestination; // nDistrQ each (dDistrQDestination is nDistrQ*6)

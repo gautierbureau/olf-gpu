@@ -108,7 +108,7 @@ inline void applyMatchingAlg(cudssConfig_t config) {
 
 inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance);   // defined below
 
-// MODE 6 = the ROBUST single-matrix solve: a per-scenario loop with matching and pivoting on cuDSS's
+// ROBUST = the single-matrix solve: a per-scenario loop with matching and pivoting on cuDSS's
 // single-matrix API (the uniform batch supports neither). It is what a factorization needs on rte6515's full
 // busbar structure (366 retained couplers, 1e-18 pivots under every unpivoted ordering). The batch-of-one falls
 // into it after a linear-solve reject (GpuNewtonRaphson); tests force it through

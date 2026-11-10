@@ -264,7 +264,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         // The non-injection equipment kinds. Each is a whole-element outage like a branch, but each
         // reaches different machinery: an HVDC line carries the AC-emulation freeze, an SVC is a
-        // slope-controlled (mode-2) row, and a shunt moves the bus susceptance.
+        // slope-controlled (BUS_TARGET_V_WITH_SLOPE) row, and a shunt moves the bus susceptance.
         if (kinds.contains("hvdc")) {
             List<String> ids = keepSolved(network.getHvdcLineStream().toList(),
                     h -> inSolvedNetwork(h.getConverterStation1().getTerminal())

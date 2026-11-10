@@ -233,7 +233,12 @@ final class GpuBatchPrecomputer {
             Map<String, Double> distributed = new HashMap<>();
             Map<String, int[]> automationSystemSwitched = new HashMap<>();
             Map<String, double[]> deviceTapMoves = new HashMap<>();
+            Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets = new HashMap<>();
             for (BatchScenarioResult r : results) {
+                if (r.generatorTargets() != null && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0
+                        && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED)) {
+                    generatorTargets.put(r.contingencyId(), r.generatorTargets());
+                }
                 GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.put(r.contingencyId(), r.finalMismatch());
                 if (GpuTrace.QUALIFY_TRACE.isOn()) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
@@ -290,7 +295,7 @@ final class GpuBatchPrecomputer {
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
-                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves);
+                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

@@ -64,9 +64,11 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss
      *  pre-distribution, the total distributed active power (pu, NaN = unknown), the nums of the branches the
-     *  AutomationSystem phase switched (null = none) and the taps the outer loops moved (DeviceTapMoves, null = none). */
+     *  AutomationSystem phase switched (null = none), the taps the outer loops moved (DeviceTapMoves, null = none) and
+     *  each distributed-slack generator's final move (null = not read). */
     record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
-                       int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex) {
+                       int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex,
+                       double[][] distributedSlackGeneratorMovesByIndex) {
     }
 
     /** The same inputs from another base state. */

@@ -150,6 +150,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlackParameters)
                 : GpuAcDataExtractor.extract(network, equationSystem, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
+        // the participants' anchors before any solve: a contingency's generator moves are read from there
+        String[] distributedSlackGeneratorIds = gpuData.distributedSlack() != null && gpuData.distributedSlack().generatorId() != null
+                ? gpuData.distributedSlack().generatorId() : new String[0];
+        double[] distributedSlackGeneratorAnchors = distributedSlackGeneratorAnchors(network, distributedSlackGeneratorIds,
+                distributedSlackParameters);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         String saEqDump = GpuTrace.SA_EQ_DUMP.value();   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
@@ -258,6 +263,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         int[][] automationSystemSwitchedByIndex = new int[contingencies.size()][];
         // The taps the outer loops moved per contingency (DeviceTapMoves; null = none).
         double[][] deviceTapMovesByIndex = new double[contingencies.size()][];
+        // Each distributed-slack generator's final move per contingency (null = not read).
+        double[][] distributedSlackGeneratorMovesByIndex = new double[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -304,7 +311,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
                                 areaInterchangeControl, areaInterchangeControlBaseMoves, automationSystem),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex,
-                                automationSystemSwitchedByIndex, deviceTapMovesByIndex),
+                                automationSystemSwitchedByIndex, deviceTapMovesByIndex, distributedSlackGeneratorMovesByIndex),
                         config));
             }
         }
@@ -319,19 +326,23 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
-                        movesOrNone(deviceTapMovesByIndex[i])));
+                        movesOrNone(deviceTapMovesByIndex[i]),
+                        generatorTargets(distributedSlackGeneratorIds, distributedSlackGeneratorAnchors,
+                                distributedSlackGeneratorMovesByIndex[i])));
             } else if (result != null) {                   // the state is the result row's first n entries
                 results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
-                        movesOrNone(deviceTapMovesByIndex[i])));
+                        movesOrNone(deviceTapMovesByIndex[i]),
+                        generatorTargets(distributedSlackGeneratorIds, distributedSlackGeneratorAnchors,
+                                distributedSlackGeneratorMovesByIndex[i])));
             } else {
                 // Never batched: the plan refused it. Named by id for the harness, because the same
                 // GpuAcSolverStatus.REJECTED also comes back for a scenario the device TRIED and threw away, and the
                 // census counts cannot tell the two apart per contingency.
                 GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuAcSolverStatus.REJECTED, new int[0],
-                        Double.NaN, Double.NaN, new int[0], new double[0]));
+                        Double.NaN, Double.NaN, new int[0], new double[0], null));
             }
         }
         return results;
@@ -339,6 +350,30 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     private static int[] switchedOrNone(int[] switched) {
         return switched != null ? switched : new int[0];
+    }
+
+    /** Each participant's anchor target P before the solve, in the extraction's order (NaN for an id the network does
+     *  not hold): the device's generator moves are from there. */
+    private static double[] distributedSlackGeneratorAnchors(LfNetwork network, String[] generatorIds,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters) {
+        double[] anchors = new double[generatorIds.length];
+        for (int g = 0; g < generatorIds.length; g++) {
+            LfGenerator generator = network.getGeneratorById(generatorIds[g]);
+            anchors[g] = generator != null ? distributedSlackParameters.anchorTargetP(generator) : Double.NaN;
+        }
+        return anchors;
+    }
+
+    /** A scenario's generator moves as the target P each participant ends with, or null where they were not read. */
+    private static BatchScenarioResult.GeneratorTargets generatorTargets(String[] generatorIds, double[] anchors, double[] moves) {
+        if (moves == null || moves.length != generatorIds.length) {
+            return null;
+        }
+        double[] targetP = new double[moves.length];
+        for (int g = 0; g < moves.length; g++) {
+            targetP[g] = anchors[g] + moves[g];
+        }
+        return new BatchScenarioResult.GeneratorTargets(generatorIds, targetP);
     }
 
     private static double[] movesOrNone(double[] moves) {

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 
@@ -25,9 +26,10 @@ import java.util.Map;
  * per converged scenario id the contingency loss pre-distribution the batch replayed
  * ({@code preDistributedActivePower}, pu — absent where it was not replayed), the total the device distributed
  * ({@code distributedActivePower}, pu — pre-distribution plus its own distributed-slack passes; absent where unknown)
- * the nums of the branches its AutomationSystem phase switched ({@code automationSystemSwitched} — absent where none)
- * and the taps its outer loops moved from the base ({@code deviceTapMoves}, DeviceTapMoves' {branchNum, tap index,
- * rounding r1} triples — absent where none moved).
+ * the nums of the branches its AutomationSystem phase switched ({@code automationSystemSwitched} — absent where none),
+ * the taps its outer loops moved from the base ({@code deviceTapMoves}, DeviceTapMoves' {branchNum, tap index,
+ * rounding r1} triples — absent where none moved) and the target P its distribution left each participating generator
+ * ({@code generatorTargets} — present for a contingency that has strategy pairs, under distributed slack).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -45,11 +47,13 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         GpuAcElementMapper elementMapper,
                         Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower,
                         Map<String, int[]> automationSystemSwitched,
-                        Map<String, double[]> deviceTapMoves) {
+                        Map<String, double[]> deviceTapMoves,
+                        Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of());
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of());
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

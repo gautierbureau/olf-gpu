@@ -33,7 +33,11 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
                                   int[] automationSystemSwitchedBranchNums,
                                   /** The taps the scenario's outer loops moved from the base, {branchNum, tap index,
                                    *  rounding r1} per transformer (DeviceTapMoves; empty where none moved). */
-                                  double[] deviceTapMoves) {
+                                  double[] deviceTapMoves,
+                                  /** The target P the scenario's distribution left each participating generator (null
+                                   *  where not read: read for a contingency that has strategy pairs, under distributed
+                                   *  slack). */
+                                  GeneratorTargets generatorTargets) {
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(automationSystemSwitchedBranchNums);
@@ -46,7 +50,16 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
     public BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
         this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0],
-                new double[0]);
+                new double[0], null);
+    }
+
+    /** The target P each participating generator ends a scenario with, by generator id (its distribution anchor plus
+     *  the device's final move): what OLF's load flow leaves on the generators. */
+    public record GeneratorTargets(String[] generatorIds, double[] targetP) {
+        public GeneratorTargets {
+            Objects.requireNonNull(generatorIds);
+            Objects.requireNonNull(targetP);
+        }
     }
 
     public boolean hasConverged() {

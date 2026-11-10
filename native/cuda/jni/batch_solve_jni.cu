@@ -386,6 +386,15 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                 fprintf(stderr, "GPU_OL_TIME check loop=%s rounds=%lld ms=%.1f\n", outerLoopKindName(k), gOuterLoopCheckRounds[k], gOuterLoopCheckMilliseconds[k]);
             }
         }
+        fprintf(stderr, "REFINE_STATS start score decades (<1e-16 .. >=1e-6):");
+        for (int k = 0; k < REFINEMENT_SCORE_BUCKETS; k++) {
+            fprintf(stderr, " %lld", gRefinementStartScoreBuckets[k]);
+        }
+        fprintf(stderr, " | lanes refining at correction 1..%d:", REFINEMENT_TRACKED_CORRECTIONS);
+        for (int k = 0; k < REFINEMENT_TRACKED_CORRECTIONS; k++) {
+            fprintf(stderr, " %lld", gRefinementLanesAtCorrection[k]);
+        }
+        fprintf(stderr, " | undone %lld\n", gRefinementUndone);
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"
                 " | factorization+solve=%lld x %.1f ms\n", phaseCount[0], phaseMilliseconds[0], phaseCount[1], phaseMilliseconds[1], phaseCount[2], phaseMilliseconds[2], phaseCount[3],
                         phaseMilliseconds[3]);

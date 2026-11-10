@@ -6,6 +6,9 @@
 #ifndef OLF_GPU_SOLVER_ITERATIVE_REFINEMENT_CUH
 #define OLF_GPU_SOLVER_ITERATIVE_REFINEMENT_CUH
 
+#include <algorithm>
+#include <cmath>
+
 #include "../common/batch_layout.cuh"
 #include "../solver/driver_pass.cuh"
 #include "../common/check.cuh"
@@ -88,14 +91,22 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
         CUDA_CHECK(cudaMemcpy(out.data(), ctx.score.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));
         gIterativeRefinementChecks++;
     };
+    static const bool refinementStats = traceOn(Trace::PHASE_TIME);
     scores(ctx.solvedLanes, active, prev);
     int nLane = 0;
     for (int s = 0; s < lanes; s++) {
         lane[s] = prev[s] > tol;
         nLane += lane[s];
+        if (refinementStats && prev[s] > 0.0) {             // 0: a lane not scored (or solved exactly)
+            const int decade = static_cast<int>(std::floor(std::log10(prev[s]))) + 17;
+            gRefinementStartScoreBuckets[std::min(REFINEMENT_SCORE_BUCKETS - 1, std::max(0, decade))]++;
+        }
     }
     ctx.mask.ensure(static_cast<size_t>(lanes));
     for (int step = internalSteps; step < iterativeRefinementMaxSteps && nLane > 0; step++) {
+        if (refinementStats) {
+            gRefinementLanesAtCorrection[std::min(REFINEMENT_TRACKED_CORRECTIONS - 1, step - internalSteps)] += nLane;
+        }
         CUDA_CHECK(cudaMemcpy(ctx.mask.p, lane.data(), lanes, cudaMemcpyHostToDevice));
         if (!solveLanes(lane, nLane)) {
             solve(lane, ctx.mask.as<char>());                // delta = J^-1 r on the lanes refining
@@ -117,6 +128,9 @@ void refineLanes(const RefinementContext& ctx, int lanes, int n, int nnz, const 
                 lane[s] = sc[s] > tol;
                 nLane += lane[s];
             }
+        }
+        if (refinementStats) {
+            gRefinementUndone += nUndo;
         }
         if (nUndo > 0) {
             CUDA_CHECK(cudaMemcpy(ctx.mask.p, undo.data(), lanes, cudaMemcpyHostToDevice));

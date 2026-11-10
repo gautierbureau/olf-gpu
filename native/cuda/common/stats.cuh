@@ -68,6 +68,15 @@ extern long long gAnalysesCompact;
 // iteration at least).
 extern long gIterativeRefinementExtraSolves;
 extern long gIterativeRefinementChecks;
+// ...and what the lanes need (OLF_GPU_PHASE_TIME only): the backward-residual score of every scored lane right after the
+// Newton solve, by decade (bucket k: 1e(k-17) <= score < 1e(k-16); the first holds everything below 1e-16 and 0, the
+// last everything from 1e-6 up), the lanes still refining at each correction (index: the correction, from 0), and the
+// corrections undone because they did not lower a lane's score.
+constexpr int REFINEMENT_SCORE_BUCKETS = 12;
+constexpr int REFINEMENT_TRACKED_CORRECTIONS = 8;
+extern long long gRefinementStartScoreBuckets[REFINEMENT_SCORE_BUCKETS];
+extern long long gRefinementLanesAtCorrection[REFINEMENT_TRACKED_CORRECTIONS];
+extern long long gRefinementUndone;
 
 // Wall time of every symbolic analysis, per CALL SITE (source line), with a device sync on both sides so the
 // reordering's host work and its device kernels are both inside. Only under OLF_GPU_PHASE_TIME (the syncs are

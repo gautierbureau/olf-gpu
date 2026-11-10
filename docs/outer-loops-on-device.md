@@ -3,7 +3,9 @@
 How an OLF outer loop runs in the GPU engine today, step by step, with the code that does it.
 `ReactiveLimitsOuterLoop` is the running example because it is the loop with the most history.
 The companion document, [`outer-loop-array-form-proposal.md`](outer-loop-array-form-proposal.md),
-proposes how to stop maintaining the logic twice.
+proposes how to stop maintaining the logic twice;
+[`outer-loop-device-design-improvements.md`](outer-loop-device-design-improvements.md) lists what can be
+improved inside this repository without touching OLF.
 
 File references are to this repository unless they start with `OLF:`, which means
 `powsybl-open-loadflow` (`src/main/java/com/powsybl/openloadflow/...`). Line counts were taken on
@@ -465,4 +467,4 @@ About a quarter of the device lines are comments (1,230 of 6,658 in `outerloop/`
 measurements that justify a branch; they are excluded from the table above.
 
 So the honest reading is: causes 1 and 2 would remain under any design; causes 3 and 4 are what
-the companion proposal targets.
+the two companion documents target: the device-only one directly, the array-form one by changing OLF as well.

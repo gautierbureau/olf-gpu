@@ -78,9 +78,13 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     // no state moves between a scenario's last fill and its checks (a retired scenario's step is exactly 0). It used to be recomputed by a pass of its own at every check, the
     // same expressions on the same state: 0.71 s of 3.2 s of kernels on rte6515 call 0, 74 of its 106 passes checking
     // an unchanged batch. The smaller families add theirs for the checked scenarios; disabled elements are skipped
-    // (outage); they write no Jacobian (vals null): a retired scenario keeps its identity system.
+    // (outage); they write no Jacobian (vals null): a retired scenario keeps its identity system. Only the checked
+    // scenarios' balances are copied: every reader of dQbuf is a check kernel that skips the others (a scenario not
+    // checked never held more than its closed branches' part here), and a check often stands on a few scenarios of the
+    // bank.
     if (ctx->layout.interleaved) {
-        copyToScenarioMajor(n, ctx->layout, ctx->dQbufClosed.as<double>(), ctx->dQbuf.as<double>(), nullptr, ctx->stream);
+        copyToScenarioMajor(n, ctx->layout, ctx->dQbufClosed.as<double>(), ctx->dQbuf.as<double>(),
+                            ctx->dOuterLoopCheckActive.as<char>(), ctx->stream);
     } else {
         CUDA_CHECK(cudaMemcpyAsync(ctx->dQbuf.p, ctx->dQbufClosed.p, nTot * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
     }

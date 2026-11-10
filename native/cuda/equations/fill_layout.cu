@@ -49,7 +49,7 @@ __global__ void copyToScenarioMajorBatch(int n, int nS, int stride, const double
     for (int j = threadIdx.y; j < TILE; j += TILE_ROWS) {
         const int r = r0 + j;
         const int s = s0 + threadIdx.x;
-        if (s < nS && r < n) {
+        if (s < nS && r < n && (active == nullptr || active[s])) {     // a scenario left out is not read either
             tile[j][threadIdx.x] = from[static_cast<size_t>(r) * stride + s];
         }
     }

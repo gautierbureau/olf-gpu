@@ -288,7 +288,7 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
-### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0, P1 and P2 done 2026-11-11)
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 to P3 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
 device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
@@ -333,6 +333,19 @@ is also answered the usual way and the two results compared field by field: 0 di
 contingency of network.xiidm's three scopes and rte6515's branch and generator kinds, all of which took the new path.
 Full list, P1 against P2: cold 128.4 / 123.6 s against 121.0 / 117.5 s (−6.8 s), warm 121.8 / 119.0 s against
 113.1 / 117.5 s (−5.1 s, one noisy pair), statuses identical. Results in the plan's §4, P2.
+
+**P3 (2026-11-11, branch `complete-screen`, stacked on `answer-without-network`).** The violation screen sees each
+scenario as the device solved it (`GpuScreenScenario`, from the `BatchContingency` the precompute now keeps per scenario
+and the device's tap moves and automation switches): outaged branches emit nothing, a base-open branch only where the
+scenario closes it (the screen is built on the solver's base-open flavor), a side-opened branch is evaluated at its live
+side with OLF's open-branch formula, a retapped branch with its tap's row. The host scans in full only what the screen
+cannot evaluate. Voltage-angle limits are checked by `GpuLimitScanner` through the view (fork da31cfe4b makes OLF's
+adder public), so they no longer keep a contingency off the state path. The channel compares every screened detection
+with a full scan: no violation missed on network.xiidm's three scopes and rte6515's two kinds. The dangling row the solve
+uses for a side opening gave active powers 3.9e-6 off (relative), above the band, hence the open-branch formula
+(1.1e-15). Four new fixtures, each catching a mutation of the mechanism it covers; the P1 phase-shifter fixture moved no
+tap until it was rebuilt here. Timing neutral against P2 (full list, two alternating pairs). Results in the plan's §4,
+P3.
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

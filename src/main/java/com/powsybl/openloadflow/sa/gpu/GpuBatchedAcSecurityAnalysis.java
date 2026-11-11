@@ -392,7 +392,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * screen is built during its detection), and the diagnostics that read flows — OLF_GPU_VIOL_CROSSCHECK among them,
      * which runs the stock detection over EVERY branch.
      */
-    private int[] flowReadSet(GpuSaRunState run, String contingencyId) {
+    private int[] flowReadSet(GpuSaRunState run, LfNetwork network, String contingencyId) {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
                 || targetedByOperatorStrategy(run.operatorStrategies, contingencyId)
                 || GpuTrace.SA_RESID.isOn()
@@ -414,9 +414,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         for (int b : run.uncoveredBranches) {
             nums.set(table.branches()[b].getNum());
         }
-        run.sideOpened.forEach(branch -> nums.set(branch.getNum()));
-        run.automationSystemSwitched.forEach(branch -> nums.set(branch.getNum()));
-        run.deviceRetapped.forEach(branch -> nums.set(branch.getNum()));
+        // what the screen did not evaluate as the device solved it is scanned in full
+        java.util.Set<LfBranch> covered = screenScenario(run, network, contingencyId).covered();
+        java.util.stream.Stream.of(run.sideOpened, run.automationSystemSwitched, run.deviceRetapped)
+                .flatMap(List::stream)
+                .filter(branch -> !covered.contains(branch))
+                .forEach(branch -> nums.set(branch.getNum()));
         return nums.stream().toArray();
     }
 
@@ -486,16 +489,70 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return sideOpened != null ? sideOpened : List.of();
     }
 
-    /** The current contingency's side-opened and device-retapped branches as limit-table indices (null when none has
-     *  limits): the screen read them closed and at their base tap, so their records are dropped and the host scans them
-     *  in full, in table order. */
-    private static java.util.BitSet sideOpenedTableIndices(GpuSaRunState run, LfNetwork network) {
-        if (run.deviceRetapped.isEmpty()) {
-            return tableIndices(run, network, run.sideOpened);
+    /** The current contingency's side-opened and device-retapped branches the screen did not evaluate as such (its
+     *  scenario does not cover them) as limit-table indices, null when none has limits: their records are dropped and
+     *  the host scans them in full, in table order. */
+    private static java.util.BitSet sideOpenedTableIndices(GpuSaRunState run, LfNetwork network, String contingencyId) {
+        if (run.sideOpened.isEmpty() && run.deviceRetapped.isEmpty()) {
+            return null;
         }
         java.util.Set<LfBranch> scanInFull = new java.util.LinkedHashSet<>(run.sideOpened);
         scanInFull.addAll(run.deviceRetapped);
+        scanInFull.removeAll(screenScenario(run, network, contingencyId).covered());
         return tableIndices(run, network, scanInFull);
+    }
+
+    /** The live side of each side-opened branch the screen evaluated with its dangling row, against the view's exact
+     *  values (GpuStateViewCheck.measureSideOpened). */
+    private static void measureSideOpened(GpuSaRunState run, LfNetwork network, String contingencyId, GpuStateView view,
+                                          double[] state, GpuContingencyTopology topology) {
+        GpuScreenScenario scenario = screenScenario(run, network, contingencyId);
+        for (LfBranch branch : run.sideOpened) {
+            if (!scenario.covered().contains(branch)) {
+                continue;
+            }
+            int side = topology.connectedSide1(branch) ? com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides.ONE
+                    : com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides.TWO;
+            double[] screened = run.violationScreen.quantities(scenario, branch, state, side);
+            if (screened != null) {
+                GpuStateViewCheck.measureSideOpened(screened, new double[] {
+                    view.branch(state, branch, side, GpuLimitTable.QTY_I, topology),
+                    view.branch(state, branch, side, GpuLimitTable.QTY_P, topology),
+                    view.branch(state, branch, side, GpuLimitTable.QTY_S, topology)});
+            }
+        }
+    }
+
+    /** While the comparison is on: each branch whose tap the device moved (or put back), as written into the network,
+     *  against the row the screen evaluated it with for scenario {@code id} (once the screen is built: at the first
+     *  detection). */
+    private static void compareScreenRows(GpuSaRunState run, LfNetwork network, String id, List<LfBranch> retapped) {
+        if (run.violationScreen == null || retapped.isEmpty() || !GpuStateViewCheck.comparesDecisions()) {
+            return;
+        }
+        GpuScreenScenario scenario = screenScenario(run, network, id);
+        for (LfBranch branch : retapped) {
+            double[] row = run.violationScreen.rowOf(scenario, branch);
+            if (row != null) {
+                GpuStateViewCheck.compareScreenRow(row, branch.getPiModel(), run.violationScreen.readsFromState(branch, 9),
+                        run.violationScreen.readsFromState(branch, 8));
+            }
+        }
+    }
+
+    /** Scenario {@code id} as the violation screen evaluates it ({@link GpuViolationScreen#scenario}), built once per run. */
+    private static GpuScreenScenario screenScenario(GpuSaRunState run, LfNetwork network, String id) {
+        if (run.violationScreen == null) {
+            return GpuScreenScenario.BASE;
+        }
+        GpuScreenScenario scenario = run.screenScenarios.get(id);
+        if (scenario == null) {
+            PrecomputedBatch precomputed = run.precomputed;
+            scenario = run.violationScreen.scenario(network, precomputed.scenarios().get(id),
+                    precomputed.automationSystemSwitched().get(id), precomputed.deviceTapMoves().get(id));
+            run.screenScenarios.put(id, scenario);
+        }
+        return scenario;
     }
 
     /** These branches as limit-table indices (null when none has limits): the host scans them in full, in table order,
@@ -528,17 +585,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * {@link GpuStateView}, the same doubles OLF's accessors return once the state is written back (checked bit for bit
      * by OLF_GPU_STATE_VIEW_CHECK), and the injection, its flow refresh and the bus writes are skipped. Not when
      * something reads OLF's objects for this contingency: a diagnostic of the written-back state (OLF_GPU_SA_RESID,
-     * OLF_GPU_VIOL_CROSSCHECK), an operator strategy on it, a state monitor asking for flows, OLF's voltage-angle check
-     * (it reads the buses' angles), a contingency with its own load flow parameters; nor when the view cannot stand for
-     * the objects on this run ({@link GpuStateView#usable()}). A bus-results monitor is served by writing the buses'
-     * voltages and angles alone.
+     * OLF_GPU_VIOL_CROSSCHECK), an operator strategy on it, a state monitor asking for flows, a contingency with its own
+     * load flow parameters; nor when the view cannot stand for the objects on this run ({@link GpuStateView#usable()}).
+     * A bus-results monitor is served by writing the buses' voltages and angles alone. The voltage-angle limits are
+     * checked through the view too (GpuLimitScanner).
      */
     private boolean answeredFromState(GpuSaRunState run, Contingency contingency, LfNetwork network,
                                       PrecomputedBatch precomputed) {
         if (GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()
                 || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
                 || flowsMonitored()
-                || !network.getVoltageAngleLimits().isEmpty()
                 || contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) != null) {
             return false;
         }
@@ -929,25 +985,41 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 // Screen the WHOLE run at once: the states are all precomputed already, and one
                 // device call per 512 scenarios is what makes the kernel worth its upload.
                 long tScreen = System.nanoTime();
+                run.screenScenarios.clear();
                 run.candidates = run.violationScreen.screenAll(run.precomputed.states(),
-                        run.precomputed.baseVariableRows().size());
+                        run.precomputed.baseVariableRows().size(), id -> screenScenario(run, network, id));
                 PHASE_NS.computeIfAbsent("  violation screen (all scenarios)",
                         k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - tScreen);
                 if (GpuTrace.PHASE_TIME.isOn()) {
                     System.err.println("VIOL_SCREEN scenarios=" + run.candidates.size()
+                            + " candidates=" + run.candidates.values().stream().mapToLong(c -> c.length).sum()
                             + " screened on the device=" + run.violationScreen.onDevice()
                             + " overflowed to the host scan=" + run.violationScreen.overflows()
                             + " in " + (System.nanoTime() - tScreen) / 1_000_000 + " ms");
                 }
             }
         }
+        if (scanInFull == null) {                            // a contingency: its device taps are on the network
+            compareScreenRows(run, network, contingencyId, run.deviceRetapped);
+        }
         java.util.BitSet sideOpened = run.violationScreen == null ? null
-                : scanInFull != null ? tableIndices(run, network, scanInFull) : sideOpenedTableIndices(run, network);
+                : scanInFull != null ? tableIndices(run, network, scanInFull)
+                : sideOpenedTableIndices(run, network, contingencyId);
         if (run.violationScreen != null) {
             int[] candidates = run.candidates.get(contingencyId);
             run.limitScanner.detectFromCandidates(network, manager,
-                    candidates != null ? candidates : run.violationScreen.screen(run.precomputed.states().get(contingencyId)),
+                    candidates != null ? candidates : run.violationScreen.screen(run.precomputed.states().get(contingencyId),
+                            screenScenario(run, network, contingencyId)),
                     run.violationScreen, run.uncoveredBranches, sideOpened, view, fromState, topology);
+            if (GpuStateViewCheck.comparesDecisions()) {     // the screen against a full scan of the same values
+                var fullScan = new LimitViolationManager(reference, limitReductions,
+                        saParameters.getIncreasedViolationsParameters());
+                run.limitScanner.detectViolations(network, fullScan, view, fromState, topology);
+                GpuStateViewCheck.compareScreen(manager.getLimitViolations(), fullScan.getLimitViolations());
+                if (view != null && scanInFull == null) {    // the dangling rows against the exact open-branch values
+                    measureSideOpened(run, network, contingencyId, view, fromState, topology);
+                }
+            }
         } else {
             run.limitScanner.detectViolations(network, manager, view, fromState, topology);
         }
@@ -1127,9 +1199,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        // The device screen covers the pair's state like a contingency's (screenAll ran over every precomputed state). It
-        // reads each branch in the base topology with its base parameters, so the branches the contingency opened at one
-        // side and those the actions open, close or retap are scanned in full on the host.
+        // The device screen covers the pair's state like a contingency's (screenAll ran over every precomputed state), as
+        // the device solved it: the branches the contingency opened at one side and those the actions open, close or
+        // retap are scanned in full on the host only where the pair's screen scenario does not cover them.
         java.util.Set<LfBranch> scanInFull = new java.util.LinkedHashSet<>(sideOpenedBranches(lfContingency));
         for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
             if (lfAction instanceof com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?> branchAction) {
@@ -1147,7 +1219,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // loops did not move keeps the action's tap
         List<LfBranch> pairRetapped = GpuDeviceTaps.apply(network, precomputed.deviceTapMoves().get(scId),
                 runState.get().deviceTapBase, actionBaseTaps, actionBaseTaps.keySet());
+        compareScreenRows(runState.get(), network, scId, pairRetapped);
         scanInFull.addAll(pairRetapped);
+        // what the screen evaluated as the device solved the pair needs no full scan
+        scanInFull.removeAll(screenScenario(runState.get(), network, scId).covered());
         // only the flows the screened detection reads are refreshed, as for a contingency (flowReadSet)
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, strategyFlowReadSet(runState.get(), scId, contingency.getId(), operatorStrategy, scanInFull));
@@ -1432,7 +1507,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (!fromState || compareDecisions) {
             long tWrite = System.nanoTime();
             run.deviceStateInjectedFor = contingency.getId();
-            int[] flowReadSet = flowReadSet(run, contingency.getId());
+            int[] flowReadSet = flowReadSet(run, network, contingency.getId());
             GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                     run.remap, flowReadSet);
             long tUpd = System.nanoTime();

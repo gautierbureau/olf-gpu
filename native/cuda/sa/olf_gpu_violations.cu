@@ -20,6 +20,13 @@
 // The flows come from the SAME generated device functions the fill kernels use — parsed from OLF's
 // own equation-term Java — and are assembled the way OLF's vectorized network assembles them:
 // i = hypot(p, q) / v but s = sqrt(p*p + q*q), which are not the same function in floating point.
+//
+// Each scenario is screened as the device solved it (GpuScreenScenario): a branch it takes out emits nothing, a
+// base-open branch emits only where the scenario closes it, a branch it opens at one side is evaluated at the other with
+// OLF's open-branch formula (as OLF's open terms are, not with the dangling row the solve uses, whose active power loses
+// relative precision to a cancellation), and a branch it gives another pi row (a tap action, a tap the outer loops
+// moved) is evaluated with that row, a ratio or phase shift that is a state variable still coming from the state — the
+// solve's fill (branch_fill.cu) makes the same choices.
 #include <cuda_runtime.h>
 #include <jni.h>
 #include "../jni/olf_jni.h"
@@ -41,6 +48,12 @@ constexpr int FAMILY_OPEN = 1;
 constexpr int QTY_I = 0;
 constexpr int QTY_P = 1;
 constexpr int QTY_S = 2;
+// GpuScreenScenario's entry bits
+constexpr int ENTRY_OUT = 1;
+constexpr int ENTRY_IN = 2;
+constexpr int ENTRY_ROW = 4;
+constexpr int ENTRY_OPEN_1 = 8;
+constexpr int ENTRY_OPEN_2 = 16;
 
 inline int grid(int nThreads) {
     return (nThreads + BLOCK - 1) / BLOCK;
@@ -81,14 +94,16 @@ struct Buf {
  *  reused by every chunk of every contingency, because a contingency cannot change a threshold. */
 struct ViolationTable {
     int nBranches = 0, nGroups = 0, nLimits = 0, nBuses = 0;
-    Buf brFamily, brElem, brGroupStart, brGroupEnd;
+    Buf brFamily, brElem, brBaseOpen, brGroupStart, brGroupEnd;
     Buf grpSide, grpQty, grpLimStart, grpLimEnd;
     Buf limThreshold;
     Buf busVRow, busHigh, busLow;
     Buf closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices;
-    // Scratch, grown on demand: the states of one chunk and its records.
+    // Scratch, grown on demand: the states of one chunk, its scenario entries and its records.
     Buf states, records, counts;
+    Buf entryStart, entryBranch, entryKind, entryRow;
     size_t statesCap = 0, recordsCap = 0, countsCap = 0;
+    size_t entryStartCap = 0, entryBranchCap = 0, entryKindCap = 0, entryRowCap = 0;
 };
 
 /** Emit one candidate, or count past the capacity so the host can fall back for this scenario. */
@@ -99,11 +114,23 @@ __device__ inline void emit(int* records, int* counts, int scenario, int capacit
     }
 }
 
+/** Scenario s's entry for table branch b (its entries are ascending by branch), or -1. */
+__device__ inline int entryOf(const int* entryStart, const int* entryBranch, int s, int b) {
+    for (int k = entryStart[s]; k < entryStart[s + 1] && entryBranch[k] <= b; k++) {
+        if (entryBranch[k] == b) {
+            return k;
+        }
+    }
+    return -1;
+}
+
 __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacity, double band,
-                               const int* brFamily, const int* brElem, const int* brGroupStart, const int* brGroupEnd,
+                               const int* brFamily, const int* brElem, const int* brBaseOpen, const int* brGroupStart,
+                               const int* brGroupEnd,
                                const int* grpSide, const int* grpQty, const int* grpLimStart, const int* grpLimEnd,
                                const double* limThreshold,
                                const double* closedBranchParameters, const int* closedBranchIndices, const double* openBranchParameters, const int* openBranchIndices,
+                               const int* entryStart, const int* entryBranch, const int* entryKind, const double* entryRow,
                                const double* x, int* records, int* counts) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBranches * nScenarios) {
@@ -112,12 +139,41 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
     int b = tid % nBranches;
     int s = tid / nBranches;
     const double* xs = x + (size_t) s * n;
+    int entry = entryOf(entryStart, entryBranch, s, b);
+    int kind = entry >= 0 ? entryKind[entry] : 0;
+    if ((kind & ENTRY_OUT) != 0 || (brBaseOpen[b] != 0 && (kind & ENTRY_IN) == 0)) {
+        return;                                              // out of service in this scenario
+    }
 
     double p1 = nan(""), q1 = nan(""), p2 = nan(""), q2 = nan(""), v1 = nan(""), v2 = nan("");
     int family = brFamily[b];
     int e = brElem[b];
-    if (family == FAMILY_CLOSED) {
-        const double* p = closedBranchParameters + (size_t) e * 8;             // y g1 g2 b1 b2 ksi r1 a1
+    if (family == FAMILY_CLOSED && (kind & (ENTRY_OPEN_1 | ENTRY_OPEN_2)) != 0) {
+        // opened at one side by the scenario: OLF's open terms at the other, from the pack's row or the scenario's
+        const double* p = (kind & ENTRY_ROW) != 0 ? entryRow + (size_t) entry * 8
+                : closedBranchParameters + (size_t) e * 8;   // y g1 g2 b1 b2 ksi r1 a1
+        const int* q = closedBranchIndices + (size_t) e * 12;              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+        double y = p[0], g1 = p[1], g2 = p[2], b1 = p[3], b2 = p[4], ksi = p[5], r1 = p[6];
+        double sinKsi = sin(ksi);
+        double cosKsi = cos(ksi);
+        if ((kind & ENTRY_OPEN_2) != 0) {                    // side 2 open: only side 1 carries a flow
+            if (q[5] < 0) {
+                return;
+            }
+            v1 = xs[q[5]];
+            p1 = open_branch::p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+            q1 = open_branch::q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+        } else {                                             // side 1 open
+            if (q[7] < 0) {
+                return;
+            }
+            v2 = xs[q[7]];
+            p2 = open_branch::p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+            q2 = open_branch::q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+        }
+    } else if (family == FAMILY_CLOSED) {
+        const double* p = (kind & ENTRY_ROW) != 0 ? entryRow + (size_t) entry * 8   // this scenario's row
+                : closedBranchParameters + (size_t) e * 8;   // y g1 g2 b1 b2 ksi r1 a1
         const int* q = closedBranchIndices + (size_t) e * 12;              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
         if (q[4] < 0 || q[5] < 0 || q[6] < 0 || q[7] < 0) {
             return;
@@ -221,7 +277,7 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
         JNIEnv* env, jclass,
-        jintArray jBrFamily, jintArray jBrElem, jintArray jBrGroupStart, jintArray jBrGroupEnd,
+        jintArray jBrFamily, jintArray jBrElem, jintArray jBrBaseOpen, jintArray jBrGroupStart, jintArray jBrGroupEnd,
         jintArray jGrpSide, jintArray jGrpQty, jintArray jGrpLimStart, jintArray jGrpLimEnd,
         jdoubleArray jLimThreshold,
         jintArray jControllerBusVRow, jdoubleArray jBusHigh, jdoubleArray jBusLow,
@@ -245,7 +301,7 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
         return ok;
     };
 
-    bool ok = uploadI(jBrFamily, t->brFamily) && uploadI(jBrElem, t->brElem)
+    bool ok = uploadI(jBrFamily, t->brFamily) && uploadI(jBrElem, t->brElem) && uploadI(jBrBaseOpen, t->brBaseOpen)
             && uploadI(jBrGroupStart, t->brGroupStart) && uploadI(jBrGroupEnd, t->brGroupEnd)
             && uploadI(jGrpSide, t->grpSide) && uploadI(jGrpQty, t->grpQty)
             && uploadI(jGrpLimStart, t->grpLimStart) && uploadI(jGrpLimEnd, t->grpLimEnd)
@@ -268,12 +324,21 @@ OLF_JNI(sa_gpu, ViolationScreenNative, destroyViolationTable)(
 
 /** Run the screen over one chunk of states, leaving counts and records on the device. False on any CUDA failure. */
 static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScenarios, jint n,
-                     jdouble band, jint capacity) {
+                     jdouble band, jint capacity, jintArray jEntryStart, jintArray jEntryBranch, jintArray jEntryKind,
+                     jdoubleArray jEntryRow) {
     size_t stateBytes = (size_t) nScenarios * n * sizeof(double);
     size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);
     size_t countBytes = (size_t) nScenarios * sizeof(int);
-    // The chunk buffers are reused across chunks and only ever grow, so a run pays one allocation.
+    if (env->GetArrayLength(jEntryStart) != nScenarios + 1) {
+        return false;
+    }
+    size_t nEntries = (size_t) env->GetArrayLength(jEntryBranch);
+    // The chunk buffers are reused across chunks and only ever grow, so a run pays one allocation (a chunk without
+    // entries still gets a one-int buffer, so the kernel never reads a null pointer).
     auto grow = [](Buf& buf, size_t& cap, size_t bytes) {
+        if (bytes == 0) {
+            bytes = sizeof(double);
+        }
         if (cap >= bytes) {
             return true;
         }
@@ -283,7 +348,33 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScen
         return true;
     };
     if (!grow(t->states, t->statesCap, stateBytes) || !grow(t->records, t->recordsCap, recordBytes)
-            || !grow(t->counts, t->countsCap, countBytes)) {
+            || !grow(t->counts, t->countsCap, countBytes)
+            || !grow(t->entryStart, t->entryStartCap, ((size_t) nScenarios + 1) * sizeof(int))
+            || !grow(t->entryBranch, t->entryBranchCap, nEntries * sizeof(int))
+            || !grow(t->entryKind, t->entryKindCap, nEntries * sizeof(int))
+            || !grow(t->entryRow, t->entryRowCap, nEntries * 8 * sizeof(double))) {
+        return false;
+    }
+    auto copyI = [&](jintArray a, Buf& buf) {
+        size_t bytes = (size_t) env->GetArrayLength(a) * sizeof(int);
+        if (bytes == 0) {
+            return true;
+        }
+        jint* p = env->GetIntArrayElements(a, nullptr);
+        bool ok = cudaMemcpy(buf.p, p, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
+        return ok;
+    };
+    size_t rowBytes = (size_t) env->GetArrayLength(jEntryRow) * sizeof(double);
+    bool rowsOk = true;
+    if (rowBytes > 0) {
+        jdouble* p = env->GetDoubleArrayElements(jEntryRow, nullptr);
+        rowsOk = cudaMemcpy(t->entryRow.p, p, rowBytes, cudaMemcpyHostToDevice) == cudaSuccess;
+        env->ReleaseDoubleArrayElements(jEntryRow, p, JNI_ABORT);
+    }
+    if (!rowsOk || !copyI(jEntryStart, t->entryStart) || !copyI(jEntryBranch, t->entryBranch)
+            || !copyI(jEntryKind, t->entryKind)) {
+        std::fprintf(stderr, "olfgpu violations: scenario entries upload failed\n");
         return false;
     }
     // The chunk's states sit in a direct buffer: read in place, no JNI copy of them first.
@@ -301,10 +392,12 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScen
     }
     screenBranches<<<grid(t->nBranches * nScenarios), BLOCK>>>(
             t->nBranches, nScenarios, n, capacity, band,
-            t->brFamily.as<int>(), t->brElem.as<int>(), t->brGroupStart.as<int>(), t->brGroupEnd.as<int>(),
+            t->brFamily.as<int>(), t->brElem.as<int>(), t->brBaseOpen.as<int>(), t->brGroupStart.as<int>(),
+            t->brGroupEnd.as<int>(),
             t->grpSide.as<int>(), t->grpQty.as<int>(), t->grpLimStart.as<int>(), t->grpLimEnd.as<int>(),
             t->limThreshold.as<double>(),
             t->closedBranchParameters.as<double>(), t->closedBranchIndices.as<int>(), t->openBranchParameters.as<double>(), t->openBranchIndices.as<int>(),
+            t->entryStart.as<int>(), t->entryBranch.as<int>(), t->entryKind.as<int>(), t->entryRow.as<double>(),
             t->states.as<double>(), t->records.as<int>(), t->counts.as<int>());
     if (t->nBuses > 0) {
         screenBuses<<<grid(t->nBuses * nScenarios), BLOCK>>>(
@@ -327,9 +420,11 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScen
 JNIEXPORT jintArray JNICALL
 OLF_JNI(sa_gpu, ViolationScreenNative, screenViolationsBatch)(
         JNIEnv* env, jclass, jlong handle, jobject jStates, jint nScenarios, jint n,
-        jdouble band, jint capacity) {
+        jdouble band, jint capacity, jintArray jEntryStart, jintArray jEntryBranch, jintArray jEntryKind,
+        jdoubleArray jEntryRow) {
     auto* t = reinterpret_cast<ViolationTable*>(handle);
-    if (t == nullptr || nScenarios <= 0 || !runChunk(env, t, jStates, nScenarios, n, band, capacity)) {
+    if (t == nullptr || nScenarios <= 0
+            || !runChunk(env, t, jStates, nScenarios, n, band, capacity, jEntryStart, jEntryBranch, jEntryKind, jEntryRow)) {
         return nullptr;
     }
     size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);

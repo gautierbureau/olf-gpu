@@ -102,8 +102,8 @@ final class GpuSaRunState {
     /** Non-null when the state is screened against the table instead of fully scanned. */
     GpuViolationScreen violationScreen;
     int[] uncoveredBranches = new int[0];
-    /** The current contingency's branches opened at ONE side (a bus or busbar loss): the screen evaluates every
-     *  branch in the base topology, so their records are not used and they are scanned on the host. */
+    /** The current contingency's branches opened at ONE side (a bus or busbar loss): scanned on the host unless the
+     *  screen evaluated them opened (its scenario covers them, {@link #screenScenarios}). */
     List<LfBranch> sideOpened = List.of();
     /** The branches the current contingency's automation systems switched on the device, given to the network with its
      *  state and restored with its own elements. */
@@ -115,8 +115,8 @@ final class GpuSaRunState {
     /** Whether the strategy load flows of a contingency carrying its own load flow parameters distribute active power
      *  (its group's outer loops, GpuBatchPrecomputer.SolveGroup); the run's flag for every other contingency. */
     final Map<String, Boolean> ownDistributedSlack = new java.util.HashMap<>();
-    /** The branches the current contingency's device tap moves changed: the screen read them at their base tap, so they
-     *  are scanned in full on the host and their flows refreshed. */
+    /** The branches the current contingency's device tap moves changed: scanned in full on the host and their flows
+     *  refreshed, unless the screen read them at their moved tap (its scenario covers them). */
     List<LfBranch> deviceRetapped = List.of();
     /** The branches the last operator strategy retapped, when it was answered on the device with tap actions only (a
      *  targeted post-contingency restore suffices); null otherwise (OLF's full restore). */
@@ -134,4 +134,7 @@ final class GpuSaRunState {
     java.util.Set<LfBus> baseExcludedSlackBuses = java.util.Set.of();
     /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
     Map<String, int[]> candidates = Map.of();
+    /** Each scenario as the screen evaluated it (built with the candidates): its {@code covered} branches need no full
+     *  scan on the host. */
+    final Map<String, GpuScreenScenario> screenScenarios = new java.util.HashMap<>();
 }

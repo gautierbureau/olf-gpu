@@ -1,6 +1,8 @@
 # On-device limit-violation detection — scope
 
-**Status** (updated 2026-11-10): all three steps landed and are the default. The flat table and its host scanner
+**Status** (updated 2026-11-11): all three steps landed and are the default. Since P3 of
+`docs/device-final-results-plan.md` the screen sees each scenario as the device solved it (its outages, its base-open
+branches closed, its side openings, its taps), and the host scans in full only what it cannot evaluate. The flat table and its host scanner
 (2026-09-10), the screen/confirm split proven in Java, then the kernel (`3f8ba88e`, 2026-09-10): the device screens
 every scenario, the host confirms each candidate with OLF's exact `>` on OLF's own value. Since `9725fdfd`
 (2026-09-25) a group stops at its first limit exceeded beyond the band. An experiment that let the device decide
@@ -45,9 +47,9 @@ before).
 Records come back unordered (threads finish when they finish) and are SORTED on the host, which is
 why a bus record is encoded ABOVE every limit index: one ascending sort restores table order for the
 "first exceeded of the group wins" rule and leaves the bus block at the end. The branches the host scans in full
-(those the screen does not cover — zero-impedance or not packed — and those a contingency opened at one side or
-retapped) are scanned at their table position, before the buses, so the violations come out in the order OLF's
-`LimitViolationManager` reports them (branches, then buses).
+(those the screen does not cover — zero-impedance or not packed — and those a scenario changes in a way the screen
+does not evaluate, GpuScreenScenario) are scanned at their table position, before the buses, so the violations come out
+in the order OLF's `LimitViolationManager` reports them (branches, then buses).
 
 It takes nothing from the batch solver — no context, no chunk lifetime, no share of the memory
 ceiling that already OOMs at 2781 scenarios.
@@ -171,7 +173,8 @@ overflows falls back to the host `detectViolations`. Also the natural kill switc
 feature.
 
 **Stays on the host**: voltage-angle limits (`network.getVoltageAngleLimits()` — a handful, needing
-only bus angles) and the reference filtering.
+only bus angles; checked by `GpuLimitScanner` since P3, through the state view for a contingency answered from its
+state) and the reference filtering.
 
 ## Effort
 

@@ -76,16 +76,7 @@ final class GpuPostContingencyState {
         if (!run.busRowsUsable || state == null) {
             return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, run);
         }
-        if (run.realisticBandApplies == null || run.realisticBandNetwork != network) {
-            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
-            boolean[] applies = new boolean[network.getBuses().size()];
-            for (LfBus b : network.getBuses()) {
-                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
-            }
-            run.realisticBandApplies = applies;
-            run.realisticBandNetwork = network;
-        }
-        boolean[] applies = run.realisticBandApplies;
+        boolean[] applies = realisticBandApplies(network, parameters, run);
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
         boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
@@ -113,6 +104,53 @@ final class GpuPostContingencyState {
     }
 
     /**
+     * OLF's realistic-voltage check on a device state read through {@code view}, without writing the state back: the
+     * decision {@link #updateBusesFromState} takes from the same array values, bus by bus. The buses get their voltage
+     * and angle only when {@code write} (a state monitor asks for bus results). P1 of
+     * {@code docs/device-final-results-plan.md}; the view must be {@link GpuStateView#usable() usable}.
+     */
+    static boolean checkBusesFromState(double[] state, GpuStateView view, LfNetwork network, AcLoadFlowParameters parameters,
+                                       GpuSaRunState run, boolean write) {
+        boolean[] applies = realisticBandApplies(network, parameters, run);
+        double minV = parameters.getMinRealisticVoltage();
+        double maxV = parameters.getMaxRealisticVoltage();
+        boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
+        boolean unrealistic = false;
+        for (LfBus bus : network.getBuses()) {
+            if (bus.isDisabled()) {
+                continue;
+            }
+            double value = view.stateV(state, bus);
+            if (write) {
+                bus.setV(value);
+                bus.setAngle(view.busAngle(state, bus));
+            }
+            if ((!unrealistic || trace) && (value < minV || value > maxV) && applies[bus.getNum()]) {
+                unrealistic = true;
+                if (trace) {
+                    System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                            bus.getId(), value, bus.getNominalV(), minV, maxV);
+                }
+            }
+        }
+        return unrealistic;
+    }
+
+    /** Which buses the realistic-voltage band applies to: a per-network constant, cached on the run state. */
+    private static boolean[] realisticBandApplies(LfNetwork network, AcLoadFlowParameters parameters, GpuSaRunState run) {
+        if (run.realisticBandApplies == null || run.realisticBandNetwork != network) {
+            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+            boolean[] applies = new boolean[network.getBuses().size()];
+            for (LfBus b : network.getBuses()) {
+                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
+            }
+            run.realisticBandApplies = applies;
+            run.realisticBandNetwork = network;
+        }
+        return run.realisticBandApplies;
+    }
+
+    /**
      * {@code AcSolverUtil.updateNetwork} and {@link #isStateUnrealistic} in ONE walk over the variables. Both
      * walked the ~13k variables of rte6515 once per contingency (2.9 s of the GPU arm, nearly all of it memory
      * traffic), the second one with two bus lookups per variable. Only BUS_V / BUS_PHI are handled here —
@@ -129,16 +167,7 @@ final class GpuPostContingencyState {
                 return isStateUnrealistic(es, network, parameters);
             }
         }
-        if (run.realisticBandApplies == null || run.realisticBandNetwork != network) {
-            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
-            boolean[] applies = new boolean[network.getBuses().size()];
-            for (LfBus b : network.getBuses()) {
-                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
-            }
-            run.realisticBandApplies = applies;
-            run.realisticBandNetwork = network;
-        }
-        boolean[] applies = run.realisticBandApplies;
+        boolean[] applies = realisticBandApplies(network, parameters, run);
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
         boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();

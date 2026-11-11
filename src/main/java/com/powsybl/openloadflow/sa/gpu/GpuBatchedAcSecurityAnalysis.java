@@ -142,6 +142,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
+    /** How many contingencies of the last run were answered from their device state without writing it back
+     *  (answeredFromState); reset with the counters above. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_ANSWERED_FROM_STATE_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** How many post-strategy restores of the last run were targeted (see restorePostContingencyState). */
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_STRATEGY_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -207,8 +212,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                     com.powsybl.openloadflow.network.LfContingency lfContingency) {
         GpuSaRunState run = runState.get();
         boolean targeted = lfContingency.getId().equals(run.lossReplayedFor)
-                && lfContingency.getId().equals(run.deviceStateInjectedFor);
+                && lfContingency.getId().equals(run.deviceAnsweredFor);
         run.lossReplayedFor = null;
+        run.deviceAnsweredFor = null;
         run.deviceStateInjectedFor = null;
         List<LfBranch> automationSystemSwitched = run.automationSystemSwitched;
         run.automationSystemSwitched = List.of();
@@ -509,6 +515,46 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
         }
         return sideOpened.isEmpty() ? null : sideOpened;
+    }
+
+    /**
+     * Whether a device-answered contingency's result is built from its state array without writing the state into OLF's
+     * objects (P1 of {@code docs/device-final-results-plan.md}). The detection then reads every value through
+     * {@link GpuStateView}, the same doubles OLF's accessors return once the state is written back (checked bit for bit
+     * by OLF_GPU_STATE_VIEW_CHECK), and the injection, its flow refresh and the bus writes are skipped. Not when
+     * something reads OLF's objects for this contingency: a diagnostic of the written-back state (OLF_GPU_SA_RESID,
+     * OLF_GPU_VIOL_CROSSCHECK), an operator strategy on it, a state monitor asking for flows, OLF's voltage-angle check
+     * (it reads the buses' angles), a contingency with its own load flow parameters; nor when the view cannot stand for
+     * the objects on this run ({@link GpuStateView#usable()}). A bus-results monitor is served by writing the buses'
+     * voltages and angles alone.
+     */
+    private boolean answeredFromState(GpuSaRunState run, Contingency contingency, LfNetwork network,
+                                      PrecomputedBatch precomputed) {
+        if (GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()
+                || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                || flowsMonitored()
+                || !network.getVoltageAngleLimits().isEmpty()
+                || contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) != null) {
+            return false;
+        }
+        return stateView(run, network, precomputed).usable();
+    }
+
+    /** The run's view of the device states, for the precomputed batch's base rows. */
+    private static GpuStateView stateView(GpuSaRunState run, LfNetwork network, PrecomputedBatch precomputed) {
+        if (run.stateView == null || !run.stateView.isFor(precomputed.baseVariableRows())) {
+            run.stateView = new GpuStateView(network, precomputed.baseVariableRows());
+        }
+        return run.stateView;
+    }
+
+    /** True when a state monitor asks for bus results, which read the buses' voltages and angles. */
+    private boolean busesMonitored() {
+        java.util.List<com.powsybl.security.monitor.StateMonitor> monitors = new java.util.ArrayList<>();
+        monitors.add(monitorIndex.getAllStateMonitor());
+        monitors.add(monitorIndex.getNoneStateMonitor());
+        monitors.addAll(monitorIndex.getSpecificStateMonitors().values());
+        return monitors.stream().anyMatch(m -> m != null && !m.getVoltageLevelIds().isEmpty());
     }
 
     /** True when a state monitor asks for branch or three-windings transformer results, which read flows. */
@@ -846,7 +892,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull) {
+        detectViolations(network, manager, limitReductions, reference, saParameters, contingencyId, scanInFull, null);
+    }
+
+    /** As above, the values read from {@code fromState} through the run's {@link GpuStateView} when it is non-null
+     *  (a contingency answered without writing its state back), else from OLF's objects. */
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState) {
         GpuSaRunState run = runState.get();
+        GpuStateView view = fromState != null ? run.stateView : null;
         if (run.limitScanner == null) {
             GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(limitReductions));
             run.limitScanner = new GpuLimitScanner(table);
@@ -877,9 +932,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             int[] candidates = run.candidates.get(contingencyId);
             run.limitScanner.detectFromCandidates(network, manager,
                     candidates != null ? candidates : run.violationScreen.screen(run.precomputed.states().get(contingencyId)),
-                    run.violationScreen, run.uncoveredBranches, sideOpened);
+                    run.violationScreen, run.uncoveredBranches, sideOpened, view, fromState);
         } else {
-            run.limitScanner.detectViolations(network, manager);
+            run.limitScanner.detectViolations(network, manager, view, fromState);
         }
         if (GpuTrace.VIOL_CROSSCHECK.isOn()) {
             GpuSaDiagnostics.crossCheck(network, manager, limitReductions, reference, saParameters, contingencyId);
@@ -1178,8 +1233,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
         GpuSaDiagnostics.dumpDeviceStateVariables(state, precomputed, network, contingency);
 
-        // Inject the precomputed post-contingency state (the branch is already disabled by
-        // lfContingency.apply()), then reuse the engine's result-building unchanged.
+        // The contingency is applied (lfContingency.apply()). Its state is either read from the device state array
+        // without being written into OLF's objects (answeredFromState: the detection reads it through GpuStateView, the
+        // same doubles), or injected into the equation system and the buses and read back through OLF's objects.
         long tPost = System.nanoTime();
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
@@ -1190,38 +1246,60 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         double distributedActivePower = precomputed.distributedActivePower()
                 .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
-        runState.get().deviceStateInjectedFor = contingency.getId();
-        runState.get().sideOpened = sideOpenedBranches(lfContingency);
+        run.deviceAnsweredFor = contingency.getId();         // injected or not, the targeted restore applies to it
+        run.sideOpened = sideOpenedBranches(lfContingency);
         // the taps the device's outer loops left: before the state, whose flows are evaluated with them
-        runState.get().deviceRetapped = GpuDeviceTaps.apply(network, precomputed.deviceTapMoves().get(contingency.getId()),
-                runState.get().deviceTapBase, Map.of(), java.util.Set.of());
-        // before the state: the injection refreshes the flows of the enabled branches only
-        runState.get().automationSystemSwitched = applyAutomationSystemSwitches(network,
+        run.deviceRetapped = GpuDeviceTaps.apply(network, precomputed.deviceTapMoves().get(contingency.getId()),
+                run.deviceTapBase, Map.of(), java.util.Set.of());
+        // before the state: a switched branch is enabled or disabled, which the detection reads (and the injection
+        // refreshes the flows of the enabled branches only)
+        run.automationSystemSwitched = applyAutomationSystemSwitches(network,
                 precomputed.automationSystemSwitched().get(contingency.getId()));
-        int[] flowReadSet = flowReadSet(runState.get(), contingency.getId());
-        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
-                runState.get().remap, flowReadSet);
-        long tUpd = System.nanoTime();
-        PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
-                .add(tUpd - tInj);
-        // OLF_GPU_SA_RESID=<n>: OLF's OWN residual at the state the device returned, on OLF's
-        // CONTINGENCY-updated equation system (lfContingency.apply() ran above). A large value on a row
-        // means the device solved a DIFFERENT equation there — a row-assembly bug — not that it failed
-        // to converge. Prints the n worst rows with the equation OLF has on each, which names the family
-        // to look at.
-        if (GpuTrace.SA_RESID.isOn()) {
-            GpuSaDiagnostics.reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
-                    Integer.parseInt(GpuTrace.SA_RESID.value()), precomputed.baseVariableRows(),
-                    precomputed.islandedBuses().get(contingency.getId()));
+        boolean fromState = answeredFromState(run, contingency, network, precomputed);
+        boolean compareDecisions = fromState && GpuStateViewCheck.comparesDecisions();
+        boolean unrealistic = false;
+        if (fromState) {
+            // the realistic-voltage check on the array; the buses get their voltages only for a bus-results monitor
+            unrealistic = GpuPostContingencyState.checkBusesFromState(state, run.stateView, network, context.getParameters(),
+                    run, busesMonitored());
+            LAST_ANSWERED_FROM_STATE_COUNT.incrementAndGet();
+            PHASE_NS.computeIfAbsent("  state read from the device array (no write-back)", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - tInj);
         }
-        boolean unrealistic = GpuPostContingencyState.updateBusesFromState(state, precomputed, network, context.getParameters(), runState.get());
-        if (strategyConditionReadsGeneratorTargets(runState.get(), contingency.getId())) {
+        if (!fromState || compareDecisions) {
+            long tWrite = System.nanoTime();
+            run.deviceStateInjectedFor = contingency.getId();
+            int[] flowReadSet = flowReadSet(run, contingency.getId());
+            GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
+                    run.remap, flowReadSet);
+            long tUpd = System.nanoTime();
+            PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(tUpd - tWrite);
+            // OLF_GPU_SA_RESID=<n>: OLF's OWN residual at the state the device returned, on OLF's
+            // CONTINGENCY-updated equation system (lfContingency.apply() ran above). A large value on a row
+            // means the device solved a DIFFERENT equation there — a row-assembly bug — not that it failed
+            // to converge. Prints the n worst rows with the equation OLF has on each, which names the family
+            // to look at.
+            if (GpuTrace.SA_RESID.isOn()) {
+                GpuSaDiagnostics.reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
+                        Integer.parseInt(GpuTrace.SA_RESID.value()), precomputed.baseVariableRows(),
+                        precomputed.islandedBuses().get(contingency.getId()));
+            }
+            boolean unrealisticFromObjects = GpuPostContingencyState.updateBusesFromState(state, precomputed, network,
+                    context.getParameters(), run);
+            if (compareDecisions) {
+                GpuStateViewCheck.compareStatus(unrealistic, unrealisticFromObjects);
+            } else {
+                unrealistic = unrealisticFromObjects;
+            }
+            PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - tUpd);
+            PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - (fromState ? tWrite : tInj));
+        }
+        if (strategyConditionReadsGeneratorTargets(run, contingency.getId())) {
             applyDeviceGeneratorTargets(network, precomputed.generatorTargets().get(contingency.getId()));
         }
-        PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
-                .add(System.nanoTime() - tUpd);
-        PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
-                .add(System.nanoTime() - tInj);
 
         // A converged device solve is not automatically a CONVERGED post-contingency RESULT: OLF's
         // AcloadFlowEngine rejects a solution whose voltages are outside the realistic band, and a
@@ -1258,14 +1336,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         PHASE_NS.computeIfAbsent("   networkResult.update()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tDet - tRes);
         detectViolations(network, postContingencyLimitViolationManager, limitReductions,
-                preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId());
+                preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId(), null,
+                fromState ? state : null);
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
-        if (GpuTrace.STATE_VIEW_CHECK.isOn()) {
-            if (run.stateView == null || !run.stateView.isFor(precomputed.baseVariableRows())) {
-                run.stateView = new GpuStateView(network, precomputed.baseVariableRows());
-            }
-            GpuStateViewCheck.check(run.stateView, state, run.limitTable, network);
+        if (compareDecisions) {                              // the same detection on the written-back objects
+            var fromObjects = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+                    securityAnalysisParameters.getIncreasedViolationsParameters());
+            detectViolations(network, fromObjects, limitReductions, preContingencyLimitViolationManager,
+                    securityAnalysisParameters, contingency.getId());
+            GpuStateViewCheck.compareViolations(postContingencyLimitViolationManager.getLimitViolations(),
+                    fromObjects.getLimitViolations());
+        }
+        if (GpuTrace.STATE_VIEW_CHECK.isOn()) {              // written back: compareDecisions holds for every answer
+            GpuStateViewCheck.check(stateView(run, network, precomputed), state, run.limitTable, network);
         }
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);

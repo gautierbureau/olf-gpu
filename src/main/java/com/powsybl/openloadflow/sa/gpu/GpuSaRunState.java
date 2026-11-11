@@ -45,6 +45,9 @@ final class GpuSaRunState {
      *  when both name the contingency just simulated, only its own elements and the bus voltages changed. */
     String lossReplayedFor;
     String deviceStateInjectedFor;
+    /** The contingency the device answered last, its state injected or read from the array (the targeted restore
+     *  applies to it); deviceStateInjectedFor is set only when the state was written into the network. */
+    String deviceAnsweredFor;
     /** LAZY VOLTAGE RESTORE: the last targeted restore left the bus voltages at the previous contingency's injected
      *  state. The next device-answered contingency overwrites every live bus and puts the base back on its disabled
      *  ones; anything else restores them all first (restoreStaleVoltages). */

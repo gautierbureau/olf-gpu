@@ -7,11 +7,15 @@
  */
 package com.powsybl.openloadflow.sa.gpu;
 
+import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
+import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -27,6 +31,12 @@ import java.util.concurrent.atomic.LongAdder;
  * The lines name elements by number only. A channel only prints: the check reads the objects after the detection and
  * changes nothing; it makes the write-back refresh every branch's flows ({@code flowReadSet}), which only costs time.
  *
+ * <p>A contingency answered from the state without the write-back (P1 of {@code docs/device-final-results-plan.md}) is
+ * also written back and detected the old way while the channel is on, and the two decisions are compared: the
+ * realistic-voltage status, and the violation lists field by field, doubles by their bits ({@link #compareStatus},
+ * {@link #compareViolations}). The answered result stays the state's. The tests turn that comparison on in code
+ * ({@link #compareInTests}), where a mismatch fails the test.
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 final class GpuStateViewCheck {
@@ -37,12 +47,86 @@ final class GpuStateViewCheck {
     /** Bus voltages whose {@code setV}/{@code getV} round trip differs from the state's value: what the view's round
      *  trip is for. */
     static final LongAdder ROUND_TRIP_DIFFERS = new LongAdder();
+    /** Contingencies answered from the state and also detected the old way, and the decisions that differed. */
+    static final LongAdder DECISIONS_COMPARED = new LongAdder();
+    static final LongAdder DECISION_MISMATCHES = new LongAdder();
+    private static volatile boolean comparedInTests;
     private static final AtomicInteger SCENARIOS = new AtomicInteger();
     private static final AtomicInteger PRINTED = new AtomicInteger();
     private static final int PRINTED_MAX = 20;
     private static final String[] QUANTITIES = {"I", "P", "S"};
 
     private GpuStateViewCheck() {
+    }
+
+    /** True when a contingency answered from the state is also written back and detected the old way, to compare. */
+    static boolean comparesDecisions() {
+        return comparedInTests || GpuTrace.STATE_VIEW_CHECK.isOn();
+    }
+
+    /** Tests only: compare every answer from the state with the old way's, and throw on a difference. */
+    static void compareInTests(boolean on) {
+        comparedInTests = on;
+    }
+
+    /** The realistic-voltage status from the state and from the written-back objects. */
+    static void compareStatus(boolean unrealisticFromState, boolean unrealisticFromObjects) {
+        if (unrealisticFromState != unrealisticFromObjects) {
+            decisionMismatch("realistic-voltage status: state " + !unrealisticFromState + ", objects " + !unrealisticFromObjects);
+        }
+    }
+
+    /** The violation lists from the state and from the written-back objects, field by field, doubles by their bits. */
+    static void compareViolations(List<LimitViolation> fromState, List<LimitViolation> fromObjects) {
+        DECISIONS_COMPARED.increment();
+        if (fromState.size() != fromObjects.size()) {
+            decisionMismatch("violation count: state " + fromState.size() + ", objects " + fromObjects.size());
+            return;
+        }
+        for (int i = 0; i < fromState.size(); i++) {
+            String field = differingField(fromState.get(i), fromObjects.get(i));
+            if (field != null) {
+                decisionMismatch("violation #" + i + " of " + fromState.size() + " differs in " + field + " (type "
+                        + fromObjects.get(i).getLimitType() + ")");
+                return;
+            }
+        }
+    }
+
+    /** The first field two violations differ in, or null; names and ids are compared, never printed. */
+    private static String differingField(LimitViolation a, LimitViolation b) {
+        if (!Objects.equals(a.getSubjectId(), b.getSubjectId())) {
+            return "subject";
+        }
+        if (a.getLimitType() != b.getLimitType()) {
+            return "type";
+        }
+        if (!Objects.equals(a.getLimitName(), b.getLimitName()) || !Objects.equals(a.getOperationalLimitsGroupId(), b.getOperationalLimitsGroupId())) {
+            return "limit name or group";
+        }
+        if (a.getAcceptableDuration() != b.getAcceptableDuration()) {
+            return "acceptable duration";
+        }
+        if (!same(a.getLimit(), b.getLimit()) || !same(a.getLimitReduction(), b.getLimitReduction())) {
+            return "limit or reduction";
+        }
+        if (!same(a.getValue(), b.getValue())) {
+            return "value (state " + Double.toHexString(a.getValue()) + ", objects " + Double.toHexString(b.getValue()) + ")";
+        }
+        if (!Objects.equals(a.getSide(), b.getSide())) {
+            return "side";
+        }
+        return null;
+    }
+
+    private static void decisionMismatch(String what) {
+        DECISION_MISMATCHES.increment();
+        if (comparedInTests) {
+            throw new AssertionError("STATE_VIEW_CHECK the decision from the state differs from the written-back one: " + what);
+        }
+        if (PRINTED.getAndIncrement() < PRINTED_MAX) {
+            System.err.println("STATE_VIEW_CHECK DECISION MISMATCH " + what);
+        }
     }
 
     static void check(GpuStateView view, double[] state, GpuLimitTable table, LfNetwork network) {
@@ -102,7 +186,8 @@ final class GpuStateViewCheck {
     /** The run's totals: one line, numbers only. */
     static String summary() {
         return "STATE_VIEW_CHECK contingencies=" + CONTINGENCIES.sum() + " quantities=" + COMPARED.sum()
-                + " mismatches=" + MISMATCHES.sum() + " busVoltagesWhoseRoundTripDiffers=" + ROUND_TRIP_DIFFERS.sum();
+                + " mismatches=" + MISMATCHES.sum() + " busVoltagesWhoseRoundTripDiffers=" + ROUND_TRIP_DIFFERS.sum()
+                + " decisionsCompared=" + DECISIONS_COMPARED.sum() + " decisionMismatches=" + DECISION_MISMATCHES.sum();
     }
 
     /** What the stock detection and {@code GpuLimitScanner} read for this side and quantity. */

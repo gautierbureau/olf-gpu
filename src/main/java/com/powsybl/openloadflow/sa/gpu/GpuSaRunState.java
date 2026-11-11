@@ -137,4 +137,10 @@ final class GpuSaRunState {
     /** Each scenario as the screen evaluated it (built with the candidates): its {@code covered} branches need no full
      *  scan on the host. */
     final Map<String, GpuScreenScenario> screenScenarios = new java.util.HashMap<>();
+    /** The run's limit reductions (runSimulations): the screen's table is built from them before the batch solve. */
+    List<com.powsybl.security.limitreduction.LimitReduction> limitReductions;
+    /** The state a scenario answered from its gathered rows is read from (P4): those rows, every other one NaN; and the
+     *  rows it holds now, put back to NaN before the next scenario's. */
+    double[] scratch;
+    GpuGatheredState scratchHolds;
 }

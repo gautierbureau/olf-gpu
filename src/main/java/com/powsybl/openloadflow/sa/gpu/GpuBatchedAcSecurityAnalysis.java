@@ -149,6 +149,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     /** How many contingencies of the last run were answered without applying them to the network (resultWithoutNetwork);
      *  reset with the counters above. */
+    /** Answers given from a scenario's gathered rows alone (P4: no full state read back for them). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_ANSWERED_FROM_ROWS_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
     static final java.util.concurrent.atomic.AtomicInteger LAST_ANSWERED_WITHOUT_NETWORK_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
@@ -193,7 +196,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                           com.powsybl.openloadflow.LoadFlowParametersOverride loadFlowParametersOverride,
                           com.powsybl.commons.report.ReportNode reportNode) {
             GpuSaRunState run = runState.get();
-            Double replayed = run.precomputed.states().containsKey(contingency.getId())
+            Double replayed = run.precomputed.answered(contingency.getId())
                     ? run.precomputed.preDistributedActivePower().get(contingency.getId())
                     : null;
             if (replayed == null || loadFlowParametersOverride != null
@@ -540,6 +543,30 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
+    /**
+     * The state the host answers scenario {@code id} from: the rows the device gathered for it (P4), written into the run's
+     * scratch state, every other row NaN; or its full state; null when the device did not converge it.
+     */
+    private static double[] answerState(GpuSaRunState run, String id) {
+        GpuGatheredState gathered = run.precomputed.gathered().get(id);
+        if (gathered == null) {
+            return run.precomputed.states().get(id);
+        }
+        int n = run.precomputed.baseVariableRows().size();
+        if (run.scratch == null || run.scratch.length != n) {
+            run.scratch = new double[n];
+            java.util.Arrays.fill(run.scratch, Double.NaN);
+            run.scratchHolds = null;
+        }
+        if (run.scratchHolds != null) {
+            run.scratchHolds.clear(run.scratch);
+        }
+        gathered.fill(run.scratch);
+        run.scratchHolds = gathered;
+        LAST_ANSWERED_FROM_ROWS_COUNT.incrementAndGet();
+        return run.scratch;
+    }
+
     /** Scenario {@code id} as the violation screen evaluates it ({@link GpuViolationScreen#scenario}), built once per run. */
     private static GpuScreenScenario screenScenario(GpuSaRunState run, LfNetwork network, String id) {
         if (run.violationScreen == null) {
@@ -728,7 +755,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                   SecurityAnalysisParameters securityAnalysisParameters) {
         PrecomputedBatch precomputed = run.precomputed;
         // an existence test: with the state store a get reads the whole state from its file
-        if (!precomputed.isReady() || !precomputed.states().containsKey(pairId)) {
+        if (!precomputed.isReady() || !precomputed.answered(pairId)) {
             return null;
         }
         // a contingency's own load flow parameters, when they hold for its strategies too, decide the distribution
@@ -798,6 +825,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         RUN_START_NS.set(System.nanoTime());
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
         GpuSaRunState run = new GpuSaRunState();
+        run.limitReductions = limitReductions;               // the screen's table, built before the batch solve (P4)
         runState.set(run);
         run.loadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
         run.securityAnalysisParameters = securityAnalysisParameters;
@@ -1014,10 +1042,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (GpuStateViewCheck.comparesDecisions()) {     // the screen against a full scan of the same values
                 var fullScan = new LimitViolationManager(reference, limitReductions,
                         saParameters.getIncreasedViolationsParameters());
-                run.limitScanner.detectViolations(network, fullScan, view, fromState, topology);
+                // of the full state, when the answer came from the gathered rows (P4): a missing row is then a lost
+                // violation too
+                double[] full = fromState != null ? run.precomputed.states().get(contingencyId) : null;
+                run.limitScanner.detectViolations(network, fullScan, view, full != null ? full : fromState, topology);
                 GpuStateViewCheck.compareScreen(manager.getLimitViolations(), fullScan.getLimitViolations());
-                if (view != null && scanInFull == null) {    // the dangling rows against the exact open-branch values
-                    measureSideOpened(run, network, contingencyId, view, fromState, topology);
+                if (view != null && scanInFull == null) {    // the screen's open-branch values against the exact ones
+                    measureSideOpened(run, network, contingencyId, view, full != null ? full : fromState, topology);
                 }
             }
         } else {
@@ -1063,13 +1094,22 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         List<GpuBatchPrecomputer.SolveGroup> groups = run.lfNetwork != null && run.contingencies != null
                 ? solveGroups(run, parameters, runGroup, leftToCpu) : List.of(runGroup);
         run.precomputed = GpuBatchPrecomputer.precompute(network, run.lfNetwork, run.context,
-                run.contingencies, run.operatorStrategies, run.actions, groups, leftToCpu, reportNode);
+                run.contingencies, run.operatorStrategies, run.actions, groups, leftToCpu, handbackSettings(run, parameters),
+                reportNode);
+        if (run.precomputed.violationScreen() != null) {     // the scenarios were screened on the device as they came back
+            run.limitTable = run.precomputed.limitTable();
+            run.limitScanner = new GpuLimitScanner(run.limitTable);
+            run.violationScreen = run.precomputed.violationScreen();
+            run.uncoveredBranches = uncoveredBranches(run.limitTable, run.violationScreen);
+            run.screenScenarios.clear();
+            run.candidates = new java.util.HashMap<>(run.precomputed.candidates());
+        }
         PHASE_NS.computeIfAbsent("precompute (extraction + batched solves)", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tPre);
         if (run.precomputed.isReady()) {
-            int solved = run.precomputed.states().size();
+            int solved = run.precomputed.answeredIds().size();
             LAST_GPU_PRECOMPUTED_COUNT.updateAndGet(prev -> Math.max(prev, 0) + solved);
-            LAST_GPU_PRECOMPUTED_IDS.addAll(run.precomputed.states().keySet());
+            LAST_GPU_PRECOMPUTED_IDS.addAll(run.precomputed.answeredIds());
         }
         // The engine's solver reverts to the stock CPU Newton-Raphson after the base LF: single-system GPU
         // solves are not where the device wins (its parallelism is the batch), and the CPU path parallelizes
@@ -1077,6 +1117,37 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && run.loadFlowParameters != null) {
             parameters.setSolverFactory(new NewtonRaphsonFactory(), run.loadFlowParameters);
         }
+    }
+
+    /**
+     * What the precompute needs to screen each scenario on the device as it is handed back and keep only what the host
+     * answers it with (P4): null without the run's limit reductions. A scenario is read back as rows alone when the host
+     * answers it from its state ({@link #answerableFromRows}); every full state is read back too while the comparison is
+     * on, which answers each one from both.
+     */
+    private GpuBatchPrecomputer.HandbackSettings handbackSettings(GpuSaRunState run, AcLoadFlowParameters parameters) {
+        if (run.limitReductions == null || run.contingencies == null) {
+            return null;
+        }
+        Map<String, Contingency> byId = new java.util.HashMap<>();
+        run.contingencies.forEach(propagated -> byId.put(propagated.getContingency().getId(), propagated.getContingency()));
+        return new GpuBatchPrecomputer.HandbackSettings(run.limitReductions, id -> answerableFromRows(run, byId.get(id)),
+                GpuStateViewCheck.comparesDecisions(), parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage());
+    }
+
+    /**
+     * Whether the host answers {@code contingency} from its state rows alone (P4): P1's conditions ({@link #answeredFromState},
+     * whose view is checked where it is built), and nothing that reads every bus or the written-back network for it: no
+     * bus-results monitor (it writes every bus), no dump of the applied network. A strategy pair, or no contingency
+     * (null), is read back whole.
+     */
+    private boolean answerableFromRows(GpuSaRunState run, Contingency contingency) {
+        return contingency != null
+                && !GpuTrace.SA_RESID.isOn() && !GpuTrace.VIOL_CROSSCHECK.isOn()
+                && !GpuTrace.SA_VAR_DUMP.isOn() && !GpuTrace.EQ_DUMP_CTG.isOn()
+                && !targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                && !flowsMonitored() && !busesMonitored()
+                && contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) == null;
     }
 
     /**
@@ -1323,7 +1394,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         String id = contingency.getId();
         return precomputed.isReady()
                 && !precomputed.exhausted().contains(id)
-                && precomputed.states().containsKey(id)
+                && precomputed.answered(id)
                 && precomputed.preDistributedActivePower().get(id) != null
                 && precomputed.deviceTapMoves().get(id) == null
                 && precomputed.automationSystemSwitched().get(id) == null
@@ -1342,7 +1413,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         long t0 = System.nanoTime();
         PrecomputedBatch precomputed = run.precomputed;
         String id = contingency.getId();
-        double[] state = precomputed.states().get(id);
+        double[] state = answerState(run, id);
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
         double replayed = precomputed.preDistributedActivePower().get(id);
@@ -1420,7 +1491,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // when one of its strategies is not answered on the device, and OLF then starts from every bus's voltage
             // (rte6515 LINE-2349-694 after LINE-2348-693: started from the previous injection's voltages, 1.44 MW off)
             boolean devicePath = precomputed.isReady() && !precomputed.exhausted().contains(contingency.getId())
-                    && precomputed.states().containsKey(contingency.getId())
+                    && precomputed.answered(contingency.getId())
                     && everyStrategyAnsweredOnDevice(run, contingency.getId(), securityAnalysisParameters);
             // device-answered: the injection writes every live bus, so only the disabled ones need their base back
             restoreStaleVoltages(run, devicePath ? lfContingency.getDisabledNetwork().getBuses() : null);
@@ -1451,7 +1522,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     precomputed.distributedActivePower()
                             .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB);
         }
-        double[] state = precomputed.states().get(contingency.getId());
+        // the device's answer: its full state, or the rows the host answers it from (P4), in the run's scratch state
+        double[] fullState = precomputed.states().get(contingency.getId());
+        double[] state = answerState(runState.get(), contingency.getId());
         if (state == null || !precomputed.isReady()
                 || !everyStrategyAnsweredOnDevice(runState.get(), contingency.getId(), securityAnalysisParameters)) {
             // not batched (multi-element / islanding / out of scope / rejected), or a strategy pair of it is left to
@@ -1508,7 +1581,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             long tWrite = System.nanoTime();
             run.deviceStateInjectedFor = contingency.getId();
             int[] flowReadSet = flowReadSet(run, network, contingency.getId());
-            GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
+            // written back from the full state: a scenario answered from its rows alone is never written back, except
+            // by the comparison, which reads every full state
+            GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), fullState,
                     run.remap, flowReadSet);
             long tUpd = System.nanoTime();
             PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
@@ -1523,7 +1598,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         Integer.parseInt(GpuTrace.SA_RESID.value()), precomputed.baseVariableRows(),
                         precomputed.islandedBuses().get(contingency.getId()));
             }
-            boolean unrealisticFromObjects = GpuPostContingencyState.updateBusesFromState(state, precomputed, network,
+            boolean unrealisticFromObjects = GpuPostContingencyState.updateBusesFromState(fullState, precomputed, network,
                     context.getParameters(), run);
             if (compareDecisions) {
                 GpuStateViewCheck.compareStatus(unrealistic, unrealisticFromObjects);
@@ -1587,7 +1662,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     fromObjects.getLimitViolations());
         }
         if (GpuTrace.STATE_VIEW_CHECK.isOn()) {              // written back: compareDecisions holds for every answer
-            GpuStateViewCheck.check(stateView(run, network, precomputed), state, run.limitTable, network);
+            GpuStateViewCheck.check(stateView(run, network, precomputed), fullState, run.limitTable, network);
         }
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);

@@ -373,7 +373,8 @@ final class GpuSaRunScope {
                 null,                                        // the precomputer picks the state sink per run
                 GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()),
                 areaInterchangeControlBatchable ? areaInterchangeControlLoop : null,
-                automationSystemOnDevice && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AutomationSystem".equals(outerLoop.getName())));
+                automationSystemOnDevice && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AutomationSystem".equals(outerLoop.getName())),
+                null);                                       // the precomputer sets the state handback per run
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

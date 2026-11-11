@@ -96,6 +96,10 @@ public final class BatchSolveNative {
      *  when it handed back the whole bank). */
     public static native int[] readBatchHandedBackSlots(long handle);
 
+    /** Whether the solve calls copy the handed-back states to the host (the default) or leave them on the device until the
+     *  next call, the result rows carrying the iterations, norm and status alone (StateHandback reads them there). */
+    public static native void setBatchStatesToHost(long handle, boolean statesToHost);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

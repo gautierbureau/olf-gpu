@@ -139,9 +139,11 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
         OpenLoadFlowParameters.create(lfp).setPhaseShifterControlMode(OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
         long rows = GpuStateViewCheck.SCREEN_ROWS_COMPARED.sum();
         GpuDeviceTaps.CHANGES.set(0);
-        assertAnsweredAsWrittenBack(network, List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
-                new Contingency("L1", new BranchContingency("L1"))), lfp);
+        List<Contingency> contingencies = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        assertAnsweredAsWrittenBack(network, contingencies, lfp);
         assertTrue(GpuDeviceTaps.CHANGES.get() > 0, "the device moved no tap: the fixture proves nothing about moved taps");
+        assertAnsweredFromRows(network, contingencies, lfp, false);  // the moved taps' branches among the rows (P4)
         // the screen read the moved tap's row, the one the device taps leave on the pi model (checked while comparing)
         assertTrue(GpuStateViewCheck.SCREEN_ROWS_COMPARED.sum() > rows, "no retapped branch's screen row was compared");
     }
@@ -160,6 +162,16 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
 
     /** The contingencies answered without the network, compared with the usual path, then on their own against OLF. */
     private void assertAnsweredWithoutNetwork(Network network, List<Contingency> contingencies, LoadFlowParameters lfp) {
+        assertAnsweredFromRows(network, contingencies, lfp, true);
+    }
+
+    /**
+     * Without state monitors, every contingency is answered from the state rows gathered on the device alone (P4): with
+     * the comparison on, each answer is also given from its full state, then on their own against OLF. When
+     * {@code withoutNetwork}, they must also be answered without the network (P2), compared with the usual path.
+     */
+    private void assertAnsweredFromRows(Network network, List<Contingency> contingencies, LoadFlowParameters lfp,
+                                        boolean withoutNetwork) {
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, List.of(), sap);
@@ -167,12 +179,20 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             long compared = GpuStateViewCheck.RESULTS_COMPARED.sum();
+            long decisions = GpuStateViewCheck.DECISIONS_COMPARED.sum();
             runSecurityAnalysis(network, contingencies, List.of(), sap);
-            assertTrue(GpuStateViewCheck.RESULTS_COMPARED.sum() > compared, "no result answered without the network was compared");
+            assertTrue(GpuStateViewCheck.DECISIONS_COMPARED.sum() > decisions, "no answer from the rows was compared");
+            if (withoutNetwork) {
+                assertTrue(GpuStateViewCheck.RESULTS_COMPARED.sum() > compared, "no result answered without the network was compared");
+            }
             GpuStateViewCheck.compareInTests(false);
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, List.of(), sap);
-            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.get() > 0,
-                    "no contingency was answered without the network: the comparison proves nothing");
+            if (withoutNetwork) {
+                assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.get() > 0,
+                        "no contingency was answered without the network: the comparison proves nothing");
+            }
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_ROWS_COUNT.get() > 0,
+                    "no contingency was answered from its gathered rows alone");
             assertMatchesCpu(cpu, gpu);
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(),

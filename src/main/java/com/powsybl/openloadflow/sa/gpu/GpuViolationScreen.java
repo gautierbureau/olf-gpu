@@ -374,29 +374,13 @@ final class GpuViolationScreen {
                 int to = Math.min(from + DEVICE_CHUNK, ids.size());
                 int count = to - from;
                 GpuScreenScenario[] scenarios = new GpuScreenScenario[count];
-                int entries = 0;
                 for (int i = 0; i < count; i++) {
                     writeState(states, ids.get(from + i), flat, i, n);
                     scenarios[i] = scenarioOf.apply(ids.get(from + i));
-                    entries += scenarios[i].branches().length;
                 }
-                // the chunk's scenarios as one CSR: scenario i's entries are [entryStart[i], entryStart[i + 1])
-                int[] entryStart = new int[count + 1];
-                int[] entryBranch = new int[entries];
-                int[] entryKind = new int[entries];
-                double[] entryRow = new double[entries * 8];
-                for (int i = 0; i < count; i++) {
-                    GpuScreenScenario scenario = scenarios[i];
-                    int at = entryStart[i];
-                    for (int k = 0; k < scenario.branches().length; k++) {
-                        entryBranch[at + k] = scenario.branches()[k];
-                        entryKind[at + k] = scenario.kinds()[k];
-                    }
-                    System.arraycopy(scenario.rows(), 0, entryRow, at * 8, scenario.rows().length);
-                    entryStart[i + 1] = at + scenario.branches().length;
-                }
+                Entries entries = Entries.of(scenarios);
                 int[] result = ViolationScreenNative.screenViolationsBatch(table, flat, count, n, BAND, DEVICE_CAPACITY,
-                        entryStart, entryBranch, entryKind, entryRow);
+                        entries.start(), entries.branch(), entries.kind(), entries.row());
                 if (result == null) {
                     for (int i = from; i < to; i++) {        // device refused the chunk — host screen
                         out.put(ids.get(i), screen(states.get(ids.get(i)), scenarios[i - from]));
@@ -426,6 +410,100 @@ final class GpuViolationScreen {
             deviceTable = 0;
         }
         return out;
+    }
+
+    /** Scenarios' entries as one CSR, in their order: scenario i's are {@code [start[i], start[i + 1])}. */
+    private record Entries(int[] start, int[] branch, int[] kind, double[] row) {
+        static Entries of(GpuScreenScenario[] scenarios) {
+            int entries = 0;
+            for (GpuScreenScenario scenario : scenarios) {
+                entries += scenario.branches().length;
+            }
+            int[] start = new int[scenarios.length + 1];
+            int[] branch = new int[entries];
+            int[] kind = new int[entries];
+            double[] row = new double[entries * 8];
+            for (int i = 0; i < scenarios.length; i++) {
+                GpuScreenScenario scenario = scenarios[i];
+                int at = start[i];
+                for (int k = 0; k < scenario.branches().length; k++) {
+                    branch[at + k] = scenario.branches()[k];
+                    kind[at + k] = scenario.kinds()[k];
+                }
+                System.arraycopy(scenario.rows(), 0, row, at * 8, scenario.rows().length);
+                start[i + 1] = at + scenario.branches().length;
+            }
+            return new Entries(start, branch, kind, row);
+        }
+    }
+
+    /**
+     * Screen the states the last solve call on batch context {@code batchHandle} handed back, where they are on the device
+     * (P4 of docs/device-final-results-plan.md), each as {@code scenarios} describes it: per scenario its records, sorted
+     * (the branch and bus candidates, then, when {@code realistic}, one per bus outside {@code [minV, maxV]}, from
+     * {@link #realisticRecordBase}), null for a scenario that overflowed the buffer; null when no device table or the
+     * device refused. The table stays on the device for the next call ({@link #closeDevice}).
+     */
+    int[][] screenHandedBack(long batchHandle, GpuScreenScenario[] scenarios, boolean realistic, double minV, double maxV) {
+        long deviceTableHandle = deviceTable();
+        if (deviceTableHandle == 0 || scenarios.length == 0) {
+            return deviceTableHandle == 0 ? null : new int[0][];
+        }
+        Entries entries = Entries.of(scenarios);
+        int[] result = ViolationScreenNative.screenHandedBack(deviceTableHandle, batchHandle, BAND, DEVICE_CAPACITY,
+                entries.start(), entries.branch(), entries.kind(), entries.row(), realistic, minV, maxV);
+        if (result == null) {
+            return null;
+        }
+        int count = scenarios.length;
+        onDevice += count;
+        int[][] out = new int[count][];
+        for (int i = 0; i < count; i++) {
+            int emitted = result[i];
+            if (emitted > DEVICE_CAPACITY) {
+                overflows++;
+                continue;                                    // the host screens its full state
+            }
+            int[] records = java.util.Arrays.copyOfRange(result, count + i * DEVICE_CAPACITY, count + i * DEVICE_CAPACITY + emitted);
+            java.util.Arrays.sort(records);                  // threads emit in any order; see screenAll
+            out[i] = records;
+        }
+        return out;
+    }
+
+    /** Values of the handed-back states (see {@link #screenHandedBack}): row {@code gatherRow[k]} of handed-back scenario
+     *  {@code gatherScenario[k]}; null when the device refused. */
+    double[] gatherHandedBack(long batchHandle, int[] gatherScenario, int[] gatherRow) {
+        long deviceTableHandle = deviceTable();
+        return deviceTableHandle == 0 ? null : ViolationScreenNative.gatherHandedBack(deviceTableHandle, batchHandle, gatherScenario, gatherRow);
+    }
+
+    /** The full states ({@code n} doubles each) of the handed-back scenarios {@code which} (see {@link #screenHandedBack});
+     *  null when no device table or the device refused. */
+    double[][] readHandedBackStates(long batchHandle, int[] which, int n) {
+        long deviceTableHandle = deviceTable();
+        double[] flat = deviceTableHandle == 0 ? null : ViolationScreenNative.readHandedBackStates(deviceTableHandle, batchHandle, which);
+        if (flat == null) {
+            return null;
+        }
+        double[][] states = new double[which.length][];
+        for (int k = 0; k < which.length; k++) {
+            states[k] = java.util.Arrays.copyOfRange(flat, k * n, (k + 1) * n);
+        }
+        return states;
+    }
+
+    /** The first realistic-band record: one per bus after the limits and the two records of each bus. */
+    int realisticRecordBase() {
+        return table.limitCount() + 2 * table.buses().length;
+    }
+
+    /** Frees the device table, if one was uploaded. */
+    void closeDevice() {
+        if (deviceTable != 0) {
+            ViolationScreenNative.destroyViolationTable(deviceTable);
+            deviceTable = 0;
+        }
     }
 
     /** The state of {@code id} into scenario {@code i}'s {@code n} doubles of {@code flat}, zero past a shorter state. */

@@ -269,8 +269,9 @@ final class GpuLimitScanner {
             return false;
         }
         double compared = quantity == GpuLimitTable.QTY_P ? Math.abs(value) : value;
-        if (compared <= table.threshold(limit)) {
-            return false;                                    // inside the band, but not actually violating
+        // inside the band but not violating: OLF's own '>', which a NaN never passes
+        if (!(compared > table.threshold(limit))) {
+            return false;
         }
         manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
                 table.groupId(group), table.limit(limit), GpuLimitTable.violationType(quantity),

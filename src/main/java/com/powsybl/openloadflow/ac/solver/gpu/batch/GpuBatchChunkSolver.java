@@ -216,6 +216,9 @@ final class GpuBatchChunkSolver {
         long handle = GpuBatchContextCache.acquireBatchContext(gpuData, bankSize,
                 config.robustSolveMode() ? GpuLinearSolveMode.ROBUST
                         : GpuBatchContextCache.resolveBatchMode(config.resolvedGpuParameters()), n);
+        // with a state handback the states stay on the device, read there between solve calls (set on every acquire: the
+        // context is cached across runs)
+        BatchSolveNative.setBatchStatesToHost(handle, config.stateHandback() == null);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         NewtonSettingsNative.installRowCriteria(handle, rowCriteria);
@@ -672,7 +675,7 @@ final class GpuBatchChunkSolver {
                         // slot -> contingency for every scenario the device rejected in this chunk: the native
                         // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
                         for (int s = 0; s < harvestedCount; s++) {
-                            int status = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
+                            int status = ChunkArrays.rowStatus(chunkResults[s], n);
                             if (status <= GpuAcSolverStatus.REJECTED) {
                                 System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(harvested[s].index()).contingencyId()
                                         + " status=" + status);
@@ -757,16 +760,20 @@ final class GpuBatchChunkSolver {
                         recordDistributedActivePower(handle, gpuData, harvested, harvestedCount, n, slackOnlyDistribution,
                                 preDistributedByIndex, distributedByIndex);
                     }
+                    if (config.stateHandback() != null) {
+                        readHandback(config.stateHandback(), handle, harvested, harvestedCount, chunkResults, switchesUnread, n,
+                                automationSystemSwitchedByIndex, deviceTapMovesByIndex, contingencies, pairPhase, parentsOfPairs);
+                    }
                     for (int s = 0; s < harvestedCount; s++) {
                         double[] row = chunkResults[s];
                         if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
-                            row[n + 2] = GpuAcSolverStatus.REJECTED;   // the census names the reason where it is decided
-                        } else if (pairPhase && (int) row[n + 2] != GpuAcSolverStatus.CONVERGED) {
+                            ChunkArrays.setRowStatus(row, GpuAcSolverStatus.REJECTED);   // the census names the reason where it is decided
+                        } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED) {
                             // a pair the device solved and did not converge: a device failure wherever OLF converges it
                             GpuBatchScopeCensus.pairDeviceFailed(
                                     contingencies.get(harvested[s].index()).contingencyId());
                         }
-                        if (config.stateSink() != null && (int) row[n + 2] == GpuAcSolverStatus.CONVERGED) {
+                        if (config.stateSink() != null && row.length == n + 3 && ChunkArrays.rowStatus(row, n) == GpuAcSolverStatus.CONVERGED) {
                             // the state leaves the heap now, as its chunk completes; the result keeps the tail
                             // (iterations, norm, status) - see sunkTail / fullRow
                             config.stateSink().put(contingencies.get(harvested[s].index()).contingencyId(),
@@ -778,10 +785,10 @@ final class GpuBatchChunkSolver {
                         // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
                         // "precomputed on device: N / M" says how many, never which.
                         if (GpuTrace.CPU_ROUTED.isOn() && chunkResults[s] != null
-                                && (int) chunkResults[s][n + 2] != GpuAcSolverStatus.CONVERGED) {
+                                && ChunkArrays.rowStatus(chunkResults[s], n) != GpuAcSolverStatus.CONVERGED) {
                             System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
                                     contingencies.get(harvested[s].index()).contingencyId(),
-                                    (int) chunkResults[s][n + 2]);
+                                    ChunkArrays.rowStatus(chunkResults[s], n));
                         }
                     }
                 }
@@ -802,6 +809,55 @@ final class GpuBatchChunkSolver {
         } catch (RuntimeException e) {
             GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time
             throw e;
+        }
+    }
+
+    /**
+     * Hands the scenarios a solve call handed back to the run's {@link StateHandback} while their states are still on the
+     * device, then reads back into its result row the full state of every scenario that needs one: those the handback
+     * asks for, and always a strategy pair and a contingency with pairs, whose state seeds them.
+     */
+    private static void readHandback(StateHandback handback, long handle, SlotOccupant[] harvested, int harvestedCount,
+                                     double[][] chunkResults, boolean[] switchesUnread, int n, int[][] automationSystemSwitchedByIndex,
+                                     double[][] deviceTapMovesByIndex, List<BatchContingency> contingencies, boolean pairPhase,
+                                     java.util.Set<Integer> parentsOfPairs) {
+        String[] ids = new String[harvestedCount];
+        boolean[] converged = new boolean[harvestedCount];
+        int[][] switched = new int[harvestedCount][];
+        double[][] moves = new double[harvestedCount][];
+        for (int s = 0; s < harvestedCount; s++) {
+            int index = harvested[s].index();
+            ids[s] = contingencies.get(index).contingencyId();
+            converged[s] = !harvested[s].rejectAfterSolve() && !switchesUnread[s]
+                    && ChunkArrays.rowStatus(chunkResults[s], n) == GpuAcSolverStatus.CONVERGED;
+            switched[s] = automationSystemSwitchedByIndex[index];
+            moves[s] = deviceTapMovesByIndex[index];
+        }
+        boolean[] full = handback.afterSolve(handle, ids, converged, switched, moves);
+        int count = 0;
+        for (int s = 0; s < harvestedCount; s++) {
+            full[s] |= pairPhase || parentsOfPairs.contains(harvested[s].index());
+            if (full[s]) {
+                count++;
+            }
+        }
+        if (count == 0) {
+            return;
+        }
+        int[] which = new int[count];
+        for (int s = 0, k = 0; s < harvestedCount; s++) {
+            if (full[s]) {
+                which[k++] = s;
+            }
+        }
+        double[][] states = handback.fullStates(handle, which, n);
+        for (int k = 0; k < count; k++) {
+            double[] tail = chunkResults[which[k]];
+            double[] row = java.util.Arrays.copyOf(states[k], n + 3);
+            row[n] = tail[tail.length - 3];
+            row[n + 1] = tail[tail.length - 2];
+            row[n + 2] = tail[tail.length - 1];
+            chunkResults[which[k]] = row;
         }
     }
 
@@ -1549,7 +1605,7 @@ final class GpuBatchChunkSolver {
                         outerLoopStatsSink.put(id, stats);
                     }
                     if (OUTER_LOOP_STATS) {
-                        int status = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
+                        int status = chunkResults[s2] == null ? Integer.MIN_VALUE : ChunkArrays.rowStatus(chunkResults[s2], n);
                         System.err.println("GPU_OL_STATS ctg=" + id + " passes=" + stats[0] + " firstNr=" + stats[1]
                                 + " totalNr=" + stats[2] + " status=" + status + " checks=" + stats[3]);
                     }
@@ -1589,8 +1645,8 @@ final class GpuBatchChunkSolver {
                 }
                 if (named) {
                     System.err.printf("ITER ctg=%s iters=%d finalMismatch=%.6e status=%d%n",
-                            id, (int) chunkResults[s][n], chunkResults[s][n + 1],
-                            (int) chunkResults[s][n + 2]);
+                            id, ChunkArrays.rowIterations(chunkResults[s], n), ChunkArrays.rowNorm(chunkResults[s], n),
+                            ChunkArrays.rowStatus(chunkResults[s], n));
                 }
             }
         }
@@ -1630,7 +1686,7 @@ final class GpuBatchChunkSolver {
         if (GpuBatchPhaseStats.ENABLED) {
             int itMax = 0;
             for (int s = 0; s < harvestedCount; s++) {
-                itMax = Math.max(itMax, (int) chunkResults[s][n]);
+                itMax = Math.max(itMax, ChunkArrays.rowIterations(chunkResults[s], n));
             }
             GpuBatchPhaseStats.add("main.iterMax", itMax);
             GpuBatchPhaseStats.bump("main.solves");
@@ -1719,7 +1775,7 @@ final class GpuBatchChunkSolver {
             // converged solve (NewtonRaphson updates the network only then), and the targets and bus
             // types its outer loops had moved, which the captures below read as they read a converged one.
             for (int s = 0; s < harvestedCount; s++) {
-                if ((int) chunkResults[s][n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                if (ChunkArrays.rowStatus(chunkResults[s], n) == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
                     exhaustedStartByIndex.put(harvested[s].index(),
                             BatchReadbackNative.readBatchLastConvergedState(handle, s));
                 }

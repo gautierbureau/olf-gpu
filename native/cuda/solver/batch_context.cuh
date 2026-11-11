@@ -45,6 +45,10 @@ struct BatchSolverContext {
     // The bank slots the per-scenario setters install: the setters' local slot j is bank slot installSlots[j], and only
     // those slots' entries are rewritten. Empty: every slot, local slot = bank slot (a whole chunk).
     std::vector<int> installSlots;
+    // Whether a solve call copies the handed-back slots' states to the host (its result rows). Off, they stay in dX until
+    // the next call, which the host reads selectively in between (the violation screen's handback: screenHandedBack,
+    // gatherHandedBack, readHandedBackStates), and the rows carry the iterations, norm and status alone.
+    bool statesToHost = true;
     // The installed slots' rows of the per-slot arrays an install writes, in one copy (writeInstalledRows).
     mutable SlotRowUpload installRowUpload;
     DeviceBuf dInstallSlots;                                 // the install slots on the device (every slot of an install of the bank)

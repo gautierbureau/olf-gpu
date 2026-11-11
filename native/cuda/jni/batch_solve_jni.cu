@@ -4,6 +4,7 @@
 // JNI entry points of GpuAcNewtonSolver: The batched context and its solve.
 #include "jni_common.cuh"
 #include "slot_table_install.cuh"
+#include "../solver/handed_back_states.cuh"
 #include "../solver/scenario_install.cuh"
 #include "../common/codes/gpu_outer_loop_kind.cuh"
 #include "../common/trace.cuh"
@@ -335,13 +336,17 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     }
     for (int j = 0; j < nS; j++) {
         const int s = installedSlot(ctx, j);
-        jdoubleArray row = env->NewDoubleArray(n + 3);
+        // the state stays on the device when the host reads it there (statesToHost off): the row is the tail alone
+        const int stateLength = ctx->statesToHost ? n : 0;
+        jdoubleArray row = env->NewDoubleArray(stateLength + 3);
         if (row == nullptr) {
             return nullptr;
         }
-        env->SetDoubleArrayRegion(row, 0, n, res.x.data() + static_cast<size_t>(res.statesBySlot ? s : j) * n);
+        if (stateLength > 0) {
+            env->SetDoubleArrayRegion(row, 0, n, res.x.data() + static_cast<size_t>(res.statesBySlot ? s : j) * n);
+        }
         double tail[3] = {static_cast<double>(res.iters[s]), res.norm[s], static_cast<double>(res.status[s])};
-        env->SetDoubleArrayRegion(row, n, 3, tail);
+        env->SetDoubleArrayRegion(row, stateLength, 3, tail);
         env->SetObjectArrayElement(out, j, row);
         env->DeleteLocalRef(row);
     }
@@ -407,6 +412,33 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, destroyBatchContext)(
         JNIEnv*, jclass, jlong handle) {
     delete reinterpret_cast<BatchSolverContext*>(handle);
 }
+
+// Whether the solve calls copy the handed-back states to the host (default) or leave them on the device for the host to
+// read selectively before the next call (see BatchSolverContext::statesToHost).
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchSolveNative, setBatchStatesToHost)(
+        JNIEnv*, jclass, jlong handle, jboolean statesToHost) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->statesToHost = statesToHost == JNI_TRUE;
+    }
+}
+
+namespace olfgpu {
+
+HandedBackStates handedBackStates(jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    HandedBackStates h;
+    if (ctx == nullptr) {
+        return h;
+    }
+    h.dX = ctx->dX.as<double>();
+    h.n = ctx->n;
+    h.slots = installedSlots(ctx);
+    return h;
+}
+
+}  // namespace olfgpu
 
 // The bank slots of the scenarios the last solve handed back, in the order of its result rows.
 extern "C" JNIEXPORT jintArray JNICALL

@@ -288,7 +288,7 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
-### #85 — PLAN: post-contingency results without writing the state back (2026-11-09)
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 in progress 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
 device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
@@ -305,6 +305,15 @@ by base row instead of from OLF's objects. Phases: P0 oracle + bitwise cross-che
 targeted readback (no state round trip, no state store), P5 monitors and device-answered strategies. Each lands once
 its gates pass, with no switch. Section 7's pre-existing issues a–k were triaged on `main` (#87, #88, #91, #92 and
 36ce83ab): none still open is a prerequisite of P0 to P4 (g's screen half is P3; b and f concern strategies, P5).
+
+**P0 (2026-11-11, branch `state-view`).** `GpuStateView` computes every quantity the detection reads (I, P and apparent
+power at both sides, bus V through OLF's kV round trip, angles) from a device state array, through OLF's own static
+functions with the parameters each accessor reads: the vectorized network's arrays for closed P and Q, the scalar
+current terms' snapshots, the open terms' snapshots. Two split-package helpers read those protected and package-private
+parameters (`ac.equations.GpuBranchTermValues`, `ac.equations.vector.GpuBranchVectorValues`); the open-branch currents
+needed a fork patch making them public (fork 7cfb7770f on `gb`). `GpuStateViewTest` holds the view to OLF's objects bit
+for bit with no device; `OLF_GPU_STATE_VIEW_CHECK` holds it to the written-back objects on every device-answered
+contingency of a run. Results in the plan's §4, P0.
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

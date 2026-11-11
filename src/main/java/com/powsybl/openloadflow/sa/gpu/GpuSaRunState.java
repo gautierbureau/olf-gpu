@@ -120,6 +120,8 @@ final class GpuSaRunState {
     List<LfBranch> strategyRetappedOnly;
     /** Limit-table index per branch num, -1 = no limits (built with the table). */
     int[] tableIndexOfBranchNum;
+    /** The detection's inputs read from the device state array (OLF_GPU_STATE_VIEW_CHECK), for these base rows. */
+    GpuStateView stateView;
     /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
     Map<String, int[]> candidates = Map.of();
 }

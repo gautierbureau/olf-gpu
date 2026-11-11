@@ -385,7 +385,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
                 || targetedByOperatorStrategy(run.operatorStrategies, contingencyId)
                 || GpuTrace.SA_RESID.isOn()
-                || GpuTrace.VIOL_CROSSCHECK.isOn()) {
+                || GpuTrace.VIOL_CROSSCHECK.isOn()
+                || GpuTrace.STATE_VIEW_CHECK.isOn()) {
             return null;
         }
         GpuLimitTable table = run.limitTable;
@@ -795,6 +796,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (GpuTrace.VIOL_CROSSCHECK.isOn()) {
                 System.err.println("VIOL_CROSSCHECK contingencies compared against the stock detection: "
                         + GpuSaDiagnostics.CROSSCHECKED.sum());
+            }
+            if (GpuTrace.STATE_VIEW_CHECK.isOn()) {
+                System.err.println(GpuStateViewCheck.summary());   // cumulative over the JVM, like the phase times
             }
         }
     }
@@ -1257,6 +1261,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId());
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
+        if (GpuTrace.STATE_VIEW_CHECK.isOn()) {
+            if (run.stateView == null || !run.stateView.isFor(precomputed.baseVariableRows())) {
+                run.stateView = new GpuStateView(network, precomputed.baseVariableRows());
+            }
+            GpuStateViewCheck.check(run.stateView, state, run.limitTable, network);
+        }
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);
 

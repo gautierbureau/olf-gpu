@@ -1,6 +1,7 @@
 # Post-contingency results without writing the state back — plan
 
-**Status** (2026-11-11): P0 starts on branch `state-view` (from `main` e0eb0922). The plan was written 2026-11-09 on branch `device-final-results`;
+**Status** (2026-11-11): P0 done on branch `state-view` (from `main` e0eb0922): the state view, its bitwise unit
+test and the cross-check channel, with 0 mismatches on every run (§4, P0); P1 next. The plan was written 2026-11-09 on branch `device-final-results`;
 the issues of §7 were triaged on `main` since, each with its status there, and none of the open ones is a prerequisite
 of P0 to P4. The §0 measurements are from network.xiidm, our batched LU (`linearSolver=BATCHED_LU`), GPU arm, phase
 timing on (`OLF_GPU_PHASE_TIME=1`, `OLF_SA_PROFILE=1`); every gain must be re-measured A/B, alternating, at least
@@ -251,6 +252,47 @@ prints. Gates in §5.
   device-screen vs host gap per quantity is not measured here: the screen hands back limit indices, not values, and #92
   set the band to 1e-7 from L12's measured 2.1e-10.
 - Run it on network.xiidm (full list, branch list) and rte6515 (it has S limits): **0 mismatches** before P1 starts.
+
+**Done on `state-view` (2026-11-11).**
+- `sa/gpu/GpuStateView`: I, P and apparent power at both sides of a branch, a bus's V and angle, from a state array in
+  the base row layout. A closed branch's P and Q go through the vectorized network's arrays (`AcBranchVector`: `y`,
+  `sinKsi`, `cosKsi`, `g`, `b`, `ksi`, and its cached `r1`/`a1` where the branch has no RHO1/ALPHA1 variable) with
+  `AcNetworkVector.theta1/2` and `FastMath.sinAndCos`, as `updateClosedBranch` computes them; its current goes through
+  the scalar current term's own snapshot, with r1/a1 from the state when the term reads a variable and from the live pi
+  model otherwise; a branch open at one side goes through the open terms' snapshots at the live side (`FastMath.cos/sin`
+  of their `ksi`, the pi model's r1 for P and Q), 0 at the open side, NaN with both sides open; a branch without closed
+  terms (zero impedance) is NaN. The connection status is the branch's, as `apply` left it (P2 will take it from the
+  contingency).
+- Two split-package helpers read the parameters, never write them: `ac.equations.GpuBranchTermValues` (the terms'
+  protected snapshots) and `ac.equations.vector.GpuBranchVectorValues` (the vector's package-private arrays).
+- Fork patch 7cfb7770f on `olf-local-patches` (pushed to `gb`): `OpenBranchSide2CurrentMagnitudeEquationTerm.i1` and
+  `OpenBranchSide1CurrentMagnitudeEquationTerm.i2` public. The codegen proof and the scatter check pass on it.
+- `GpuStateViewTest` (no device): OLF's CPU load flow solves each fixture and every enabled branch's six quantities and
+  every enabled bus's V and angle must equal the view's, bit for bit: IEEE 118 (where 0 < bus voltages differ from their
+  round trip), Eurostag with a line opened at side 1, then side 2, after the base solve, a transformer with a RHO1
+  variable, a phase shifter with an ALPHA1 variable, a tap changed after the equation system was built, three-windings
+  transformer legs, zero-impedance branches. It fails when the bus voltage skips the round trip, when a side-opened
+  branch is evaluated closed, when a1 or r1 is not read from its variable. Not covered by a fixture: a tie line, a
+  voltage-angle limit (the channel compares their differences on runs).
+- `OLF_GPU_STATE_VIEW_CHECK` compares, after today's write-back and detection, every enabled limit-table branch's six
+  quantities, every enabled bus's V and angle and every voltage-angle limit's difference; it makes the write-back
+  refresh every branch's flows while on. `GpuSa*Test` on our batched LU with it on: 299/0/2, 706 device-answered
+  contingencies, 27,092 quantities, **0 mismatches**, 1,687 bus voltages whose round trip differs from the state.
+- network.xiidm, our batched LU, GPU arm, cold, logback at WARN, the channel on (its wall times are not timings: every
+  branch's flows are refreshed and compared):
+
+  | scope | device-answered contingencies | quantities compared | mismatches | bus voltages whose round trip differs |
+  |---|---|---|---|---|
+  | every branch | 10,538 | 708,457,872 | 0 | 1,139,790 |
+  | the JSON list | 12,726 | 885,144,008 | 0 | 1,471,419 |
+  | the full list | 37,282 | 2,857,251,008 | 0 | 6,040,083 |
+
+  Statuses as on `main`: CONVERGED 10,538 / 12,726 / 37,282, FAILED 0 / 3 / 6, MAX_ITERATION_REACHED 2 / 3 / 9.
+- rte6515 (it has apparent-power limits), same setup: branch kind 9,037 contingencies, 596,287,034 quantities, 0
+  mismatches; generator kind with every generator (`OLF_GPU_SA_GEN_MIN_KV=0`; the default 400 kV leaves none) 1,389
+  contingencies, 91,660,110 quantities, 0 mismatches.
+
+P0's gate holds: 0 mismatches on every run, so P1 can start.
 
 ### P1 — decide from the state view: no injection, no `LfBus` write
 - For eligible contingencies (§3.4), `runPostContingencySimulation` skips `injectState` and `updateBusesFromState`

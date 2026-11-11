@@ -66,6 +66,9 @@ public enum GpuTrace {
     SEED_DUMP("OLF_GPU_SEED_DUMP"),
     /** The incremental shunt voltage control's sensitivities and decisions. */
     SHUNT_TRACE("OLF_GPU_SHUNT_TRACE"),
+    /** Every device-answered contingency's detection inputs recomputed from the device state array and compared, bit
+     *  for bit, with what OLF's objects return after the write-back; a summary and the first mismatches, by number. */
+    STATE_VIEW_CHECK("OLF_GPU_STATE_VIEW_CHECK"),
     /** The post-contingency realistic-voltage check: which buses make a state unrealistic. */
     UNREALISTIC_TRACE("OLF_GPU_UNREALISTIC_TRACE"),
     /** Every contingency's violations compared with OLF's stock detection over every branch. */

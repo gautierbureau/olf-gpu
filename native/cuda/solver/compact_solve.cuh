@@ -14,8 +14,6 @@ __global__ void gatherScenarios(long per, int nC, const int* map, const double* 
 
 __global__ void scatterScenarios(long per, int nReal, const int* map, const double* compactedSource, double* dst);
 
-__global__ void scatterRowsInt(int nRows, int n, const int* slots, const int* src, int* dst);
-
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_SOLVER_COMPACT_SOLVE_CUH

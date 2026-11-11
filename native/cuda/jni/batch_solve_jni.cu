@@ -21,6 +21,8 @@ static long long marshalNs = 0;
 static long long solveNs = 0;
 static long long packNs = 0;
 static long long calls = 0;
+static long long rowModeRows = 0;                            // the scenario rows that are not the base array
+static long long rowModeEntries = 0;                         // and their entries that differ from it
 
 extern "C" JNIEXPORT jlong JNICALL
 OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
@@ -197,16 +199,19 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             throw std::runtime_error("rowMode scenario count mismatch with the installed slots");
         }
         // x0/target are the BASE row (length n), identical for every scenario — read once and copied into each
-        // installed slot on the device. rowMode is PER-SCENARIO ([nS][n]) — read every installed scenario's row. Only
-        // the disabled mask is also per-scenario.
+        // installed slot on the device. rowMode is PER-SCENARIO ([nS][n]), and so is the disabled mask.
         std::vector<double> x0(n);
         std::vector<double> target(n);
         env->GetDoubleArrayRegion(jx0Base, 0, n, x0.data());
         env->GetDoubleArrayRegion(jtargetBase, 0, n, target.data());
-        // COMPACT row modes: a scenario whose row IS the base array (the Java side shares that one array for
-        // every scenario it does not modify) is not copied; only the others travel, with their slots.
-        std::vector<int> rowModeSlots;
-        std::vector<int> rowMode;
+        std::vector<int> baseRowMode(n);                     // contingency-free base row mode (length n)
+        env->GetIntArrayRegion(jbaseRowMode, 0, n, baseRowMode.data());
+        // The row modes travel as the entries where a scenario's row differs from the base. The Java side shares the base
+        // array for every scenario it does not modify and copies it for the others, which change a few rows: a lost
+        // generator's bus turned PQ, a coupler's identity rows. Copied whole, those rows were 3.5 GB per run of
+        // network.xiidm's full list, most of it spent in page faults on the fresh native buffer.
+        std::vector<int> rowModeOverrides;                   // (local slot, row, mode) per entry
+        std::vector<int> row(n);
         for (int s = 0; s < nS; s++) {
             auto mRow = (jintArray) env->GetObjectArrayElement(jrowMode, s);
             if (env->IsSameObject(mRow, jbaseRowMode)) {
@@ -217,13 +222,16 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                 env->DeleteLocalRef(mRow);
                 throw std::runtime_error("rowMode row length mismatch with batch context");
             }
-            rowModeSlots.push_back(s);
-            rowMode.resize(rowModeSlots.size() * (size_t) n);
-            env->GetIntArrayRegion(mRow, 0, n, rowMode.data() + (rowModeSlots.size() - 1) * (size_t) n);
+            env->GetIntArrayRegion(mRow, 0, n, row.data());
             env->DeleteLocalRef(mRow);
+            for (int r = 0; r < n; r++) {
+                if (row[r] != baseRowMode[r]) {
+                    rowModeOverrides.insert(rowModeOverrides.end(), {s, r, row[r]});
+                }
+            }
+            rowModeRows++;
         }
-        std::vector<int> baseRowMode(n);                     // contingency-free base row mode (length n)
-        env->GetIntArrayRegion(jbaseRowMode, 0, n, baseRowMode.data());
+        rowModeEntries += static_cast<long long>(rowModeOverrides.size() / 3);
         // One region copy per scenario: a jboolean is an unsigned byte holding 0 or 1, the mask's own encoding.
         std::unique_ptr<char[]> disabledBuf(new char[static_cast<size_t>(nElem) * nS]);
         char* disabledData = disabledBuf.get();
@@ -279,10 +287,8 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             marshalNs += nowNs() - tMarshal0;
         }
         long long tSolve0 = traceOn(Trace::PHASE_TIME) ? nowNs() : 0;
-        static const int kNoModeSlots[1] = {0};              // non-null: COMPACT mode even when no scenario differs
-        res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(),
-                                rowModeSlots.empty() ? kNoModeSlots : rowModeSlots.data(),
-                                static_cast<int>(rowModeSlots.size()), baseRowMode.data(), disabledData,
+        res = solveBatchContext(ctx, x0.data(), target.data(), static_cast<int>(rowModeOverrides.size() / 3),
+                                rowModeOverrides.data(), baseRowMode.data(), disabledData,
                                 nTargetOverrides, targetOverrideIndex.data(), targetOverrideValue.data(),
                                 nDistributedSlackOverrides > 0 ? distributedSlackOverrideBus.data() : nullptr, distributedSlackOverrideFactorDelta.data(),
                                 distributedSlackOverrideBaseTargetPDelta.data(), distributedSlackOverrideMaxDelta.data(), distributedSlackOverrideMinDelta.data(),
@@ -352,12 +358,12 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
                 "| newtonLoops=%lld restarts=%lld newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
                 " | cuDSS analyses main=%lld compaction=%lld | iterativeRefinementChecks=%ld iterativeRefinementExtraSolves=%ld"
                 " | factorizations full=%lld compacted=%lld robust=%lld sensitivity=%lld sensitivitySolves=%lld refinement=%lld | checkRounds=%lld"
-                " | batchedLu factorizations=%lld pivotedLanes=%lld pivotDelayOrders=%lld\n",
+                " | batchedLu factorizations=%lld pivotedLanes=%lld pivotDelayOrders=%lld | rowModes rows=%lld entries=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gNewtonLoops, gRestarts, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIterativeRefinementChecks, gIterativeRefinementExtraSolves,
                 gFullFactorizations, gCompactIters, gRobustFactorizations, gSensitivityFactorizations, gSensitivitySolves, gRefinementFactorizations, gCheckRounds,
-                gBatchedLuFactorizations, gBatchedLuPivotedLanes, gBatchedLuPivotDelayOrders);
+                gBatchedLuFactorizations, gBatchedLuPivotedLanes, gBatchedLuPivotDelayOrders, rowModeRows, rowModeEntries);
         double phaseMilliseconds[4] = {0, 0, 0, 0};
         long long phaseCount[4] = {0, 0, 0, 0};
         for (const auto& kv : gAnalysisSites) {

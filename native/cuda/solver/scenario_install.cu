@@ -10,7 +10,6 @@
 #include "../common/check.cuh"
 #include "../common/launch.cuh"
 #include "../equations/fill_launch.cuh"
-#include "compact_solve.cuh"
 #include "scenario_install.cuh"
 
 namespace olfgpu {
@@ -25,6 +24,14 @@ __global__ void copyRowToSlots(int n, int nSlots, const int* slots, const T* src
     int j = t / n;
     int i = t % n;
     d[static_cast<size_t>(slots[j]) * n + i] = src[i];
+}
+
+// Each (slot, row, value) entry: d's value at that row of that slot.
+__global__ void writeSlotRowEntries(int nEntries, int n, const int* entries, int* d) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < nEntries) {
+        d[static_cast<size_t>(entries[3 * k]) * n + entries[3 * k + 1]] = entries[3 * k + 2];
+    }
 }
 
 }  // namespace
@@ -82,24 +89,19 @@ void installScenarios(BatchSolverContext* ctx, const ScenarioInputs& in) {
     }
 
     // The row modes: PER-SCENARIO, mutated in place by the outer loops. Every installed slot starts from the base row,
-    // then only those that differ (islanded buses, switch outages, ...) get their own - a few rows instead of one per
-    // scenario through PCIe.
-    if (in.rowModeSlots == nullptr) {
-        writeInstalledRows(ctx, ctx->dMode.as<int>(), in.rowMode, n);
-    } else {
-        copyRowToSlots<<<grid(n * nLocal), BLOCK, 0, ctx->stream>>>(n, nLocal, dSlots, ctx->dBaseMode.as<int>(), ctx->dMode.as<int>());
-        if (in.nRowModeSlots > 0) {
-            std::vector<int> modeSlots(in.nRowModeSlots);
-            for (int k = 0; k < in.nRowModeSlots; k++) {
-                modeSlots[k] = installedSlot(ctx, in.rowModeSlots[k]);
-            }
-            DeviceBuf dModeSlots, dModeRows;
-            dModeSlots.upload(modeSlots.data(), modeSlots.size() * sizeof(int));
-            dModeRows.upload(in.rowMode, static_cast<size_t>(in.nRowModeSlots) * n * sizeof(int));
-            scatterRowsInt<<<grid(in.nRowModeSlots * n), BLOCK, 0, ctx->stream>>>(in.nRowModeSlots, n, dModeSlots.as<int>(),
-                                                                                  dModeRows.as<int>(), ctx->dMode.as<int>());
-            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    // then takes the entries where its own differs (a lost generator's bus turned PQ, a coupler's identity rows,
+    // islanded buses, ...): a few ints instead of a row per such scenario through PCIe.
+    copyRowToSlots<<<grid(n * nLocal), BLOCK, 0, ctx->stream>>>(n, nLocal, dSlots, ctx->dBaseMode.as<int>(), ctx->dMode.as<int>());
+    if (in.nRowModeOverrides > 0) {
+        std::vector<int> entries(in.rowModeOverrides, in.rowModeOverrides + 3 * static_cast<size_t>(in.nRowModeOverrides));
+        for (size_t k = 0; k < entries.size(); k += 3) {
+            entries[k] = installedSlot(ctx, entries[k]);
         }
+        DeviceBuf dEntries;
+        dEntries.upload(entries.data(), entries.size() * sizeof(int));
+        writeSlotRowEntries<<<grid(in.nRowModeOverrides), BLOCK, 0, ctx->stream>>>(in.nRowModeOverrides, n, dEntries.as<int>(),
+                                                                                  ctx->dMode.as<int>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));      // the buffer is this scope's
     }
     writeInstalledRows(ctx, ctx->dDisabled.as<char>(), in.disabled, static_cast<size_t>(ctx->nElements));
 

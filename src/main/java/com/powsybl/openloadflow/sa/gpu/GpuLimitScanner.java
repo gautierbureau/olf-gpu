@@ -56,6 +56,9 @@ final class GpuLimitScanner {
      *  every scan. */
     private GpuStateView view;
     private double[] state;
+    /** Which branches, sides and buses the current scan reads as out of service: the network's flags, or the
+     *  contingency's topology for a contingency answered without being applied. Set by every scan. */
+    private GpuContingencyTopology topology = GpuContingencyTopology.NETWORK;
 
     GpuLimitScanner(GpuLimitTable table) {
         this.table = table;
@@ -72,8 +75,15 @@ final class GpuLimitScanner {
 
     /** As above, the values read from {@code state} through {@code view} when both are non-null. */
     void detectViolations(LfNetwork network, LimitViolationManager manager, GpuStateView view, double[] state) {
+        detectViolations(network, manager, view, state, GpuContingencyTopology.NETWORK);
+    }
+
+    /** As above, the branches, sides and buses out of service as {@code topology} says. */
+    void detectViolations(LfNetwork network, LimitViolationManager manager, GpuStateView view, double[] state,
+                          GpuContingencyTopology topology) {
         this.view = view;
         this.state = state;
+        this.topology = topology;
         LfBranch[] branches = table.branches();
         for (int b = 0; b < branches.length; b++) {
             int groupStart = table.groupStart(b);
@@ -82,7 +92,7 @@ final class GpuLimitScanner {
                 continue;                                    // no limits anywhere on this branch
             }
             LfBranch branch = branches[b];
-            if (branch.isDisabled()) {
+            if (topology.branchOut(branch)) {
                 continue;
             }
             java.util.Arrays.fill(quantityCached, false);
@@ -94,7 +104,7 @@ final class GpuLimitScanner {
         LfBus[] buses = table.buses();
         for (int i = 0; i < buses.length; i++) {
             LfBus bus = buses[i];
-            if (bus.isDisabled()) {
+            if (topology.busOut(bus)) {
                 continue;
             }
             double v = busV(bus);
@@ -142,8 +152,17 @@ final class GpuLimitScanner {
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened,
                               GpuStateView view, double[] state) {
+        detectFromCandidates(network, manager, candidates, screen, uncoveredBranches, sideOpened, view, state,
+                GpuContingencyTopology.NETWORK);
+    }
+
+    /** As above, the branches, sides and buses out of service as {@code topology} says. */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened,
+                              GpuStateView view, double[] state, GpuContingencyTopology topology) {
         this.view = view;
         this.state = state;
+        this.topology = topology;
         LfBranch[] branches = table.branches();
         java.util.BitSet inFull = sideOpened;
         if (uncoveredBranches.length > 0) {
@@ -170,7 +189,7 @@ final class GpuLimitScanner {
                 nextSideOpened = inFull.nextSetBit(nextSideOpened + 1);
             }
             LfBranch branch = branches[b];
-            if (branch.isDisabled() || inFull != null && inFull.get(b)) {
+            if (topology.branchOut(branch) || inFull != null && inFull.get(b)) {
                 continue;                                    // taken out by the contingency, or scanned in full above
             }
             if (b != currentBranch) {
@@ -188,7 +207,7 @@ final class GpuLimitScanner {
             int record = candidates[i];
             int busIndex = GpuViolationScreen.busOf(table, record);
             LfBus bus = table.buses()[busIndex];
-            if (bus.isDisabled()) {
+            if (topology.busOut(bus)) {
                 continue;
             }
             double v = busV(bus);
@@ -228,7 +247,7 @@ final class GpuLimitScanner {
     /** The full host scan of one branch's groups, as the stock detection walks them. */
     private void scanBranch(int b, LimitViolationManager manager) {
         LfBranch branch = table.branches()[b];
-        if (branch.isDisabled()) {
+        if (topology.branchOut(branch)) {
             return;
         }
         java.util.Arrays.fill(quantityCached, false);
@@ -262,7 +281,7 @@ final class GpuLimitScanner {
         }
         double value;
         if (view != null) {
-            value = view.branch(state, branch, side, quantity);
+            value = view.branch(state, branch, side, quantity, topology);
         } else if (side == GpuTwoSides.ONE) {
             value = switch (quantity) {
                 case GpuLimitTable.QTY_I -> branch.getI1().eval();

@@ -13,6 +13,8 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
+import com.powsybl.security.results.ConnectivityResult;
+import com.powsybl.security.results.PostContingencyResult;
 
 import java.util.List;
 import java.util.Objects;
@@ -50,6 +52,8 @@ final class GpuStateViewCheck {
     /** Contingencies answered from the state and also detected the old way, and the decisions that differed. */
     static final LongAdder DECISIONS_COMPARED = new LongAdder();
     static final LongAdder DECISION_MISMATCHES = new LongAdder();
+    /** Contingencies answered without applying them, whose result was compared with the usual path's. */
+    static final LongAdder RESULTS_COMPARED = new LongAdder();
     private static volatile boolean comparedInTests;
     private static final AtomicInteger SCENARIOS = new AtomicInteger();
     private static final AtomicInteger PRINTED = new AtomicInteger();
@@ -88,6 +92,55 @@ final class GpuStateViewCheck {
             if (field != null) {
                 decisionMismatch("violation #" + i + " of " + fromState.size() + " differs in " + field + " (type "
                         + fromObjects.get(i).getLimitType() + ")");
+                return;
+            }
+        }
+    }
+
+    /**
+     * A contingency's result answered without applying it to the network and the result of the usual path (applied,
+     * then answered from the state or written back), on the same device state: the statuses, the violation lists field
+     * by field, the distributed active power and the connectivity result, doubles by their bits.
+     */
+    static void compareResults(PostContingencyResult withoutNetwork, PostContingencyResult usual) {
+        RESULTS_COMPARED.increment();
+        if (withoutNetwork.getStatus() != usual.getStatus()) {
+            decisionMismatch("without the network: status " + withoutNetwork.getStatus() + ", usual " + usual.getStatus());
+            return;
+        }
+        if (!same(withoutNetwork.getDistributedActivePower(), usual.getDistributedActivePower())) {
+            decisionMismatch("without the network: distributed active power " + Double.toHexString(withoutNetwork.getDistributedActivePower())
+                    + ", usual " + Double.toHexString(usual.getDistributedActivePower()));
+            return;
+        }
+        ConnectivityResult a = withoutNetwork.getConnectivityResult();
+        ConnectivityResult b = usual.getConnectivityResult();
+        if (a.getCreatedSynchronousComponentCount() != b.getCreatedSynchronousComponentCount()
+                || a.getCreatedConnectedComponentCount() != b.getCreatedConnectedComponentCount()
+                || !same(a.getDisconnectedLoadActivePower(), b.getDisconnectedLoadActivePower())
+                || !same(a.getDisconnectedGenerationActivePower(), b.getDisconnectedGenerationActivePower())
+                || !a.getDisconnectedElements().equals(b.getDisconnectedElements())) {
+            decisionMismatch("without the network: the connectivity result differs");
+            return;
+        }
+        if (withoutNetwork.getNetworkResult().getBranchResults().size() != usual.getNetworkResult().getBranchResults().size()
+                || withoutNetwork.getNetworkResult().getBusResults().size() != usual.getNetworkResult().getBusResults().size()
+                || withoutNetwork.getNetworkResult().getThreeWindingsTransformerResults().size()
+                    != usual.getNetworkResult().getThreeWindingsTransformerResults().size()) {
+            decisionMismatch("without the network: the network result differs");
+            return;
+        }
+        List<LimitViolation> fromState = withoutNetwork.getLimitViolationsResult().getLimitViolations();
+        List<LimitViolation> fromUsual = usual.getLimitViolationsResult().getLimitViolations();
+        if (fromState.size() != fromUsual.size()) {
+            decisionMismatch("without the network: violation count " + fromState.size() + ", usual " + fromUsual.size());
+            return;
+        }
+        for (int i = 0; i < fromState.size(); i++) {
+            String field = differingField(fromState.get(i), fromUsual.get(i));
+            if (field != null) {
+                decisionMismatch("without the network: violation #" + i + " of " + fromState.size() + " differs in " + field
+                        + " (type " + fromUsual.get(i).getLimitType() + ")");
                 return;
             }
         }
@@ -187,7 +240,8 @@ final class GpuStateViewCheck {
     static String summary() {
         return "STATE_VIEW_CHECK contingencies=" + CONTINGENCIES.sum() + " quantities=" + COMPARED.sum()
                 + " mismatches=" + MISMATCHES.sum() + " busVoltagesWhoseRoundTripDiffers=" + ROUND_TRIP_DIFFERS.sum()
-                + " decisionsCompared=" + DECISIONS_COMPARED.sum() + " decisionMismatches=" + DECISION_MISMATCHES.sum();
+                + " decisionsCompared=" + DECISIONS_COMPARED.sum() + " resultsWithoutTheNetworkCompared=" + RESULTS_COMPARED.sum()
+                + " decisionMismatches=" + DECISION_MISMATCHES.sum();
     }
 
     /** What the stock detection and {@code GpuLimitScanner} read for this side and quantity. */

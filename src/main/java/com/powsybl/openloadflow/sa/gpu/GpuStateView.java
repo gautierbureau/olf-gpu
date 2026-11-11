@@ -48,8 +48,8 @@ import java.util.Map;
  * A branch without flow terms (a zero-impedance branch, a switch) answers its evaluables' constants, which read no
  * state.
  *
- * <p>The branch's connection status is read from the branch, as the contingency's {@code apply} left it. The view never
- * writes an OLF object. It is not thread-safe (one scratch wrapper): one view per partition's run state.
+ * <p>The branch's connection status is the branch's own, as the contingency's {@code apply} left it, or, for a contingency
+ * that was not applied, the one {@link GpuContingencyTopology} derives from it. The view never writes an OLF object. It is not thread-safe (one scratch wrapper): one view per partition's run state.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -140,15 +140,20 @@ final class GpuStateView {
      * ({@link GpuLimitTable#QTY_I}, {@code QTY_P}, {@code QTY_S}).
      */
     double branch(double[] state, LfBranch branch, int side, byte quantity) {
+        return branch(state, branch, side, quantity, GpuContingencyTopology.NETWORK);
+    }
+
+    /** As above, the branch's sides connected as {@code topology} says. */
+    double branch(double[] state, LfBranch branch, int side, byte quantity, GpuContingencyTopology topology) {
         if (quantity == GpuLimitTable.QTY_S) {
-            double p = flow(state, branch, side, true);
-            double q = flow(state, branch, side, false);
+            double p = flow(state, branch, side, true, topology);
+            double q = flow(state, branch, side, false, topology);
             return FastMath.sqrt(p * p + q * q);
         }
         if (quantity == GpuLimitTable.QTY_P) {
-            return flow(state, branch, side, true);
+            return flow(state, branch, side, true, topology);
         }
-        return current(state, branch, side);
+        return current(state, branch, side, topology);
     }
 
     /** True when the branch has no flow terms (a zero-impedance branch, a switch): OLF's evaluables for it are
@@ -159,15 +164,15 @@ final class GpuStateView {
     }
 
     /** The branch's active ({@code active}) or reactive flow at {@code side}. */
-    private double flow(double[] state, LfBranch branch, int side, boolean active) {
+    private double flow(double[] state, LfBranch branch, int side, boolean active, GpuContingencyTopology topology) {
         if (withoutFlowTerms(branch)) {
             return side == GpuTwoSides.ONE ? (active ? branch.getP1() : branch.getQ1()).eval()
                     : (active ? branch.getP2() : branch.getQ2()).eval();
         }
         LfBus bus1 = branch.getBus1();
         LfBus bus2 = branch.getBus2();
-        boolean live1 = bus1 != null && branch.isConnectedSide1();
-        boolean live2 = bus2 != null && branch.isConnectedSide2();
+        boolean live1 = bus1 != null && topology.connectedSide1(branch);
+        boolean live2 = bus2 != null && topology.connectedSide2(branch);
         int num = branch.getNum();
         if (live1 && live2) {
             AcBranchVector vector = GpuBranchVectorValues.of(branch.getClosedP1());
@@ -205,14 +210,14 @@ final class GpuStateView {
     }
 
     /** The branch's current magnitude at {@code side}. */
-    private double current(double[] state, LfBranch branch, int side) {
+    private double current(double[] state, LfBranch branch, int side, GpuContingencyTopology topology) {
         if (withoutFlowTerms(branch)) {
             return (side == GpuTwoSides.ONE ? branch.getI1() : branch.getI2()).eval();
         }
         LfBus bus1 = branch.getBus1();
         LfBus bus2 = branch.getBus2();
-        boolean live1 = bus1 != null && branch.isConnectedSide1();
-        boolean live2 = bus2 != null && branch.isConnectedSide2();
+        boolean live1 = bus1 != null && topology.connectedSide1(branch);
+        boolean live2 = bus2 != null && topology.connectedSide2(branch);
         int num = branch.getNum();
         if (live1 && live2) {
             Evaluable term = side == GpuTwoSides.ONE ? branch.getClosedI1() : branch.getClosedI2();

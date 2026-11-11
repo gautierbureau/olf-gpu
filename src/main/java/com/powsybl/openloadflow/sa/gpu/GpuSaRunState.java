@@ -125,6 +125,13 @@ final class GpuSaRunState {
     int[] tableIndexOfBranchNum;
     /** The detection's inputs read from the device state array (OLF_GPU_STATE_VIEW_CHECK), for these base rows. */
     GpuStateView stateView;
+    /** A contingency's result answered without the network while the comparison is on, compared with the usual path's
+     *  result for the same contingency. */
+    com.powsybl.security.results.PostContingencyResult withoutNetwork;
+    String withoutNetworkFor;
+    /** The excluded slack buses after the pre-contingency load flow: a contingency answered without the network restores
+     *  them only if its toLfContingency changed them. */
+    java.util.Set<LfBus> baseExcludedSlackBuses = java.util.Set.of();
     /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
     Map<String, int[]> candidates = Map.of();
 }

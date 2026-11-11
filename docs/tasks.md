@@ -288,6 +288,24 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09)
+
+Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
+device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
+system, writes every `LfBus`'s V and angle, and restores the network afterwards, so that OLF's own code can read the
+state. The 2026-11-10 profile (`docs/network-xiidm-gpu-profile.md`, PR #54) sizes what the plan removes, warm: about
+4.4 s of 12.2 on the branch list, 6.9 s of 22.1 on the JSON list and 35 s of 130 on the full list (15.0 s of state
+injection and network update, 6.2 s of apply and restore, ~11.5 s of state handback, store and screen upload).
+gpu-security-analysis has no such loop.
+
+The plan keeps the final decision in OLF's exact Java arithmetic (the 2026-09-10 screen/confirm split; L12's device
+values were deleted in 8b02accd for their last bits) but feeds OLF's own formula functions from the device state array
+by base row instead of from OLF's objects. Phases: P0 oracle + bitwise cross-check channel, P1 no injection / no
+`LfBus` write, P2 no apply/restore (one fork hook), P3 a complete device screen, P4 screen in the solve context with
+targeted readback (no state round trip, no state store), P5 monitors and device-answered strategies. Each lands once
+its gates pass, with no switch. Section 7's pre-existing issues a–k were triaged on `main` (#87, #88, #91, #92 and
+36ce83ab): none still open is a prerequisite of P0 to P4 (g's screen half is P3; b and f concern strategies, P5).
+
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 
 Worst distributed-active-power difference **1.328 MW -> 7.5e-09 MW** on the contingency, and

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.BusbarSectionContingency;
 import com.powsybl.contingency.Contingency;
+import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
@@ -20,8 +21,13 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
 import com.powsybl.openloadflow.network.SlackBusSelectionMode;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
+import com.powsybl.security.SecurityAnalysisParameters;
+import com.powsybl.security.SecurityAnalysisResult;
+import com.powsybl.security.results.PostContingencyResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,6 +47,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * which these contingencies serve by writing the bus voltages alone. Each fixture makes violations through one input
  * path of {@link GpuStateView}: closed branches with current, active and apparent power limits, branches opened at one
  * side by a busbar section outage, a phase shifter whose tap the device moves, bus voltage limits.
+ *
+ * <p>Without state monitors the same contingencies are answered without applying them to the network (P2), their
+ * topology read from the contingency: with the comparison on, each one is answered the usual way too and the two results
+ * must be the same, field by field; without it, the answer is held to OLF's CPU arm.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -128,5 +138,93 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
         List<Contingency> contingencies = network.getLineStream().limit(3)
                 .map(line -> new Contingency(line.getId(), new BranchContingency(line.getId()))).toList();
         assertAnsweredAsWrittenBack(network, contingencies, new LoadFlowParameters());
+    }
+
+    /** The contingencies answered without the network, compared with the usual path, then on their own against OLF. */
+    private void assertAnsweredWithoutNetwork(Network network, List<Contingency> contingencies, LoadFlowParameters lfp) {
+        SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, List.of(), sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            long compared = GpuStateViewCheck.RESULTS_COMPARED.sum();
+            runSecurityAnalysis(network, contingencies, List.of(), sap);
+            assertTrue(GpuStateViewCheck.RESULTS_COMPARED.sum() > compared, "no result answered without the network was compared");
+            GpuStateViewCheck.compareInTests(false);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, List.of(), sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.get() > 0,
+                    "no contingency was answered without the network: the comparison proves nothing");
+            assertMatchesCpu(cpu, gpu);
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    /** Statuses, distributed active power and violation lists (values to 1e-9, relative: the two arms' states differ in
+     *  the last bits). */
+    private static void assertMatchesCpu(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) {
+        assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+        for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+            PostContingencyResult c = cpu.getPostContingencyResults().get(i);
+            PostContingencyResult g = gpu.getPostContingencyResults().get(i);
+            String id = c.getContingency().getId();
+            assertEquals(c.getStatus(), g.getStatus(), "status of " + id);
+            assertEquals(c.getDistributedActivePower(), g.getDistributedActivePower(), 1e-9, "distributed active power of " + id);
+            List<LimitViolation> cv = c.getLimitViolationsResult().getLimitViolations();
+            List<LimitViolation> gv = g.getLimitViolationsResult().getLimitViolations();
+            assertEquals(cv.size(), gv.size(), "violation count of " + id);
+            for (int v = 0; v < cv.size(); v++) {
+                LimitViolation a = cv.get(v);
+                LimitViolation b = gv.get(v);
+                String what = id + " violation " + v;
+                assertEquals(a.getSubjectId(), b.getSubjectId(), what);
+                assertEquals(a.getLimitType(), b.getLimitType(), what);
+                assertEquals(a.getSide(), b.getSide(), what);
+                assertEquals(a.getLimitName(), b.getLimitName(), what);
+                assertEquals(a.getValue(), b.getValue(), 1e-9 * Math.max(1, Math.abs(a.getValue())), what);
+            }
+        }
+    }
+
+    @Test
+    void currentActiveAndApparentPowerLimitsWithoutTheNetwork() {
+        Network network = EurostagTutorialExample1Factory.createWithFixedCurrentLimits();
+        for (String id : List.of("NHV1_NHV2_1", "NHV1_NHV2_2")) {
+            Line line = network.getLine(id);
+            line.getOrCreateSelectedOperationalLimitsGroup1().newActivePowerLimits().setPermanentLimit(250).add();
+            line.getOrCreateSelectedOperationalLimitsGroup2().newApparentPowerLimits().setPermanentLimit(250).add();
+        }
+        assertAnsweredWithoutNetwork(network, List.of(new Contingency("NHV1_NHV2_1", new BranchContingency("NHV1_NHV2_1")),
+                new Contingency("NHV1_NHV2_2", new BranchContingency("NHV1_NHV2_2"))), new LoadFlowParameters());
+    }
+
+    /** The busbar section outage opens branches at one side and loses a bus: the topology the result reads comes from the
+     *  contingency's disabled network, with nothing applied. Every bus outside a zero-width band just above the nominal
+     *  voltage, so a lost bus read as in service would report its voltage (the device leaves a lost bus flat at 1 pu). */
+    @Test
+    void busbarSectionOutageWithoutTheNetwork() {
+        Network network = GpuSaTestNetworks.middleSectionLossNetwork(false);
+        network.getLineStream().forEach(line -> {
+            line.getOrCreateSelectedOperationalLimitsGroup1().newCurrentLimits().setPermanentLimit(1).add();
+            line.getOrCreateSelectedOperationalLimitsGroup2().newCurrentLimits().setPermanentLimit(1).add();
+        });
+        network.getVoltageLevelStream().forEach(vl ->
+                vl.setLowVoltageLimit(vl.getNominalV() * 1.0001).setHighVoltageLimit(vl.getNominalV() * 1.0001));
+        LoadFlowParameters lfp = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(SlackBusSelectionMode.NAME).setSlackBusesIds(List.of("vl0_b"));
+        assertAnsweredWithoutNetwork(network, List.of(new Contingency("bus-mid", new BusbarSectionContingency("bbs1"))), lfp);
+    }
+
+    @Test
+    void busVoltageLimitsWithoutTheNetwork() {
+        Network network = IeeeCdfNetworkFactory.create118();
+        network.getVoltageLevelStream().forEach(vl ->
+                vl.setLowVoltageLimit(vl.getNominalV()).setHighVoltageLimit(vl.getNominalV()));
+        List<Contingency> contingencies = network.getLineStream().limit(3)
+                .map(line -> new Contingency(line.getId(), new BranchContingency(line.getId()))).toList();
+        assertAnsweredWithoutNetwork(network, contingencies, new LoadFlowParameters());
     }
 }

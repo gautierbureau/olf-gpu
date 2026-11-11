@@ -111,13 +111,19 @@ final class GpuPostContingencyState {
      */
     static boolean checkBusesFromState(double[] state, GpuStateView view, LfNetwork network, AcLoadFlowParameters parameters,
                                        GpuSaRunState run, boolean write) {
+        return checkBusesFromState(state, view, network, parameters, run, write, GpuContingencyTopology.NETWORK);
+    }
+
+    /** As above, the buses out of service as {@code topology} says (a contingency answered without being applied). */
+    static boolean checkBusesFromState(double[] state, GpuStateView view, LfNetwork network, AcLoadFlowParameters parameters,
+                                       GpuSaRunState run, boolean write, GpuContingencyTopology topology) {
         boolean[] applies = realisticBandApplies(network, parameters, run);
         double minV = parameters.getMinRealisticVoltage();
         double maxV = parameters.getMaxRealisticVoltage();
         boolean trace = GpuTrace.UNREALISTIC_TRACE.isOn();
         boolean unrealistic = false;
         for (LfBus bus : network.getBuses()) {
-            if (bus.isDisabled()) {
+            if (topology.busOut(bus)) {
                 continue;
             }
             double value = view.stateV(state, bus);

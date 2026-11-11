@@ -2,8 +2,10 @@
 
 **Status** (2026-11-11): P0 and P1 done on branch `state-view` (from `main` e0eb0922): the state view and its
 bitwise checks (§4, P0), and the contingencies answered from their state without the write-back, with the same
-decisions on every contingency of network.xiidm and rte6515 and the full list 12 s faster warm (§4, P1). P2 next. The
-plan was written 2026-11-09 on branch `device-final-results`;
+decisions on every contingency of network.xiidm and rte6515 and the full list 12 s faster warm (§4, P1). P2 done on
+branch `answer-without-network` (stacked on `state-view`, needs fork 677019fe8): those contingencies are answered
+without applying them to the network, with the same results on every one of them and the full list about 7 s faster
+cold, 5 s warm (§4, P2). P3 next. The plan was written 2026-11-09 on branch `device-final-results`;
 the issues of §7 were triaged on `main` since, each with its status there, and none of the open ones is a prerequisite
 of P0 to P4. The §0 measurements are from network.xiidm, our batched LU (`linearSolver=BATCHED_LU`), GPU arm, phase
 timing on (`OLF_GPU_PHASE_TIME=1`, `OLF_SA_PROFILE=1`); every gain must be re-measured A/B, alternating, at least
@@ -355,6 +357,61 @@ P0's gate holds: 0 mismatches on every run, so P1 can start.
 ### P2 — no apply, no restore
 - Fork hook (§3.3) + GPU override; disabled sets from the `LfContingency`; excluded slack buses put back.
 - Removes ≈1.6 s (full) / ≈1.2 s (branch) warm, plus listener churn the timers do not attribute.
+
+**Done on `answer-without-network` (2026-11-11, stacked on `state-view`).**
+- The hook: fork 677019fe8 on `olf-local-patches` adds `resultWithoutNetwork` to `AbstractSecurityAnalysis`.
+  `processContingency` calls it for a contingency without operator strategies, before anything touches the network;
+  an empty answer runs the contingency as before.
+- The GPU analysis answers there when the contingency is answered from its state (P1's `answeredFromState`) and nothing
+  needs the applied network:
+  - the device moved no tap and switched no branch for it (both are written to the network today; P3 takes them);
+  - its loss distribution has a replayed value;
+  - no state monitor asks for results;
+  - it did not run out of Newton iterations on the device;
+  - no dump of the applied network is on (`OLF_GPU_SA_VAR_DUMP`, `OLF_GPU_EQ_DUMP_CTG`).
+- The answer is P1's, with the contingency's topology read from its disabled network instead of the network's flags
+  (`GpuContingencyTopology`): a `BOTH_SIDES` branch is out, a `SIDE_1` or `SIDE_2` branch is open at that side, a lost
+  bus is out. The view, the scanner and the realistic-voltage check take it; the usual path passes the network's own
+  flags (`GpuContingencyTopology.NETWORK`). The loss distribution's report is written from the replayed value, as
+  `ReplayedLossDistribution` writes it. `toLfContingency` stays (§3.3).
+- Nothing is applied or restored. The excluded slack buses `toLfContingency` may change are put back only when they
+  changed (the device leaves relocated-slack contingencies to the CPU, so this is a guard).
+- The comparison: with `OLF_GPU_STATE_VIEW_CHECK` on, or `GpuStateViewCheck.compareInTests` in test code, such a
+  contingency is answered without the network, then the usual way, and the two results compared: status, distributed
+  active power, connectivity result, the network result's sizes and the violation lists field by field, doubles by
+  their bits. The usual result is returned.
+- `GpuSaAnswerFromStateTest` gains three cases without state monitors, each run with the comparison on, then off
+  against OLF's CPU arm: current, active and apparent power limits on closed lines; a busbar section outage (branches
+  opened at one side, a lost bus) with every bus just above a narrow band; IEEE 118 with every bus outside a zero-width
+  band. The busbar case fails when the topology ignores the side openings (8 violations against 6) and when it ignores
+  the lost bus (9 against 8; the band sits above 1 pu, where the device leaves a lost bus).
+- `GpuSa*Test` on our batched LU 306/0/2 (303 plus these 3); checkstyle 0.
+- The channel on, network.xiidm and rte6515 (our batched LU, cold, logback at WARN): every device-answered contingency
+  was answered without the network and compared, **0 mismatches**; P1's decisions and P0's quantities still at 0:
+
+  | run | answered without the network, compared | mismatches |
+  |---|---|---|
+  | network.xiidm, every branch | 10,538 | 0 |
+  | network.xiidm, the JSON list | 12,726 | 0 |
+  | network.xiidm, the full list | 37,282 | 0 |
+  | rte6515, branch kind | 9,037 | 0 |
+  | rte6515, generator kind (`OLF_GPU_SA_GEN_MIN_KV=0`) | 1,389 | 0 |
+
+  None of these runs moved a tap or switched a branch on the device, so no device-answered contingency kept P1's path.
+- Timing, network.xiidm's full list, our batched LU, GPU arm, untraced, logback at WARN, P1 a9094680 against d77b38c3
+  (P2's code before these results were recorded in its commit), alternating, cold then warm in one JVM; statuses
+  identical (CONVERGED 37,282, FAILED 6, MAX_ITERATION_REACHED 9):
+
+  | arm | cold, pair 1 / 2 | warm, pair 1 / 2 |
+  |---|---|---|
+  | P1 | 128.4 / 123.6 s | 121.8 / 119.0 s |
+  | P2 | 121.0 / 117.5 s | 113.1 / 117.5 s |
+
+  Cold −7.4 and −6.1 s; warm −8.7 and −1.5 s, P2's second warm run being no faster than its cold one where the other
+  three gained 4.6 to 7.9 s from cold to warm. Means −6.8 s cold (−5.4 %) and −5.1 s warm (−4.2 %), against the 6.2 s
+  the profile put on apply and restore. The P1 arm ran 3 to 5 s slower than in P1's own A/B earlier that day; only the
+  alternating pairs compare.
+- Not done: the exhausted contingencies still apply and restore (§6); the mixed-list test (P1's) covers P2 too.
 
 ### P3 — complete device screen (§3.5)
 - Per-scenario disabled mask, opened sides and tap moves through the solve's overrides, automation switches,

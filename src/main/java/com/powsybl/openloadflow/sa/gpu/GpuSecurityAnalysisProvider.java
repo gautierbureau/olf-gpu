@@ -84,6 +84,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_STATE_COUNT.set(0);
+        GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_STRATEGY_RESTORE_COUNT.set(0);
     }
 

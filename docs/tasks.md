@@ -288,7 +288,7 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
-### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 and P1 done 2026-11-11)
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0, P1 and P2 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
 device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
@@ -322,6 +322,17 @@ monitor gets the buses' voltages alone. With the channel on, each such contingen
 old way, and the decisions compared: 0 differences over every device-answered contingency of network.xiidm's three
 scopes and rte6515's branch and generator kinds. Full list, warm, `main` against P1: 128.9 / 131.7 s against
 118.6 / 117.9 s (−12 s), cold −14 s, statuses identical. Results in the plan's §4, P1.
+
+**P2 (2026-11-11, branch `answer-without-network`, stacked on `state-view`).** A fork hook (`resultWithoutNetwork` in
+`AbstractSecurityAnalysis`, fork 677019fe8) lets the GPU analysis answer a contingency before anything touches the
+network. It does when the contingency is answered from its state and nothing needs the applied network: no device tap
+move or automation switch, a replayed loss distribution, no state monitor, not exhausted, no dump of the applied
+network. The contingency's topology comes from its disabled network (`GpuContingencyTopology`); nothing is applied or
+restored, and the excluded slack buses are put back only if they changed. With the channel on, each such contingency
+is also answered the usual way and the two results compared field by field: 0 differences over every device-answered
+contingency of network.xiidm's three scopes and rte6515's branch and generator kinds, all of which took the new path.
+Full list, P1 against P2: cold 128.4 / 123.6 s against 121.0 / 117.5 s (−6.8 s), warm 121.8 / 119.0 s against
+113.1 / 117.5 s (−5.1 s, one noisy pair), statuses identical. Results in the plan's §4, P2.
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

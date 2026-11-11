@@ -102,7 +102,18 @@ final class GpuBatchPrecomputer {
                                        BatchConfig config, ReportNode reportNode) {
         return precompute(network, net, context, contingencies, strategies, actions,
                 List.of(SolveGroup.run(new SolveSettings(distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
-                        convEpsPerEq, config))), java.util.Set.of(), reportNode);
+                        convEpsPerEq, config))), java.util.Set.of(), null, reportNode);
+    }
+
+    /**
+     * What the precompute needs to screen each handed-back scenario on the device and keep only what the host answers it
+     * with (P4 of docs/device-final-results-plan.md, {@link GpuStateHandback}): the run's limit reductions (the screen's
+     * table), which scenarios the host may answer from their state rows alone ({@code sparse}), whether the comparison
+     * also reads every full state, and the realistic-voltage band the screen reports buses outside of.
+     */
+    record HandbackSettings(List<com.powsybl.security.limitreduction.LimitReduction> limitReductions,
+                            java.util.function.Predicate<String> sparse, boolean compare, double minRealisticV,
+                            double maxRealisticV) {
     }
 
     /**
@@ -112,7 +123,7 @@ final class GpuBatchPrecomputer {
     static PrecomputedBatch precompute(Network network, LfNetwork net, AcLoadFlowContext context,
                                        List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                        List<Action> actions, List<SolveGroup> groups, java.util.Set<String> leftToCpu,
-                                       ReportNode reportNode) {
+                                       HandbackSettings handbackSettings, ReportNode reportNode) {
         if (GpuTrace.BATCH_TRACE.isOn()) {   // the network the batch starts from
             for (var b : net.getBuses()) {
                 for (var g : b.getGenerators()) {
@@ -122,14 +133,16 @@ final class GpuBatchPrecomputer {
             }
         }
         synchronized (GPU_DEVICE_LOCK) {
-            return precomputeLocked(network, net, context, contingencies, strategies, actions, groups, leftToCpu, reportNode);
+            return precomputeLocked(network, net, context, contingencies, strategies, actions, groups, leftToCpu,
+                    handbackSettings, reportNode);
         }
     }
 
     private static PrecomputedBatch precomputeLocked(Network network, LfNetwork net, AcLoadFlowContext context,
                                                      List<PropagatedContingency> contingencies, List<OperatorStrategy> strategies,
                                                      List<Action> actions, List<SolveGroup> groups,
-                                                     java.util.Set<String> leftToCpu, ReportNode reportNode) {
+                                                     java.util.Set<String> leftToCpu, HandbackSettings handbackSettings,
+                                                     ReportNode reportNode) {
         SolveGroup runGroup = groups.stream().filter(g -> g.contingencyIds() == null).findFirst().orElseThrow();
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
             if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -209,13 +222,42 @@ final class GpuBatchPrecomputer {
                     : com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor.extract(net, es, baseOpenIds,
                             java.util.Set.of(), runGroup.settings().config().distributedSlackParameters());
             GpuAcElementMapper screenMapper = new GpuAcElementMapper(net, baseOpenIds);
+            // what each scenario is solved as: the screen evaluates its branches in that topology, with those parameters
+            Map<String, BatchContingency> scenarios = new HashMap<>();
+            for (List<BatchContingency> batch : batches) {
+                for (BatchContingency c : batch) {
+                    scenarios.put(c.contingencyId(), c);
+                }
+            }
+            Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
+            for (var v : es.getIndex().getSortedVariablesToFind()) {
+                baseVariableRows.put(v, v.getRow());
+            }
+            // The screen on the device as each scenario is handed back, keeping only what the host answers it with.
+            GpuStateHandback handback = null;
+            GpuLimitTable limitTable = null;
+            GpuViolationScreen violationScreen = null;
+            int fullStates = batchSize;
+            if (handbackSettings != null && com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable()) {
+                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.sa.LimitReductionManager.create(
+                        handbackSettings.limitReductions()));
+                violationScreen = GpuViolationScreen.build(net, limitTable, screenData, screenMapper, es, baseVariableRows);
+                GpuStateView view = new GpuStateView(net, baseVariableRows);
+                java.util.function.Predicate<String> sparse = view.usable() ? handbackSettings.sparse() : id -> false;
+                handback = new GpuStateHandback(violationScreen, limitTable, view, net, scenarios, sparse,
+                        handbackSettings.compare(), true, handbackSettings.minRealisticV(), handbackSettings.maxRealisticV());
+                if (!handbackSettings.compare()) {
+                    fullStates = (int) scenarios.keySet().stream().filter(id -> !sparse.test(id)).count();
+                }
+            }
 
-            // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
-            // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to
-            // a temporary file as each chunk completes instead of the heap: network.xiidm's all-kinds + busbar list
-            // is 37k states of 280 KB, 10.4 GB, more than this machine's heap can hold beside the rest of the run.
+            // Every state the host needs whole is held until the analysis ends (the results are injected later in OLF's
+            // loop). Past GpuStateStore's threshold they go to a temporary file as each chunk completes instead of the
+            // heap: network.xiidm's all-kinds + busbar list is 37k states of 280 KB, 10.4 GB, more than this machine's heap
+            // can hold beside the rest of the run. With the handback, only the scenarios it does not answer from their
+            // rows come back whole.
             Map<String, double[]> stateSink = runGroup.settings().config().stateSink();
-            if (stateSink == null && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(batchSize, baseState.length)) {
+            if (stateSink == null && com.powsybl.openloadflow.sa.gpu.GpuStateStore.wanted(fullStates, baseState.length)) {
                 stateSink = com.powsybl.openloadflow.sa.gpu.GpuStateStore.create(baseState.length);
                 LOGGER.info("Batched N-1: {} states of {} entries go to a temporary file (over {} bytes)", batchSize,
                         baseState.length, com.powsybl.openloadflow.sa.gpu.GpuStateStore.thresholdBytes());
@@ -229,6 +271,9 @@ final class GpuBatchPrecomputer {
                 }
                 SolveSettings settings = groups.get(g).settings();
                 BatchConfig config = stateSink != null ? settings.config().withStateSink(stateSink) : settings.config();
+                if (handback != null) {
+                    config = config.withStateHandback(handback);
+                }
                 List<BatchScenarioResult> groupResults = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                         BatchSolveRequest.of(net, baseState, batch, es, target, deviceSolverParameters(context),
                                 reportNode)
@@ -298,9 +343,11 @@ final class GpuBatchPrecomputer {
                     }
                 }
             }
-            Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
-            for (var v : es.getIndex().getSortedVariablesToFind()) {
-                baseVariableRows.put(v, v.getRow());
+            if (handback != null) {
+                handback.close();                            // the device table: every scenario is screened
+                if (GpuTrace.PHASE_TIME.isOn()) {
+                    System.err.println(handback.summary());
+                }
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batchSize);
@@ -310,15 +357,10 @@ final class GpuBatchPrecomputer {
             System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batchSize + " batched scenarios on device"
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
-            // what each scenario was solved as: the screen evaluates its branches in that topology, with those parameters
-            Map<String, BatchContingency> scenarios = new HashMap<>();
-            for (List<BatchContingency> batch : batches) {
-                for (BatchContingency c : batch) {
-                    scenarios.put(c.contingencyId(), c);
-                }
-            }
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
-                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios);
+                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
+                    handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
+                    limitTable, violationScreen);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

@@ -50,12 +50,32 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         Map<String, int[]> automationSystemSwitched,
                         Map<String, double[]> deviceTapMoves,
                         Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets,
-                        Map<String, BatchContingency> scenarios) {
+                        Map<String, BatchContingency> scenarios,
+                        /** Per screened scenario, its candidates, screened on the device as it was handed back
+                         *  (GpuStateHandback); absent for one screened on the host (an overflow, no device table). */
+                        Map<String, int[]> candidates,
+                        /** The scenarios the host answers from their state rows alone, with those rows: no full state for
+                         *  them in {@code states} (except while the comparison is on). */
+                        Map<String, GpuGatheredState> gathered,
+                        /** The limit table and the screen the candidates index, null without the handback. */
+                        GpuLimitTable limitTable, GpuViolationScreen violationScreen) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null);
+    }
+
+    /** True when the device converged scenario {@code id}: its full state, or the rows the host answers it with. */
+    boolean answered(String id) {
+        return states.containsKey(id) || gathered.containsKey(id);
+    }
+
+    /** The scenarios the device converged. */
+    java.util.Set<String> answeredIds() {
+        java.util.Set<String> ids = new java.util.HashSet<>(states.keySet());
+        ids.addAll(gathered.keySet());
+        return ids;
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

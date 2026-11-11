@@ -131,9 +131,25 @@ final class ChunkArrays {
         return -1;
     }
 
-    /** The status of a result row: the full row's, or the tail's when the state went to the sink. */
+    /** The status of a result row: the full row's, or the tail's when the state went to the sink or stayed on the
+     *  device (a tail-only row: iterations, norm, status). */
     static int rowStatus(double[] row, int n) {
         return row.length == 3 ? (int) row[2] : (int) row[n + 2];
+    }
+
+    /** The Newton iterations of a result row, full or tail-only. */
+    static int rowIterations(double[] row, int n) {
+        return row.length == 3 ? (int) row[0] : (int) row[n];
+    }
+
+    /** The final mismatch norm of a result row, full or tail-only. */
+    static double rowNorm(double[] row, int n) {
+        return row.length == 3 ? row[1] : row[n + 1];
+    }
+
+    /** Sets the status of a result row, full or tail-only. */
+    static void setRowStatus(double[] row, int status) {
+        row[row.length - 1] = status;
     }
 
     /** The full result row (state + tail), read back from the sink when the state was sunk. */

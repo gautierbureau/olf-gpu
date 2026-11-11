@@ -47,6 +47,23 @@ public final class ViolationScreenNative {
                                                      int[] entryBranch, int[] entryKind, double[] entryRow);
 
     /**
+     * Screen the states the last solve call on batch context {@code batchHandle} handed back, where they are on the device
+     * (its states stay there: BatchSolveNative.setBatchStatesToHost off), in the order of its result rows. The same records
+     * as {@link #screenViolationsBatch}, plus, when {@code realistic}, a record {@code limits + 2 * buses + bus} for every
+     * bus outside {@code [minRealisticV, maxRealisticV]}.
+     */
+    public static native int[] screenHandedBack(long tableHandle, long batchHandle, double band, int capacity, int[] entryStart,
+                                                int[] entryBranch, int[] entryKind, double[] entryRow, boolean realistic,
+                                                double minRealisticV, double maxRealisticV);
+
+    /** Values of those handed-back states: request k is row {@code gatherRow[k]} of handed-back scenario
+     *  {@code gatherScenario[k]} (its index in the result rows). */
+    public static native double[] gatherHandedBack(long tableHandle, long batchHandle, int[] gatherScenario, int[] gatherRow);
+
+    /** The full states of handed-back scenarios {@code which} (indices in the result rows), one after the other. */
+    public static native double[] readHandedBackStates(long tableHandle, long batchHandle, int[] which);
+
+    /**
      * Upload the run's limit thresholds and the branch model they are compared against, once per
      * run: a contingency cannot change a threshold, so this outlives every chunk. Returns 0 when the
      * upload failed (the caller then screens on the host).

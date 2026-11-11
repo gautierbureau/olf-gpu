@@ -2,7 +2,9 @@
 
 **Status** (updated 2026-11-11): all three steps landed and are the default. Since P3 of
 `docs/device-final-results-plan.md` the screen sees each scenario as the device solved it (its outages, its base-open
-branches closed, its side openings, its taps), and the host scans in full only what it cannot evaluate. The flat table and its host scanner
+branches closed, its side openings, its taps), and the host scans in full only what it cannot evaluate. Since P4 the
+screen runs as each scenario is handed back, on the states still on the device (no upload), and reports the buses
+outside the realistic-voltage band too. The flat table and its host scanner
 (2026-09-10), the screen/confirm split proven in Java, then the kernel (`3f8ba88e`, 2026-09-10): the device screens
 every scenario, the host confirms each candidate with OLF's exact `>` on OLF's own value. Since `9725fdfd`
 (2026-09-25) a group stops at its first limit exceeded beyond the band. An experiment that let the device decide

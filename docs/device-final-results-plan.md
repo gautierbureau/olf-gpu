@@ -8,7 +8,10 @@ without applying them to the network, with the same results on every one of them
 cold, 5 s warm (§4, P2). P3 done on branch `complete-screen` (stacked on `answer-without-network`, needs fork
 da31cfe4b): the screen sees each scenario as the device solved it, the host scans in full only what it cannot evaluate,
 and voltage-angle limits no longer keep a contingency off the state path; no violation missed on any gate run, timing
-unchanged (§4, P3). P4 next. The plan was written 2026-11-09 on branch `device-final-results`;
+unchanged (§4, P3). P4 done on branch `sparse-readback` (stacked on `complete-screen`): each scenario is screened on the
+device as it is handed back, and a contingency the host answers from its state comes back as the few state rows that
+answer reads instead of its full state; the same answers on every gate run, the full list 17 s faster cold and warm
+(§4, P4). P5 next. The plan was written 2026-11-09 on branch `device-final-results`;
 the issues of §7 were triaged on `main` since, each with its status there, and none of the open ones is a prerequisite
 of P0 to P4. The §0 measurements are from network.xiidm, our batched LU (`linearSolver=BATCHED_LU`), GPU arm, phase
 timing on (`OLF_GPU_PHASE_TIME=1`, `OLF_SA_PROFILE=1`); every gain must be re-measured A/B, alternating, at least
@@ -515,6 +518,78 @@ P0's gate holds: 0 mismatches on every run, so P1 can start.
 ### P4 — screen in the solve context, targeted readback (§3.6)
 - Removes the state round trip and the state store for device-final contingencies; the re-upload (0.27–0.53 s) and
   the readback's PCIe/host time (to measure: not attributed today).
+
+**Design (2026-11-11, branch `sparse-readback`, stacked on `complete-screen`).**
+- Each scenario is screened when its slot is handed back, on the states still on the device: the solve call returns
+  the handed-back slots, and a call on the same context screens them (P3's kernel and scenario entries, the entries
+  completed with the taps and switches the device just handed back). `screenAll` and its re-upload go.
+- The screen also emits a record per bus outside the realistic-voltage band (an exact comparison, no arithmetic), so the
+  host's realistic check needs no other bus.
+- A scenario the host answers from its state (P1, P2) reads back only what that answer reads: the state rows of its
+  candidates' branches and buses, of the voltage-angle limits' buses, of the branches the screen does not cover, and of
+  the buses outside the realistic band, gathered on the device as (row, value) pairs. Every other row of the host's
+  scratch state is NaN, which no comparison reports; a row the host would read and did not gather is a lost
+  violation, so the comparison below runs every answer from the gathered rows and from the full state.
+- A full state is read back only where something needs it: a strategy (the pair and its parent, which seeds the pair),
+  a state monitor, a diagnostic, a contingency off P1's path, a scenario whose candidates overflow the buffer, and every
+  scenario while the comparison is on. The state store keeps those alone.
+- Whether a scenario may be sparse is decided before the solve, by P1's predicate (it reads nothing the solve decides).
+- The comparison (`OLF_GPU_STATE_VIEW_CHECK`, `compareInTests`): every sparse answer is also given from the full state
+  and the two compared field by field.
+
+**Done on `sparse-readback` (2026-11-11, stacked on `complete-screen`).**
+- The batch context keeps its states on the device (`BatchSolverContext::statesToHost`,
+  `BatchSolveNative.setBatchStatesToHost`): a solve call's result rows carry the iterations, norm and status alone. After
+  each call the chunk solver hands the handed-back scenarios to the run's `StateHandback` (a `BatchConfig` field), here
+  `GpuStateHandback`:
+  - every converged scenario is screened on the device, the kernels reading the context's states through their slots
+    (no copy), with the records of the buses outside the realistic band;
+  - a scenario the host answers from its state keeps its candidates and the rows its answer reads, gathered as (row,
+    value) pairs; the host answers it from a scratch state holding those rows (`answerState`), every other row NaN;
+  - every other scenario's full state is gathered on the device and copied in one piece: strategy pairs and their
+    parents (forced by the chunk solver), state monitors, dumps and diagnostics, contingencies off P1's path, overflows,
+    and everything while the comparison is on.
+- The precompute builds the limit table and the screen before the solves (the run's limit reductions are kept on the
+  run state) and hands them, the candidates and the gathered rows to the analysis; `screenAll` is no longer used on this
+  path. The state store holds the full states alone. `PrecomputedBatch.answered(id)` replaces the
+  `states().containsKey(id)` tests (a sparse scenario has no full state). `GpuLimitScanner.confirm` now rejects a
+  candidate with OLF's own `>`, which a NaN never passes.
+- The comparison: each answer comes from the gathered rows, and every check uses the full state (the decisions written
+  back, the screen's full scan, P2's usual path, P0's quantities), so a row the host reads and did not gather shows as a
+  lost violation.
+- Tests: `GpuSaAnswerFromStateTest`'s runs without state monitors (the P2 fixtures, the moved tap, the angle limits, the
+  side opening) take the rows path, with the comparison on, then against OLF's CPU arm, and assert answers from rows. The
+  runs with a monitor on every voltage level (P1's helper) read every bus, so their scenarios come back whole. The
+  candidates' branch rows not gathered, and the angle limits' buses not gathered, are each caught (the screen's full scan
+  of the full state reports what the rows answer lost).
+- `GpuSa*Test` on our batched LU 310/0/2; checkstyle 0.
+- The channel on, network.xiidm and rte6515 (our batched LU, cold, logback at WARN): every converged contingency
+  answered from its rows and compared with its full state, **no mismatch**; no candidate overflowed:
+
+  | run | answered from rows | rows gathered | decisions, screens, results compared | mismatches |
+  |---|---|---|---|---|
+  | network.xiidm, every branch | 10,538 | 1,215,950 | 10,538 / 31,614 / 10,538 | 0 |
+  | network.xiidm, the JSON list | 12,726 | 1,110,354 | 12,726 / 38,178 / 12,726 | 0 |
+  | network.xiidm, the full list | 37,282 | 5,170,928 | 37,282 / 111,846 / 37,282 | 0 |
+  | rte6515, branch kind | 9,037 | 1,982,760 | 9,037 / 27,111 / 9,037 | 0 |
+  | rte6515, generator kind | 1,389 | 302,904 | 1,389 / 4,167 / 1,389 | 0 |
+
+- Production (no comparison), network.xiidm's full list, traced: 37,282 contingencies answered from 5,170,928 gathered
+  rows (139 per contingency, about 62 MB with their indices), no full state read back, instead of 37,282 full states
+  (10.4 GB, the file-backed store).
+- Timing, network.xiidm's full list, our batched LU, GPU arm, untraced, logback at WARN, P3 3e36e3d3 against 4481c7bc
+  (P4's code before these results were recorded in its commit), alternating, each arm with its own native library,
+  cold then warm in one JVM; statuses identical (CONVERGED 37,282, FAILED 6, MAX_ITERATION_REACHED 9):
+
+  | arm | cold, pair 1 / 2 | warm, pair 1 / 2 |
+  |---|---|---|
+  | P3 | 119.7 / 117.6 s | 114.1 / 113.8 s |
+  | P4 | 103.1 / 100.3 s | 97.2 / 95.5 s |
+
+  −16.9 s cold and −17.6 s warm (−14 % and −15 %), both pairs agreeing, against the 11.5 s §0 put on the handback, the
+  store and the screen's upload.
+- Not done: the scenario entries are still built on the host from the kept `BatchContingency` (the solve's own masks and
+  overrides could feed the screen directly); the exhausted contingencies still apply and restore (§6); P5.
 
 ### P5 — state monitors and device-answered operator strategies (§3.7)
 

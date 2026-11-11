@@ -288,7 +288,7 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
-### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 to P3 done 2026-11-11)
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 to P4 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
 device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
@@ -346,6 +346,16 @@ uses for a side opening gave active powers 3.9e-6 off (relative), above the band
 (1.1e-15). Four new fixtures, each catching a mutation of the mechanism it covers; the P1 phase-shifter fixture moved no
 tap until it was rebuilt here. Timing neutral against P2 (full list, two alternating pairs). Results in the plan's §4,
 P3.
+
+**P4 (2026-11-11, branch `sparse-readback`, stacked on `complete-screen`).** The batch context keeps its states on the
+device; after each solve call `GpuStateHandback` screens the handed-back scenarios there, and a contingency the host
+answers from its state comes back as the state rows that answer reads (its candidates' branches and buses, the buses
+outside the realistic band, the angle limits' buses), answered from a NaN-filled scratch state. Full states only where
+something needs one (strategies, monitors, diagnostics, overflows, the comparison). The comparison answers every
+contingency from its rows and checks it against its full state: no mismatch on network.xiidm's three scopes and
+rte6515's two kinds. network.xiidm's full list reads back 5.2 million rows (62 MB) instead of 37,282 full states
+(10.4 GB), and runs 17 s faster cold and warm (P3 119.7 / 117.6 s cold, 114.1 / 113.8 s warm, against 103.1 / 100.3 s
+and 97.2 / 95.5 s). Results in the plan's §4, P4.
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

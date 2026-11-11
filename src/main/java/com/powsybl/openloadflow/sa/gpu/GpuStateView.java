@@ -113,6 +113,35 @@ final class GpuStateView {
         return usable;
     }
 
+    /** Every state row the view may read for {@code branch} (its buses' voltages and angles, its ratio and phase shift
+     *  variables), each through {@code row}. */
+    void rowsOf(LfBranch branch, java.util.function.IntConsumer row) {
+        if (branch.getBus1() != null) {
+            rowsOf(branch.getBus1(), row);
+        }
+        if (branch.getBus2() != null) {
+            rowsOf(branch.getBus2(), row);
+        }
+        int num = branch.getNum();
+        if (r1Row[num] >= 0) {
+            row.accept(r1Row[num]);
+        }
+        if (a1Row[num] >= 0) {
+            row.accept(a1Row[num]);
+        }
+    }
+
+    /** Every state row the view may read for {@code bus}: its voltage and its angle. */
+    void rowsOf(LfBus bus, java.util.function.IntConsumer row) {
+        int num = bus.getNum();
+        if (vRow[num] >= 0) {
+            row.accept(vRow[num]);
+        }
+        if (phiRow[num] >= 0) {
+            row.accept(phiRow[num]);
+        }
+    }
+
     /** True when this view was built from these base rows. */
     boolean isFor(Map<Variable<AcVariableType>, Integer> rows) {
         return baseRows == rows;

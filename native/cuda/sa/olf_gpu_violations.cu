@@ -37,6 +37,7 @@
 #include "../equations/generated/closed_branch.cuh"
 #include "../equations/generated/open_branch.cuh"
 #include "../common/codes/gpu_two_sides.cuh"
+#include "../solver/handed_back_states.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -99,12 +100,35 @@ struct ViolationTable {
     Buf limThreshold;
     Buf busVRow, busHigh, busLow;
     Buf closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices;
-    // Scratch, grown on demand: the states of one chunk, its scenario entries and its records.
+    // Scratch, grown on demand: the states of one chunk, its scenario entries and its records; for a batch context's
+    // handed-back states, their slots, and the rows gathered from them.
     Buf states, records, counts;
     Buf entryStart, entryBranch, entryKind, entryRow;
+    Buf slots, gatherScenario, gatherRow, gathered;
     size_t statesCap = 0, recordsCap = 0, countsCap = 0;
     size_t entryStartCap = 0, entryBranchCap = 0, entryKindCap = 0, entryRowCap = 0;
+    size_t slotsCap = 0, gatherScenarioCap = 0, gatherRowCap = 0, gatheredCap = 0;
 };
+
+/** Grow-only scratch: keeps the buffer when it is big enough (an empty request still gets a few bytes, so a kernel never
+ *  reads a null pointer). */
+bool grow(Buf& buf, size_t& cap, size_t bytes) {
+    if (bytes == 0) {
+        bytes = sizeof(double);
+    }
+    if (cap >= bytes) {
+        return true;
+    }
+    if (buf.p) { cudaFree(buf.p); buf.p = nullptr; }
+    if (!buf.alloc(bytes)) { return false; }
+    cap = bytes;
+    return true;
+}
+
+/** Scenario s's state: row s of a chunk's own states, or the bank slot slotOf[s] of a batch context's (n per slot). */
+__device__ inline const double* stateOf(const double* x, const int* slotOf, int s, int n) {
+    return x + (size_t) (slotOf != nullptr ? slotOf[s] : s) * n;
+}
 
 /** Emit one candidate, or count past the capacity so the host can fall back for this scenario. */
 __device__ inline void emit(int* records, int* counts, int scenario, int capacity, int record) {
@@ -131,14 +155,14 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
                                const double* limThreshold,
                                const double* closedBranchParameters, const int* closedBranchIndices, const double* openBranchParameters, const int* openBranchIndices,
                                const int* entryStart, const int* entryBranch, const int* entryKind, const double* entryRow,
-                               const double* x, int* records, int* counts) {
+                               const double* x, const int* slotOf, int* records, int* counts) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBranches * nScenarios) {
         return;
     }
     int b = tid % nBranches;
     int s = tid / nBranches;
-    const double* xs = x + (size_t) s * n;
+    const double* xs = stateOf(x, slotOf, s, n);
     int entry = entryOf(entryStart, entryBranch, s, b);
     int kind = entry >= 0 ? entryKind[entry] : 0;
     if ((kind & ENTRY_OUT) != 0 || (brBaseOpen[b] != 0 && (kind & ENTRY_IN) == 0)) {
@@ -247,7 +271,7 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
 
 __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, double band, int busRecordBase,
                             const int* busVRow, const double* busHigh, const double* busLow,
-                            const double* x, int* records, int* counts) {
+                            const double* x, const int* slotOf, int* records, int* counts) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBuses * nScenarios) {
         return;
@@ -258,7 +282,7 @@ __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, dou
     if (row < 0) {
         return;
     }
-    double v = x[(size_t) s * n + row];
+    double v = stateOf(x, slotOf, s, n)[row];
     double high = busHigh[i];
     double low = busLow[i];
     // A NaN limit makes the comparison false, which is exactly what OLF's !isNaN(limit) guard does.
@@ -268,6 +292,47 @@ __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, dou
     if (v < low + fabs(low) * band) {
         emit(records, counts, s, capacity, busRecordBase + i * 2 + 1);
     }
+}
+
+// The buses outside the realistic-voltage band, for the host's realistic check (OLF's own comparisons, no arithmetic: the
+// host decides each one exactly as it would over every bus). A NaN voltage compares false, as on the host.
+__global__ void screenRealistic(int nBuses, int nScenarios, int n, int capacity, double minV, double maxV, int realisticRecordBase,
+                                const int* busVRow, const double* x, const int* slotOf, int* records, int* counts) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nBuses * nScenarios) {
+        return;
+    }
+    int i = tid % nBuses;
+    int s = tid / nBuses;
+    int row = busVRow[i];
+    if (row < 0) {
+        return;
+    }
+    double v = stateOf(x, slotOf, s, n)[row];
+    if (v < minV || v > maxV) {
+        emit(records, counts, s, capacity, realisticRecordBase + i);
+    }
+}
+
+// The full states of the handed-back scenarios which[j] (indices in the result rows), one after the other.
+__global__ void gatherStates(int count, int n, const int* which, const int* slotOf, const double* x, double* out) {
+    size_t tid = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= (size_t) count * n) {
+        return;
+    }
+    size_t j = tid / n;
+    size_t k = tid % n;
+    out[tid] = stateOf(x, slotOf, which[j], n)[k];
+}
+
+// One gathered value per (scenario, row) request.
+__global__ void gatherRows(int nRows, int n, const int* gatherScenario, const int* gatherRow, const double* x,
+                           const int* slotOf, double* out) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nRows) {
+        return;
+    }
+    out[k] = stateOf(x, slotOf, gatherScenario[k], n)[gatherRow[k]];
 }
 
 }  // namespace
@@ -322,33 +387,17 @@ OLF_JNI(sa_gpu, ViolationScreenNative, destroyViolationTable)(
     delete reinterpret_cast<ViolationTable*>(handle);
 }
 
-/** Run the screen over one chunk of states, leaving counts and records on the device. False on any CUDA failure. */
-static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScenarios, jint n,
-                     jdouble band, jint capacity, jintArray jEntryStart, jintArray jEntryBranch, jintArray jEntryKind,
-                     jdoubleArray jEntryRow) {
-    size_t stateBytes = (size_t) nScenarios * n * sizeof(double);
+/** Upload a chunk's scenario entries (GpuScreenScenario as one CSR) and size its record buffers. False on any failure. */
+static bool prepareChunk(JNIEnv* env, ViolationTable* t, jint nScenarios, jint capacity, jintArray jEntryStart,
+                         jintArray jEntryBranch, jintArray jEntryKind, jdoubleArray jEntryRow) {
     size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);
     size_t countBytes = (size_t) nScenarios * sizeof(int);
     if (env->GetArrayLength(jEntryStart) != nScenarios + 1) {
         return false;
     }
     size_t nEntries = (size_t) env->GetArrayLength(jEntryBranch);
-    // The chunk buffers are reused across chunks and only ever grow, so a run pays one allocation (a chunk without
-    // entries still gets a one-int buffer, so the kernel never reads a null pointer).
-    auto grow = [](Buf& buf, size_t& cap, size_t bytes) {
-        if (bytes == 0) {
-            bytes = sizeof(double);
-        }
-        if (cap >= bytes) {
-            return true;
-        }
-        if (buf.p) { cudaFree(buf.p); buf.p = nullptr; }
-        if (!buf.alloc(bytes)) { return false; }
-        cap = bytes;
-        return true;
-    };
-    if (!grow(t->states, t->statesCap, stateBytes) || !grow(t->records, t->recordsCap, recordBytes)
-            || !grow(t->counts, t->countsCap, countBytes)
+    // The chunk buffers are reused across chunks and only ever grow, so a run pays one allocation.
+    if (!grow(t->records, t->recordsCap, recordBytes) || !grow(t->counts, t->countsCap, countBytes)
             || !grow(t->entryStart, t->entryStartCap, ((size_t) nScenarios + 1) * sizeof(int))
             || !grow(t->entryBranch, t->entryBranchCap, nEntries * sizeof(int))
             || !grow(t->entryKind, t->entryKindCap, nEntries * sizeof(int))
@@ -377,6 +426,50 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScen
         std::fprintf(stderr, "olfgpu violations: scenario entries upload failed\n");
         return false;
     }
+    return cudaMemset(t->counts.p, 0, countBytes) == cudaSuccess;
+}
+
+/** Screen nScenarios states of n doubles (x, row s or bank slot slotOf[s]) into the chunk's counts and records; the
+ *  realistic-voltage band too when realistic. False on any CUDA failure. */
+static bool launchScreen(ViolationTable* t, jint nScenarios, jint n, jdouble band, jint capacity, const double* x,
+                         const int* slotOf, bool realistic, double minV, double maxV) {
+    screenBranches<<<grid(t->nBranches * nScenarios), BLOCK>>>(
+            t->nBranches, nScenarios, n, capacity, band,
+            t->brFamily.as<int>(), t->brElem.as<int>(), t->brBaseOpen.as<int>(), t->brGroupStart.as<int>(),
+            t->brGroupEnd.as<int>(),
+            t->grpSide.as<int>(), t->grpQty.as<int>(), t->grpLimStart.as<int>(), t->grpLimEnd.as<int>(),
+            t->limThreshold.as<double>(),
+            t->closedBranchParameters.as<double>(), t->closedBranchIndices.as<int>(), t->openBranchParameters.as<double>(), t->openBranchIndices.as<int>(),
+            t->entryStart.as<int>(), t->entryBranch.as<int>(), t->entryKind.as<int>(), t->entryRow.as<double>(),
+            x, slotOf, t->records.as<int>(), t->counts.as<int>());
+    if (t->nBuses > 0) {
+        screenBuses<<<grid(t->nBuses * nScenarios), BLOCK>>>(
+                t->nBuses, nScenarios, n, capacity, band, t->nLimits,
+                t->busVRow.as<int>(), t->busHigh.as<double>(), t->busLow.as<double>(),
+                x, slotOf, t->records.as<int>(), t->counts.as<int>());
+        if (realistic) {
+            screenRealistic<<<grid(t->nBuses * nScenarios), BLOCK>>>(
+                    t->nBuses, nScenarios, n, capacity, minV, maxV, t->nLimits + 2 * t->nBuses,
+                    t->busVRow.as<int>(), x, slotOf, t->records.as<int>(), t->counts.as<int>());
+        }
+    }
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "olfgpu violations: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+/** Run the screen over one chunk of states, leaving counts and records on the device. False on any CUDA failure. */
+static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScenarios, jint n,
+                     jdouble band, jint capacity, jintArray jEntryStart, jintArray jEntryBranch, jintArray jEntryKind,
+                     jdoubleArray jEntryRow) {
+    size_t stateBytes = (size_t) nScenarios * n * sizeof(double);
+    if (!grow(t->states, t->statesCap, stateBytes)
+            || !prepareChunk(env, t, nScenarios, capacity, jEntryStart, jEntryBranch, jEntryKind, jEntryRow)) {
+        return false;
+    }
     // The chunk's states sit in a direct buffer: read in place, no JNI copy of them first.
     const void* states = env->GetDirectBufferAddress(jStates);
     if (states == nullptr || env->GetDirectBufferCapacity(jStates) < static_cast<jlong>(stateBytes)) {
@@ -387,30 +480,28 @@ static bool runChunk(JNIEnv* env, ViolationTable* t, jobject jStates, jint nScen
         std::fprintf(stderr, "olfgpu violations: state upload: %s\n", cudaGetErrorString(err));
         return false;
     }
-    if (cudaMemset(t->counts.p, 0, countBytes) != cudaSuccess) {
-        return false;
+    return launchScreen(t, nScenarios, n, band, capacity, t->states.as<double>(), nullptr, false, 0, 0);
+}
+
+/** The chunk's counts then records, as one int array (see screenViolationsBatch), or null on failure. */
+static jintArray readRecords(JNIEnv* env, ViolationTable* t, jint nScenarios, jint capacity) {
+    size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);
+    size_t countBytes = (size_t) nScenarios * sizeof(int);
+    jintArray out = env->NewIntArray(nScenarios + (jint) ((size_t) nScenarios * capacity));
+    if (out == nullptr) {
+        return nullptr;
     }
-    screenBranches<<<grid(t->nBranches * nScenarios), BLOCK>>>(
-            t->nBranches, nScenarios, n, capacity, band,
-            t->brFamily.as<int>(), t->brElem.as<int>(), t->brBaseOpen.as<int>(), t->brGroupStart.as<int>(),
-            t->brGroupEnd.as<int>(),
-            t->grpSide.as<int>(), t->grpQty.as<int>(), t->grpLimStart.as<int>(), t->grpLimEnd.as<int>(),
-            t->limThreshold.as<double>(),
-            t->closedBranchParameters.as<double>(), t->closedBranchIndices.as<int>(), t->openBranchParameters.as<double>(), t->openBranchIndices.as<int>(),
-            t->entryStart.as<int>(), t->entryBranch.as<int>(), t->entryKind.as<int>(), t->entryRow.as<double>(),
-            t->states.as<double>(), t->records.as<int>(), t->counts.as<int>());
-    if (t->nBuses > 0) {
-        screenBuses<<<grid(t->nBuses * nScenarios), BLOCK>>>(
-                t->nBuses, nScenarios, n, capacity, band, t->nLimits,
-                t->busVRow.as<int>(), t->busHigh.as<double>(), t->busLow.as<double>(),
-                t->states.as<double>(), t->records.as<int>(), t->counts.as<int>());
+    jint* host = env->GetIntArrayElements(out, nullptr);
+    cudaError_t err = cudaMemcpy(host, t->counts.p, countBytes, cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) {
+        err = cudaMemcpy(host + nScenarios, t->records.p, recordBytes, cudaMemcpyDeviceToHost);
     }
-    err = cudaDeviceSynchronize();
+    env->ReleaseIntArrayElements(out, host, 0);
     if (err != cudaSuccess) {
-        std::fprintf(stderr, "olfgpu violations: %s\n", cudaGetErrorString(err));
-        return false;
+        std::fprintf(stderr, "olfgpu violations: record readback: %s\n", cudaGetErrorString(err));
+        return nullptr;
     }
-    return true;
+    return out;
 }
 
 /**
@@ -427,20 +518,121 @@ OLF_JNI(sa_gpu, ViolationScreenNative, screenViolationsBatch)(
             || !runChunk(env, t, jStates, nScenarios, n, band, capacity, jEntryStart, jEntryBranch, jEntryKind, jEntryRow)) {
         return nullptr;
     }
-    size_t recordBytes = (size_t) nScenarios * capacity * sizeof(int);
-    size_t countBytes = (size_t) nScenarios * sizeof(int);
-    jintArray out = env->NewIntArray(nScenarios + (jint) ((size_t) nScenarios * capacity));
-    if (out == nullptr) {
+    return readRecords(env, t, nScenarios, capacity);
+}
+
+/**
+ * Screen the states a batched context's last solve call handed back, where they are (the context keeps its states on the
+ * device: BatchSolverContext::statesToHost off), in the order of its result rows: the same records as
+ * screenViolationsBatch, plus a record realisticRecordBase + bus (realisticRecordBase = limits + 2 x buses) for every bus
+ * outside [minRealisticV, maxRealisticV] when realistic. Null on failure.
+ */
+JNIEXPORT jintArray JNICALL
+OLF_JNI(sa_gpu, ViolationScreenNative, screenHandedBack)(
+        JNIEnv* env, jclass, jlong handle, jlong batchHandle, jdouble band, jint capacity, jintArray jEntryStart,
+        jintArray jEntryBranch, jintArray jEntryKind, jdoubleArray jEntryRow, jboolean realistic, jdouble minRealisticV,
+        jdouble maxRealisticV) {
+    auto* t = reinterpret_cast<ViolationTable*>(handle);
+    olfgpu::HandedBackStates states = olfgpu::handedBackStates(batchHandle);
+    const int nScenarios = static_cast<int>(states.slots.size());
+    if (t == nullptr || states.dX == nullptr || nScenarios == 0
+            || !grow(t->slots, t->slotsCap, (size_t) nScenarios * sizeof(int))
+            || cudaMemcpy(t->slots.p, states.slots.data(), (size_t) nScenarios * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess
+            || !prepareChunk(env, t, nScenarios, capacity, jEntryStart, jEntryBranch, jEntryKind, jEntryRow)
+            || !launchScreen(t, nScenarios, states.n, band, capacity, states.dX, t->slots.as<int>(), realistic == JNI_TRUE,
+                             minRealisticV, maxRealisticV)) {
         return nullptr;
     }
-    jint* host = env->GetIntArrayElements(out, nullptr);
-    cudaError_t err = cudaMemcpy(host, t->counts.p, countBytes, cudaMemcpyDeviceToHost);
-    if (err == cudaSuccess) {
-        err = cudaMemcpy(host + nScenarios, t->records.p, recordBytes, cudaMemcpyDeviceToHost);
+    return readRecords(env, t, nScenarios, capacity);
+}
+
+/**
+ * Values of the handed-back states (see screenHandedBack): request k is row gatherRow[k] of the handed-back scenario
+ * gatherScenario[k] (its index in the result rows). Null on failure.
+ */
+JNIEXPORT jdoubleArray JNICALL
+OLF_JNI(sa_gpu, ViolationScreenNative, gatherHandedBack)(
+        JNIEnv* env, jclass, jlong handle, jlong batchHandle, jintArray jGatherScenario, jintArray jGatherRow) {
+    auto* t = reinterpret_cast<ViolationTable*>(handle);
+    olfgpu::HandedBackStates states = olfgpu::handedBackStates(batchHandle);
+    const int nRows = env->GetArrayLength(jGatherRow);
+    if (t == nullptr || states.dX == nullptr || env->GetArrayLength(jGatherScenario) != nRows) {
+        return nullptr;
     }
-    env->ReleaseIntArrayElements(out, host, 0);
+    jdoubleArray out = env->NewDoubleArray(nRows);
+    if (out == nullptr || nRows == 0) {
+        return out;
+    }
+    const int nScenarios = static_cast<int>(states.slots.size());
+    if (!grow(t->slots, t->slotsCap, (size_t) nScenarios * sizeof(int))
+            || !grow(t->gatherScenario, t->gatherScenarioCap, (size_t) nRows * sizeof(int))
+            || !grow(t->gatherRow, t->gatherRowCap, (size_t) nRows * sizeof(int))
+            || !grow(t->gathered, t->gatheredCap, (size_t) nRows * sizeof(double))
+            || cudaMemcpy(t->slots.p, states.slots.data(), (size_t) nScenarios * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+        return nullptr;
+    }
+    jint* scenario = env->GetIntArrayElements(jGatherScenario, nullptr);
+    jint* row = env->GetIntArrayElements(jGatherRow, nullptr);
+    bool ok = cudaMemcpy(t->gatherScenario.p, scenario, (size_t) nRows * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess
+            && cudaMemcpy(t->gatherRow.p, row, (size_t) nRows * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess;
+    env->ReleaseIntArrayElements(jGatherScenario, scenario, JNI_ABORT);
+    env->ReleaseIntArrayElements(jGatherRow, row, JNI_ABORT);
+    if (!ok) {
+        return nullptr;
+    }
+    gatherRows<<<grid(nRows), BLOCK>>>(nRows, states.n, t->gatherScenario.as<int>(), t->gatherRow.as<int>(), states.dX,
+                                       t->slots.as<int>(), t->gathered.as<double>());
+    jdouble* host = env->GetDoubleArrayElements(out, nullptr);
+    cudaError_t err = cudaMemcpy(host, t->gathered.p, (size_t) nRows * sizeof(double), cudaMemcpyDeviceToHost);
+    env->ReleaseDoubleArrayElements(out, host, 0);
     if (err != cudaSuccess) {
-        std::fprintf(stderr, "olfgpu violations: record readback: %s\n", cudaGetErrorString(err));
+        std::fprintf(stderr, "olfgpu violations: gather: %s\n", cudaGetErrorString(err));
+        return nullptr;
+    }
+    return out;
+}
+
+/**
+ * The full states of the handed-back scenarios {@code which} (indices in the result rows), one after the other, n doubles
+ * each: gathered on the device, then one copy. Null on failure.
+ */
+JNIEXPORT jdoubleArray JNICALL
+OLF_JNI(sa_gpu, ViolationScreenNative, readHandedBackStates)(
+        JNIEnv* env, jclass, jlong handle, jlong batchHandle, jintArray jWhich) {
+    auto* t = reinterpret_cast<ViolationTable*>(handle);
+    olfgpu::HandedBackStates states = olfgpu::handedBackStates(batchHandle);
+    const int count = env->GetArrayLength(jWhich);
+    const int nScenarios = static_cast<int>(states.slots.size());
+    if (t == nullptr || states.dX == nullptr) {
+        return nullptr;
+    }
+    const size_t total = (size_t) count * states.n;
+    jdoubleArray out = env->NewDoubleArray((jsize) total);
+    if (out == nullptr || count == 0) {
+        return out;
+    }
+    jint* which = env->GetIntArrayElements(jWhich, nullptr);
+    bool valid = true;
+    for (int j = 0; j < count; j++) {
+        valid = valid && which[j] >= 0 && which[j] < nScenarios;
+    }
+    bool ok = valid
+            && grow(t->slots, t->slotsCap, (size_t) nScenarios * sizeof(int))
+            && grow(t->gatherScenario, t->gatherScenarioCap, (size_t) count * sizeof(int))
+            && grow(t->states, t->statesCap, total * sizeof(double))
+            && cudaMemcpy(t->slots.p, states.slots.data(), (size_t) nScenarios * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess
+            && cudaMemcpy(t->gatherScenario.p, which, (size_t) count * sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess;
+    env->ReleaseIntArrayElements(jWhich, which, JNI_ABORT);
+    if (!ok) {
+        return nullptr;
+    }
+    gatherStates<<<(unsigned int) ((total + BLOCK - 1) / BLOCK), BLOCK>>>(count, states.n, t->gatherScenario.as<int>(),
+                                                                         t->slots.as<int>(), states.dX, t->states.as<double>());
+    jdouble* host = env->GetDoubleArrayElements(out, nullptr);
+    cudaError_t err = cudaMemcpy(host, t->states.p, total * sizeof(double), cudaMemcpyDeviceToHost);
+    env->ReleaseDoubleArrayElements(out, host, 0);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "olfgpu violations: state readback: %s\n", cudaGetErrorString(err));
         return nullptr;
     }
     return out;

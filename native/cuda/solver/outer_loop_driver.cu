@@ -442,7 +442,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // than half the bank copies the whole state, which needs no device scratch as large as the state.
     const int handedBack = wholeBank ? nS : static_cast<int>(ctx->installSlots.size());
     const bool bySlot = wholeBank || 2 * handedBack > nS;
-    if (bySlot) {
+    if (!ctx->statesToHost) {
+        // The host reads the states it needs from dX before the next call (the violation screen's handback): finish
+        // the call's work first, since those reads run on another stream.
+        res.x.clear();
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    } else if (bySlot) {
         res.x.resize(nTot);
         CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
     } else {

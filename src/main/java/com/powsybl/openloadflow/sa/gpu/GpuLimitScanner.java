@@ -36,7 +36,8 @@ import com.powsybl.openloadflow.sa.LimitViolationManager;
  * </ul>
  *
  * <p>The values themselves come from the branch's own {@code Evaluable}s, the same array reads the
- * stock detection does, so a violation found here carries bit-identical numbers.
+ * stock detection does, so a violation found here carries bit-identical numbers; or, for a contingency answered from
+ * the device state without writing it back, from {@link GpuStateView}, which returns those same doubles.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -50,6 +51,12 @@ final class GpuLimitScanner {
     private final double[] quantityCache = new double[6];
     private final boolean[] quantityCached = new boolean[6];
 
+    /** Where the current scan reads the values: the branches' and buses' own accessors (null), or the device state array
+     *  through {@link GpuStateView}, which returns the same doubles without the state written into OLF's objects. Set by
+     *  every scan. */
+    private GpuStateView view;
+    private double[] state;
+
     GpuLimitScanner(GpuLimitTable table) {
         this.table = table;
     }
@@ -60,6 +67,13 @@ final class GpuLimitScanner {
      * are skipped.
      */
     void detectViolations(LfNetwork network, LimitViolationManager manager) {
+        detectViolations(network, manager, null, null);
+    }
+
+    /** As above, the values read from {@code state} through {@code view} when both are non-null. */
+    void detectViolations(LfNetwork network, LimitViolationManager manager, GpuStateView view, double[] state) {
+        this.view = view;
+        this.state = state;
         LfBranch[] branches = table.branches();
         for (int b = 0; b < branches.length; b++) {
             int groupStart = table.groupStart(b);
@@ -83,7 +97,7 @@ final class GpuLimitScanner {
             if (bus.isDisabled()) {
                 continue;
             }
-            double v = bus.getV();
+            double v = busV(bus);
             // NaN limits make both comparisons false, exactly like OLF's !isNaN(limit) guard.
             if (v > table.busHighLimit(i)) {
                 manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
@@ -121,6 +135,15 @@ final class GpuLimitScanner {
      */
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened) {
+        detectFromCandidates(network, manager, candidates, screen, uncoveredBranches, sideOpened, null, null);
+    }
+
+    /** As above, the values read from {@code state} through {@code view} when both are non-null. */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened,
+                              GpuStateView view, double[] state) {
+        this.view = view;
+        this.state = state;
         LfBranch[] branches = table.branches();
         java.util.BitSet inFull = sideOpened;
         if (uncoveredBranches.length > 0) {
@@ -168,7 +191,7 @@ final class GpuLimitScanner {
             if (bus.isDisabled()) {
                 continue;
             }
-            double v = bus.getV();
+            double v = busV(bus);
             if (GpuViolationScreen.isHighVoltage(table, record)) {
                 if (v > table.busHighLimit(busIndex)) {
                     manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
@@ -238,7 +261,9 @@ final class GpuLimitScanner {
             return quantityCache[slot];
         }
         double value;
-        if (side == GpuTwoSides.ONE) {
+        if (view != null) {
+            value = view.branch(state, branch, side, quantity);
+        } else if (side == GpuTwoSides.ONE) {
             value = switch (quantity) {
                 case GpuLimitTable.QTY_I -> branch.getI1().eval();
                 case GpuLimitTable.QTY_P -> branch.getP1().eval();
@@ -254,5 +279,9 @@ final class GpuLimitScanner {
         quantityCache[slot] = value;
         quantityCached[slot] = true;
         return value;
+    }
+
+    private double busV(LfBus bus) {
+        return view != null ? view.busV(state, bus) : bus.getV();
     }
 }

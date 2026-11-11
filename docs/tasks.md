@@ -288,7 +288,7 @@ control off, so rte6515 and network.xiidm never move a tap: their CPU references
 `@EnumSource` runs the modes in the enum's declaration order, CONTINUOUS_WITH_DISCRETISATION first, whatever order
 `names` lists them in.)
 
-### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 in progress 2026-11-11)
+### #85 — PLAN: post-contingency results without writing the state back (2026-11-09; P0 and P1 done 2026-11-11)
 
 Plan: `docs/device-final-results-plan.md` (written on branch `device-final-results`, now on `state-view`). For every
 device-answered contingency the host applies the contingency to the `LfNetwork`, injects the state into the equation
@@ -314,6 +314,14 @@ parameters (`ac.equations.GpuBranchTermValues`, `ac.equations.vector.GpuBranchVe
 needed a fork patch making them public (fork 7cfb7770f on `gb`). `GpuStateViewTest` holds the view to OLF's objects bit
 for bit with no device; `OLF_GPU_STATE_VIEW_CHECK` holds it to the written-back objects on every device-answered
 contingency of a run. Results in the plan's §4, P0.
+
+**P1 (2026-11-11, branch `state-view`).** A device-answered contingency is answered from its state when nothing reads
+OLF's objects for it (no strategy on it, no flow monitor, no diagnostic of the written-back state, no voltage-angle
+limit, no own load flow parameters, a view that can stand for the objects): no injection, no bus writes; a bus-results
+monitor gets the buses' voltages alone. With the channel on, each such contingency is also written back and detected the
+old way, and the decisions compared: 0 differences over every device-answered contingency of network.xiidm's three
+scopes and rte6515's branch and generator kinds. Full list, warm, `main` against P1: 128.9 / 131.7 s against
+118.6 / 117.9 s (−12 s), cold −14 s, statuses identical. Results in the plan's §4, P1.
 
 ### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
 

@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.GpuBranchTermValues;
 import com.powsybl.openloadflow.ac.equations.vector.AcBranchVector;
 import com.powsybl.openloadflow.ac.equations.vector.GpuBranchVectorValues;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
+import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -44,7 +45,8 @@ import java.util.Map;
  *   <li>A bus voltage: {@code (x * nominalV) / nominalV}, the round trip {@code LfBus.setV} then {@code getV} makes (it
  *       differs from {@code x} by one ulp on about one bus in ten); the angle: {@code x} itself.</li>
  * </ul>
- * A branch without closed terms (a zero-impedance branch) answers NaN, as its evaluables do.
+ * A branch without flow terms (a zero-impedance branch, a switch) answers its evaluables' constants, which read no
+ * state.
  *
  * <p>The branch's connection status is read from the branch, as the contingency's {@code apply} left it. The view never
  * writes an OLF object. It is not thread-safe (one scratch wrapper): one view per partition's run state.
@@ -58,6 +60,7 @@ final class GpuStateView {
     private final int[] phiRow;
     private final int[] r1Row;
     private final int[] a1Row;
+    private final boolean usable;
     private final DoubleWrapper w = new DoubleWrapper();
 
     GpuStateView(LfNetwork network, Map<Variable<AcVariableType>, Integer> baseRows) {
@@ -72,6 +75,7 @@ final class GpuStateView {
         Arrays.fill(phiRow, -1);
         Arrays.fill(r1Row, -1);
         Arrays.fill(a1Row, -1);
+        boolean kindsKnown = true;
         for (Map.Entry<Variable<AcVariableType>, Integer> e : baseRows.entrySet()) {
             Variable<AcVariableType> v = e.getKey();
             int num = v.getElementNum();
@@ -80,11 +84,33 @@ final class GpuStateView {
                 case BUS_PHI -> phiRow[num] = e.getValue();
                 case BRANCH_RHO1 -> r1Row[num] = e.getValue();
                 case BRANCH_ALPHA1 -> a1Row[num] = e.getValue();
-                default -> {
-                    // the other kinds feed no quantity the detection reads
+                case DUMMY_P, DUMMY_Q, SHUNT_B -> {
+                    // feed no quantity the detection reads: a coupler's dummy flows, a shunt's susceptance
                 }
+                default -> kindsKnown = false;
             }
         }
+        boolean rowsComplete = true;
+        for (int b = 0; b < nBuses && rowsComplete; b++) {
+            rowsComplete = vRow[b] >= 0 && phiRow[b] >= 0;
+        }
+        boolean vectorized = true;
+        for (LfBranch branch : network.getBranches()) {
+            if (branch.getClosedP1() instanceof EquationTerm<?, ?> && GpuBranchVectorValues.of(branch.getClosedP1()) == null) {
+                vectorized = false;                          // a scalar closed flow term: not the vectorized network
+                break;
+            }
+        }
+        usable = kindsKnown && rowsComplete && vectorized;
+    }
+
+    /**
+     * True when the view can stand for the written-back objects on this run: every bus has its voltage and angle rows,
+     * the system holds no variable kind the view does not know (BUS_V, BUS_PHI, BRANCH_RHO1, BRANCH_ALPHA1, and the
+     * DUMMY_P/Q and SHUNT_B it ignores), and the closed branches' flows come from the vectorized network.
+     */
+    boolean usable() {
+        return usable;
     }
 
     /** True when this view was built from these base rows. */
@@ -125,8 +151,19 @@ final class GpuStateView {
         return current(state, branch, side);
     }
 
+    /** True when the branch has no flow terms (a zero-impedance branch, a switch): OLF's evaluables for it are
+     *  constants (NaN, or null where never set), which read no state. */
+    private static boolean withoutFlowTerms(LfBranch branch) {
+        return !(branch.getClosedP1() instanceof EquationTerm<?, ?>) && !(branch.getOpenP1() instanceof EquationTerm<?, ?>)
+                && !(branch.getOpenP2() instanceof EquationTerm<?, ?>);
+    }
+
     /** The branch's active ({@code active}) or reactive flow at {@code side}. */
     private double flow(double[] state, LfBranch branch, int side, boolean active) {
+        if (withoutFlowTerms(branch)) {
+            return side == GpuTwoSides.ONE ? (active ? branch.getP1() : branch.getQ1()).eval()
+                    : (active ? branch.getP2() : branch.getQ2()).eval();
+        }
         LfBus bus1 = branch.getBus1();
         LfBus bus2 = branch.getBus2();
         boolean live1 = bus1 != null && branch.isConnectedSide1();
@@ -134,9 +171,6 @@ final class GpuStateView {
         int num = branch.getNum();
         if (live1 && live2) {
             AcBranchVector vector = GpuBranchVectorValues.of(branch.getClosedP1());
-            if (vector == null) {
-                return Double.NaN;                           // no closed terms (zero impedance), or not vectorized
-            }
             double v1 = state[vRow[bus1.getNum()]];
             double ph1 = state[phiRow[bus1.getNum()]];
             double v2 = state[vRow[bus2.getNum()]];
@@ -172,6 +206,9 @@ final class GpuStateView {
 
     /** The branch's current magnitude at {@code side}. */
     private double current(double[] state, LfBranch branch, int side) {
+        if (withoutFlowTerms(branch)) {
+            return (side == GpuTwoSides.ONE ? branch.getI1() : branch.getI2()).eval();
+        }
         LfBus bus1 = branch.getBus1();
         LfBus bus2 = branch.getBus2();
         boolean live1 = bus1 != null && branch.isConnectedSide1();
@@ -179,9 +216,7 @@ final class GpuStateView {
         int num = branch.getNum();
         if (live1 && live2) {
             Evaluable term = side == GpuTwoSides.ONE ? branch.getClosedI1() : branch.getClosedI2();
-            if (!(term instanceof AbstractClosedBranchAcFlowEquationTerm closed)) {
-                return Double.NaN;                           // no closed terms: a zero-impedance branch
-            }
+            AbstractClosedBranchAcFlowEquationTerm closed = (AbstractClosedBranchAcFlowEquationTerm) term;
             double v1 = state[vRow[bus1.getNum()]];
             double ph1 = state[phiRow[bus1.getNum()]];
             double v2 = state[vRow[bus2.getNum()]];

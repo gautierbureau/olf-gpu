@@ -1,7 +1,9 @@
 # Post-contingency results without writing the state back — plan
 
-**Status** (2026-11-11): P0 done on branch `state-view` (from `main` e0eb0922): the state view, its bitwise unit
-test and the cross-check channel, with 0 mismatches on every run (§4, P0); P1 next. The plan was written 2026-11-09 on branch `device-final-results`;
+**Status** (2026-11-11): P0 and P1 done on branch `state-view` (from `main` e0eb0922): the state view and its
+bitwise checks (§4, P0), and the contingencies answered from their state without the write-back, with the same
+decisions on every contingency of network.xiidm and rte6515 and the full list 12 s faster warm (§4, P1). P2 next. The
+plan was written 2026-11-09 on branch `device-final-results`;
 the issues of §7 were triaged on `main` since, each with its status there, and none of the open ones is a prerequisite
 of P0 to P4. The §0 measurements are from network.xiidm, our batched LU (`linearSolver=BATCHED_LU`), GPU arm, phase
 timing on (`OLF_GPU_PHASE_TIME=1`, `OLF_SA_PROFILE=1`); every gain must be re-measured A/B, alternating, at least
@@ -303,6 +305,52 @@ P0's gate holds: 0 mismatches on every run, so P1 can start.
   device-final ones).
 - Removes ≈2.9 s (full list) / ≈1.9 s (branch list) warm; also the 2026-11-09 delta-remap work becomes irrelevant for
   these contingencies (it stays for the network path).
+
+**Done on `state-view` (2026-11-11).**
+- `answeredFromState` decides per contingency. It answers from the state unless something reads OLF's objects for that
+  contingency: an operator strategy on it, a state monitor asking for flows (branch or three-windings transformer
+  results), a diagnostic of the written-back state (`OLF_GPU_SA_RESID`, `OLF_GPU_VIOL_CROSSCHECK`), voltage-angle limits
+  on the network (OLF's check reads the buses' angles; it can move to the view later), its own load flow parameters; or
+  unless the view cannot stand for the objects on the run (`GpuStateView.usable()`: a variable kind it does not know,
+  a bus without its rows, a scalar equation system). A bus-results monitor is served by writing the buses' voltages and
+  angles alone; P5 can read them from the view too.
+- Answered from the state: the realistic-voltage check on the array (`GpuPostContingencyState.checkBusesFromState`) and
+  the detection through the view (`GpuLimitScanner` takes the view and the state); no injection, no bus writes. The
+  contingency's apply, its automation switches, its device taps and its targeted restore stay (`deviceAnsweredFor`;
+  `deviceStateInjectedFor` now means the state was written). The view answers a branch without flow terms (a switch, a
+  zero-impedance branch) with OLF's constants: their constant evaluables had kept node-breaker runs off the path.
+- The comparison: with `OLF_GPU_STATE_VIEW_CHECK` on, or `GpuStateViewCheck.compareInTests` in test code (where a
+  difference throws), each answered contingency is also written back and detected the old way; the realistic-voltage
+  statuses and the violation lists are compared field by field, doubles by their bits. The answer stays the state's.
+- `GpuSaAnswerFromStateTest` (the comparison on): current, active and apparent power limits on closed lines, a busbar
+  section outage opening branches at one side, a phase shifter whose tap the device moves, IEEE 118 with every bus
+  outside a zero-width band. It fails when the scanner reads the other side. Dropping the voltage round trip is caught
+  by `GpuStateViewTest` only: a reported bus voltage is `getV()` times the nominal voltage, the same double either way,
+  so the round trip can only change a decision at a knife edge.
+- `GpuSa*Test` on our batched LU 303/0/2, most of it now answered from the state (its helper monitors voltage levels
+  only); checkstyle 0. Not written yet: a dedicated mixed-list test (a CPU replay, an exhausted contingency and a
+  strategy contingency between answered ones); the suite's multi-contingency tests run such sequences against the CPU.
+- The channel on, network.xiidm and rte6515 (our batched LU, cold, logback at WARN): every device-answered contingency
+  compared, **0 decision mismatches**, and P0's quantity check still at 0:
+
+  | run | contingencies compared | decision mismatches |
+  |---|---|---|
+  | network.xiidm, every branch | 10,538 | 0 |
+  | network.xiidm, the JSON list | 12,726 | 0 |
+  | network.xiidm, the full list | 37,282 | 0 |
+  | rte6515, branch kind | 9,037 | 0 |
+  | rte6515, generator kind (`OLF_GPU_SA_GEN_MIN_KV=0`) | 1,389 | 0 |
+
+- Timing, network.xiidm's full list, our batched LU, GPU arm, untraced, logback at WARN, `main` e0eb0922 against
+  317d66e0 (P1's code before these results were recorded in its commit), alternating, cold then warm in one JVM;
+  statuses identical (CONVERGED 37,282, FAILED 6, MAX_ITERATION_REACHED 9):
+
+  | arm | cold, pair 1 / 2 | warm, pair 1 / 2 |
+  |---|---|---|
+  | `main` | 137.7 / 134.7 s | 128.9 / 131.7 s |
+  | P1 | 123.1 / 121.2 s | 118.6 / 117.9 s |
+
+  About −14 s cold and −12 s warm (−9 to −10 %), against the 15.0 s the profile put on the injection and network update.
 
 ### P2 — no apply, no restore
 - Fork hook (§3.3) + GPU override; disabled sets from the `LfContingency`; excluded slack buses put back.

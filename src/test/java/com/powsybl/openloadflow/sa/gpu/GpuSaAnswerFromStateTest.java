@@ -10,11 +10,13 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.BusbarSectionContingency;
 import com.powsybl.contingency.Contingency;
+import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
+import com.powsybl.iidm.network.PhaseTapChangerAdder;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -22,11 +24,13 @@ import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
 import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
+import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.PostContingencyResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
@@ -34,6 +38,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -74,11 +79,13 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
     private void assertAnsweredAsWrittenBack(Network network, List<Contingency> contingencies, LoadFlowParameters lfp) {
         long compared = GpuStateViewCheck.DECISIONS_COMPARED.sum();
         long mismatches = GpuStateViewCheck.DECISION_MISMATCHES.sum();
+        long screens = GpuStateViewCheck.SCREENS_COMPARED.sum();
         assertGpuMatchesCpu(network, contingencies, 1e-12, lfp);
         assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_STATE_COUNT.get() > 0,
                 "no contingency was answered from its state: the comparison proves nothing");
         assertTrue(GpuStateViewCheck.DECISIONS_COMPARED.sum() > compared, "no violation list was compared");
         assertEquals(mismatches, GpuStateViewCheck.DECISION_MISMATCHES.sum());
+        assertTrue(GpuStateViewCheck.SCREENS_COMPARED.sum() > screens, "no screened detection was compared with a full scan");
     }
 
     @Test
@@ -106,13 +113,19 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
         assertAnsweredAsWrittenBack(network, List.of(new Contingency("bus-mid", new BusbarSectionContingency("bbs1"))), lfp);
     }
 
+    /** PS1 regulating its active power over 21 phase steps, each with its own impedance: both outages make the device
+     *  move its tap, and the moved tap's row (another y and ksi) is what the view and the screen must read. */
     @Test
     void phaseShifterWhoseTapTheDeviceMoves() {
         Network network = PhaseControlFactory.createNetworkWithT2wt();
         TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
-        ps1.getPhaseTapChanger().setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
-                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
-                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        PhaseTapChangerAdder tapChanger = ps1.newPhaseTapChanger().setLowTapPosition(-10).setTapPosition(0)
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        for (int t = -10; t <= 10; t++) {
+            tapChanger.beginStep().setAlpha(t).setRho(1.0).setR(0.3 * (t + 11)).setX(3.0 * (t + 11)).setG(0).setB(0).endStep();
+        }
+        tapChanger.add();
         Line l1 = network.getLine("L1");
         network.newLine().setId("L1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
@@ -124,8 +137,13 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
         ps1.getOrCreateSelectedOperationalLimitsGroup1().newCurrentLimits().setPermanentLimit(50).add();
         LoadFlowParameters lfp = new LoadFlowParameters().setPhaseShifterRegulationOn(true);
         OpenLoadFlowParameters.create(lfp).setPhaseShifterControlMode(OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        long rows = GpuStateViewCheck.SCREEN_ROWS_COMPARED.sum();
+        GpuDeviceTaps.CHANGES.set(0);
         assertAnsweredAsWrittenBack(network, List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
                 new Contingency("L1", new BranchContingency("L1"))), lfp);
+        assertTrue(GpuDeviceTaps.CHANGES.get() > 0, "the device moved no tap: the fixture proves nothing about moved taps");
+        // the screen read the moved tap's row, the one the device taps leave on the pi model (checked while comparing)
+        assertTrue(GpuStateViewCheck.SCREEN_ROWS_COMPARED.sum() > rows, "no retapped branch's screen row was compared");
     }
 
     /** Every bus outside a band of zero width, so nearly every bus reports its voltage: the reported value is
@@ -225,6 +243,48 @@ class GpuSaAnswerFromStateTest extends AbstractGpuSaTest {
                 vl.setLowVoltageLimit(vl.getNominalV()).setHighVoltageLimit(vl.getNominalV()));
         List<Contingency> contingencies = network.getLineStream().limit(3)
                 .map(line -> new Contingency(line.getId(), new BranchContingency(line.getId()))).toList();
+        assertAnsweredWithoutNetwork(network, contingencies, new LoadFlowParameters());
+    }
+
+    /** The busbar section outage opens l1 at its vl12 end; with a long line's charging, its vl3 end then carries more
+     *  than in the base, over a limit set between the two (OLF's own security analysis on the network itself). The host
+     *  no longer scans a side-opened branch in full: the screen alone finds that violation, evaluating the live end
+     *  with OLF's open-branch formula. */
+    @Test
+    void lineOpenedAtOneSideViolatesAtItsLiveEnd() {
+        Network network = GpuSaTestNetworks.middleSectionLossNetwork(false);
+        Line l1 = network.getLine("l1");
+        l1.setB1(1.5e-3).setB2(1.5e-3);
+        LoadFlowParameters lfp = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfp)                   // the slack its own tests pin (breakers mode: bus/breaker ids)
+                .setSlackBusSelectionMode(SlackBusSelectionMode.NAME).setSlackBusesIds(List.of("vl0_b"));
+        List<Contingency> contingencies = List.of(new Contingency("bus-mid", new BusbarSectionContingency("bbs1")));
+        SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, List.of(new StateMonitor(ContingencyContext.all(),
+                Set.of("l1"), Set.of(), Set.of())), sap);
+        double base = cpu.getPreContingencyResult().getNetworkResult().getBranchResult("l1").getI2();
+        double opened = cpu.getPostContingencyResults().get(0).getNetworkResult().getBranchResult("l1").getI2();
+        assertTrue(opened > 1.2 * base, "the fixture needs l1's live end above its base current: " + opened + " A against "
+                + base + " A");
+        l1.getOrCreateSelectedOperationalLimitsGroup2().newCurrentLimits().setPermanentLimit((base + opened) / 2).add();
+        assertAnsweredAsWrittenBack(network, contingencies, lfp);
+        assertAnsweredWithoutNetwork(network, contingencies, lfp);
+    }
+
+    /** OLF's own voltage-angle fixture: with NHV1_NHV2_2 out, the angle across NHV1_NHV2_1 reaches -7.5 degrees, below
+     *  one limit's low value and, read from the other end, above another's high value. The angles are read from the
+     *  state, with the contingency applied (P1) and without it (P2). */
+    @Test
+    void voltageAngleLimits() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        Line line = network.getLine("NHV1_NHV2_1");
+        network.newVoltageAngleLimit().setId("val").from(line.getTerminal1()).to(line.getTerminal2())
+                .setHighLimit(7.0).setLowLimit(-7.0).add();
+        network.newVoltageAngleLimit().setId("valReverse").from(line.getTerminal2()).to(line.getTerminal1())
+                .setHighLimit(7.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("NHV1_NHV2_2", new BranchContingency("NHV1_NHV2_2")));
+        assertAnsweredAsWrittenBack(network, contingencies, new LoadFlowParameters());
         assertAnsweredWithoutNetwork(network, contingencies, new LoadFlowParameters());
     }
 }

@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.sa.gpu;
 
+import com.powsybl.contingency.violations.LimitViolationBuilder;
+import com.powsybl.contingency.violations.LimitViolationType;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -32,7 +34,8 @@ import com.powsybl.openloadflow.sa.LimitViolationManager;
  *   <li>active power compares {@code |p|} but REPORTS the signed value;</li>
  *   <li>apparent power skips a NaN (fictitious branches);</li>
  *   <li>a bus limit of NaN never fires — here by letting the NaN comparison be false, which is what
- *       OLF's explicit {@code !isNaN(limit) &&} guard amounts to.</li>
+ *       OLF's explicit {@code !isNaN(limit) &&} guard amounts to;</li>
+ *   <li>a voltage-angle limit compares {@code to - from} between two buses in service, as OLF's own check.</li>
  * </ul>
  *
  * <p>The values themselves come from the branch's own {@code Evaluable}s, the same array reads the
@@ -111,17 +114,17 @@ final class GpuLimitScanner {
             // NaN limits make both comparisons false, exactly like OLF's !isNaN(limit) guard.
             if (v > table.busHighLimit(i)) {
                 manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                        com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE,
+                        LimitViolationType.HIGH_VOLTAGE,
                         table.busHighLimit(i) * table.busScale(i), v * table.busScale(i)), bus);
             }
             if (v < table.busLowLimit(i)) {
                 manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                        com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
+                        LimitViolationType.LOW_VOLTAGE,
                         table.busLowLimit(i) * table.busScale(i), v * table.busScale(i)), bus);
             }
         }
 
-        manager.detectVoltageAngleViolations(network);
+        detectVoltageAngleViolations(network, manager);
     }
 
     /**
@@ -214,16 +217,47 @@ final class GpuLimitScanner {
             if (GpuViolationScreen.isHighVoltage(table, record)) {
                 if (v > table.busHighLimit(busIndex)) {
                     manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                            com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE,
+                            LimitViolationType.HIGH_VOLTAGE,
                             table.busHighLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
                 }
             } else if (v < table.busLowLimit(busIndex)) {
                 manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
-                        com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
+                        LimitViolationType.LOW_VOLTAGE,
                         table.busLowLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
             }
         }
-        manager.detectVoltageAngleViolations(network);
+        detectVoltageAngleViolations(network, manager);
+    }
+
+    /**
+     * OLF's {@code detectVoltageAngleViolations}, decision for decision: every limit between two buses in service, the
+     * angle difference {@code to - from} against the high and the low value (NaN: none), reported in degrees. The angles
+     * come from the buses, or from the state through the view: a contingency answered from its state needs no angle
+     * written into the buses.
+     */
+    private void detectVoltageAngleViolations(LfNetwork network, LimitViolationManager manager) {
+        for (LfNetwork.LfVoltageAngleLimit limit : network.getVoltageAngleLimits()) {
+            if (topology.busOut(limit.getFrom()) || topology.busOut(limit.getTo())) {
+                continue;
+            }
+            double difference = busAngle(limit.getTo()) - busAngle(limit.getFrom());
+            if (!Double.isNaN(limit.getHighValue()) && difference > limit.getHighValue()) {
+                manager.addVoltageAngleLimitViolation(new LimitViolationBuilder()
+                        .subject(limit.getId())
+                        .type(LimitViolationType.HIGH_VOLTAGE_ANGLE)
+                        .limit(Math.toDegrees(limit.getHighValue()))
+                        .value(Math.toDegrees(difference))
+                        .build(), limit);
+            }
+            if (!Double.isNaN(limit.getLowValue()) && difference < limit.getLowValue()) {
+                manager.addVoltageAngleLimitViolation(new LimitViolationBuilder()
+                        .subject(limit.getId())
+                        .type(LimitViolationType.LOW_VOLTAGE_ANGLE)
+                        .limit(Math.toDegrees(limit.getLowValue()))
+                        .value(Math.toDegrees(difference))
+                        .build(), limit);
+            }
+        }
     }
 
     /** Re-test one candidate exactly and report it if it holds. */
@@ -302,5 +336,9 @@ final class GpuLimitScanner {
 
     private double busV(LfBus bus) {
         return view != null ? view.busV(state, bus) : bus.getV();
+    }
+
+    private double busAngle(LfBus bus) {
+        return view != null ? view.busAngle(state, bus) : bus.getAngle();
     }
 }

@@ -39,6 +39,11 @@ import java.util.concurrent.atomic.LongAdder;
  * {@link #compareViolations}). The answered result stays the state's. The tests turn that comparison on in code
  * ({@link #compareInTests}), where a mismatch fails the test.
  *
+ * <p>Every screened detection is also run as a full scan over the same values and the two violation lists compared
+ * ({@link #compareScreen}): the screen may add candidates, never miss one, so a difference is a limit it missed. And
+ * where the device's tap moves are written into the network, each retapped branch's pi model is compared with the row
+ * the screen evaluated it with ({@link #compareScreenRow}).
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 final class GpuStateViewCheck {
@@ -54,6 +59,18 @@ final class GpuStateViewCheck {
     static final LongAdder DECISION_MISMATCHES = new LongAdder();
     /** Contingencies answered without applying them, whose result was compared with the usual path's. */
     static final LongAdder RESULTS_COMPARED = new LongAdder();
+    /** Screened detections compared with a full scan, and those the screen missed a violation of. */
+    static final LongAdder SCREENS_COMPARED = new LongAdder();
+    static final LongAdder SCREEN_MISSES = new LongAdder();
+    /** Per quantity (I, P, S): the largest relative gap between the screen's value of a side-opened branch's live side
+     *  (its dangling row) and the exact value, against which the band (GpuViolationScreen.BAND) must leave a margin. */
+    private static final java.util.concurrent.atomic.DoubleAccumulator[] SIDE_OPENED_GAP = {
+        new java.util.concurrent.atomic.DoubleAccumulator(Math::max, 0), new java.util.concurrent.atomic.DoubleAccumulator(Math::max, 0),
+        new java.util.concurrent.atomic.DoubleAccumulator(Math::max, 0)};
+    static final LongAdder SIDE_OPENED_SIDES = new LongAdder();
+    /** Retapped branches whose screen row was compared with the pi model the device taps left, and those that differed. */
+    static final LongAdder SCREEN_ROWS_COMPARED = new LongAdder();
+    static final LongAdder SCREEN_ROW_MISMATCHES = new LongAdder();
     private static volatile boolean comparedInTests;
     private static final AtomicInteger SCENARIOS = new AtomicInteger();
     private static final AtomicInteger PRINTED = new AtomicInteger();
@@ -94,6 +111,70 @@ final class GpuStateViewCheck {
                         + fromObjects.get(i).getLimitType() + ")");
                 return;
             }
+        }
+    }
+
+    /** A screened detection's violations and a full scan's over the same values, field by field: a difference is a
+     *  violation the screen missed. */
+    static void compareScreen(List<LimitViolation> fromCandidates, List<LimitViolation> fullScan) {
+        SCREENS_COMPARED.increment();
+        String difference = null;
+        if (fromCandidates.size() != fullScan.size()) {
+            difference = "violation count: screened " + fromCandidates.size() + ", full scan " + fullScan.size();
+        } else {
+            for (int i = 0; i < fullScan.size() && difference == null; i++) {
+                String field = differingField(fromCandidates.get(i), fullScan.get(i));
+                if (field != null) {
+                    difference = "violation #" + i + " of " + fullScan.size() + " differs in " + field + " (type "
+                            + fullScan.get(i).getLimitType() + ")";
+                }
+            }
+        }
+        if (difference == null) {
+            return;
+        }
+        SCREEN_MISSES.increment();
+        if (comparedInTests) {
+            throw new AssertionError("STATE_VIEW_CHECK the screen missed a violation the full scan reports: " + difference);
+        }
+        if (PRINTED.getAndIncrement() < PRINTED_MAX) {
+            System.err.println("STATE_VIEW_CHECK SCREEN MISS " + difference);
+        }
+    }
+
+    /** A side-opened branch's live side as the screen evaluated it ({I, P, S}, its dangling row) against the exact values
+     *  ({@code exact}, the same order): the largest relative gaps are reported. */
+    static void measureSideOpened(double[] screened, double[] exact) {
+        SIDE_OPENED_SIDES.increment();
+        for (int q = 0; q < 3; q++) {
+            if (exact[q] != 0 && Double.isFinite(exact[q]) && Double.isFinite(screened[q])) {
+                SIDE_OPENED_GAP[q].accumulate(Math.abs(screened[q] - exact[q]) / Math.abs(exact[q]));
+            }
+        }
+    }
+
+    /** The row the screen evaluated a retapped branch with ({@code y g1 g2 b1 b2 ksi r1 a1}) and its pi model once the
+     *  device's taps are written, by their bits; the ratio and the phase shift only where the screen reads them from the
+     *  row (not a state variable). */
+    static void compareScreenRow(double[] row, com.powsybl.openloadflow.network.PiModel piModel, boolean ratioFromState,
+                                 boolean phaseFromState) {
+        SCREEN_ROWS_COMPARED.increment();
+        double[] model = {piModel.getY(), piModel.getG1(), piModel.getG2(), piModel.getB1(), piModel.getB2(), piModel.getKsi(),
+            piModel.getR1(), piModel.getA1()};
+        String[] names = {"y", "g1", "g2", "b1", "b2", "ksi", "r1", "a1"};
+        for (int c = 0; c < 8; c++) {
+            if (c == 6 && ratioFromState || c == 7 && phaseFromState || same(row[c], model[c])) {
+                continue;
+            }
+            SCREEN_ROW_MISMATCHES.increment();
+            if (comparedInTests) {
+                throw new AssertionError("STATE_VIEW_CHECK the screen's row of a retapped branch differs from its pi model in "
+                        + names[c]);
+            }
+            if (PRINTED.getAndIncrement() < PRINTED_MAX) {
+                System.err.println("STATE_VIEW_CHECK SCREEN ROW MISMATCH in " + names[c]);
+            }
+            return;
         }
     }
 
@@ -241,7 +322,11 @@ final class GpuStateViewCheck {
         return "STATE_VIEW_CHECK contingencies=" + CONTINGENCIES.sum() + " quantities=" + COMPARED.sum()
                 + " mismatches=" + MISMATCHES.sum() + " busVoltagesWhoseRoundTripDiffers=" + ROUND_TRIP_DIFFERS.sum()
                 + " decisionsCompared=" + DECISIONS_COMPARED.sum() + " resultsWithoutTheNetworkCompared=" + RESULTS_COMPARED.sum()
-                + " decisionMismatches=" + DECISION_MISMATCHES.sum();
+                + " decisionMismatches=" + DECISION_MISMATCHES.sum() + " screensCompared=" + SCREENS_COMPARED.sum()
+                + " screenMisses=" + SCREEN_MISSES.sum() + " screenRowsCompared=" + SCREEN_ROWS_COMPARED.sum()
+                + " screenRowMismatches=" + SCREEN_ROW_MISMATCHES.sum() + " sideOpenedSidesMeasured=" + SIDE_OPENED_SIDES.sum()
+                + " sideOpenedScreenMaxRelativeGap I=" + SIDE_OPENED_GAP[0].get() + " P=" + SIDE_OPENED_GAP[1].get()
+                + " S=" + SIDE_OPENED_GAP[2].get();
     }
 
     /** What the stock detection and {@code GpuLimitScanner} read for this side and quantity. */

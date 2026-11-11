@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 
@@ -48,12 +49,13 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower,
                         Map<String, int[]> automationSystemSwitched,
                         Map<String, double[]> deviceTapMoves,
-                        Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets) {
+                        Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets,
+                        Map<String, BatchContingency> scenarios) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of());
+                Map.of(), Map.of());
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

@@ -5,7 +5,10 @@ bitwise checks (§4, P0), and the contingencies answered from their state withou
 decisions on every contingency of network.xiidm and rte6515 and the full list 12 s faster warm (§4, P1). P2 done on
 branch `answer-without-network` (stacked on `state-view`, needs fork 677019fe8): those contingencies are answered
 without applying them to the network, with the same results on every one of them and the full list about 7 s faster
-cold, 5 s warm (§4, P2). P3 next. The plan was written 2026-11-09 on branch `device-final-results`;
+cold, 5 s warm (§4, P2). P3 done on branch `complete-screen` (stacked on `answer-without-network`, needs fork
+da31cfe4b): the screen sees each scenario as the device solved it, the host scans in full only what it cannot evaluate,
+and voltage-angle limits no longer keep a contingency off the state path; no violation missed on any gate run, timing
+unchanged (§4, P3). P4 next. The plan was written 2026-11-09 on branch `device-final-results`;
 the issues of §7 were triaged on `main` since, each with its status there, and none of the open ones is a prerequisite
 of P0 to P4. The §0 measurements are from network.xiidm, our batched LU (`linearSolver=BATCHED_LU`), GPU arm, phase
 timing on (`OLF_GPU_PHASE_TIME=1`, `OLF_SA_PROFILE=1`); every gain must be re-measured A/B, alternating, at least
@@ -364,7 +367,8 @@ P0's gate holds: 0 mismatches on every run, so P1 can start.
   an empty answer runs the contingency as before.
 - The GPU analysis answers there when the contingency is answered from its state (P1's `answeredFromState`) and nothing
   needs the applied network:
-  - the device moved no tap and switched no branch for it (both are written to the network today; P3 takes them);
+  - the device moved no tap and switched no branch for it (both are written to the network: the view reads the moved
+    taps there; P3 gave them to the screen, not to the view);
   - its loss distribution has a replayed value;
   - no state monitor asks for results;
   - it did not run out of Newton iterations on the device;
@@ -418,6 +422,95 @@ P0's gate holds: 0 mismatches on every run, so P1 can start.
   voltage-angle table, base-open branches.
 - Fewer spurious candidates (outaged branches), no host full scans, and the screen and the host see the scenario the
   device solved (closes the tap gap of §7 flag g for the screen).
+
+**Done on `complete-screen` (2026-11-11, stacked on `answer-without-network`).**
+- What the screen gets per scenario (`GpuScreenScenario`), built once per run from the `BatchContingency` the
+  precompute now keeps per scenario id (`PrecomputedBatch.scenarios`) and the device's handbacks:
+  - its outaged branches: no candidate;
+  - a base-open branch: screened only where the scenario closes it (a strategy's reclosing, an automation system's
+    closing). The screen is built on the solver's base-open flavor, with the same base-open set (every scenario's
+    reclosed branches, plus the automation systems' base-open operated branches);
+  - a branch opened at one side: screened at the other with OLF's open-branch formula (the generated `open_branch`
+    functions the branches open at one side in the base already use). Not with the dangling row the solve uses: that
+    row's conductance comes out of a cancellation, and its active power was 3.9e-6 off the open terms' (relative) on
+    network.xiidm, above the band. With the open formula the largest gap is 1.1e-15 (below);
+  - a tap action's row, and the row of a tap the device's loops moved (`tapModels(piModel)[tap]`, the table the loops
+    publish from), in the solve's precedence (the loop's first); a ratio or phase shift that is a state variable is
+    still read from the state.
+
+  The kernel and its Java twin apply the same entries, uploaded per chunk as one CSR (entry start, table branch, kind
+  bits, an 8-double row).
+- The host scans in full only what the screen does not cover: the branches without a pack (none on our cases), a
+  side-opened branch carrying a ratio or phase variable (the device leaves those to the CPU), and for a strategy pair
+  its parent's automation switches. `flowReadSet` and the strategies' read set shrink with it.
+- Voltage-angle limits: `GpuLimitScanner` checks them itself, with OLF's decisions and OLF's adder (fork da31cfe4b makes
+  `LimitViolationManager.addVoltageAngleLimitViolation` public, like the branch and bus adders), reading the angles
+  through the view for a contingency answered from its state. The exclusion is lifted from `answeredFromState`, so P1
+  and P2 take networks with voltage-angle limits. A handful of limits need no screen: in P4 their angles are read back
+  with the candidates' inputs.
+- The comparison (`OLF_GPU_STATE_VIEW_CHECK`, or `compareInTests`):
+  - every screened detection is also run as a full scan over the same values and the violation lists compared: a
+    difference is a violation the screen missed;
+  - the row the screen used for every branch whose tap the device moved is compared, bit for bit, with its pi model once
+    the taps are written;
+  - the screen's values at the live side of every side-opened branch are measured against the view's exact open-branch
+    values: the largest relative gap per quantity. This runs the kernel's Java twin, which a first version wrongly
+    evaluated closed for an opening at side 1: `GpuTwoSides.ONE` is 0, which it also used for "no opening". The device
+    path was right, and the gate's full-scan comparison saw no miss.
+- Tests, and the mutation each one catches:
+  - `GpuSaOperatorStrategyTest.pstTapActionViolationOnTheRetappedTransformerMatchesCpu` (existing, comment updated): a
+    covered branch with a row that emits nothing;
+  - `GpuSaOperatorStrategyTest.baseOpenBranchReclosedByAStrategyViolatesItsLimitLikeCpu` and
+    `GpuSaAutomationSystemTest.branchClosedOnTheDeviceViolatesItsLimit` (new): the IN bit dropped;
+  - `GpuSaAnswerFromStateTest.lineOpenedAtOneSideViolatesAtItsLiveEnd` (new): a busbar section outage opens a charged
+    line at one end, whose live end then violates a limit set between its base and post-contingency currents (OLF's own
+    security analysis). Side openings emitting nothing, and the opened side swapped, are both caught by the full-scan
+    comparison. (A `BranchContingency` with a voltage level is a full outage for OLF on a bus-breaker network: it opens
+    no side.)
+  - `GpuSaAnswerFromStateTest.phaseShifterWhoseTapTheDeviceMoves`: a tap index off by one (the row comparison: y
+    differs). Its fixture moved no tap before this phase, though P1 described it as one whose tap the device moves: it
+    is now built on a 21-step table with an impedance per step, and asserts the move;
+  - `GpuSaAnswerFromStateTest.voltageAngleLimits` (new, OLF's own fixture, P1 and P2): the angle read through the view
+    with the wrong sign (the decision comparison).
+
+  The OUT bit only saves work (the host drops an outaged branch's candidates anyway): no test can catch it, by design.
+- `GpuSa*Test` on our batched LU 310/0/2 (306 plus the four new); checkstyle 0.
+- The channel on, our batched LU, cold, logback at WARN: every screened detection compared with a full scan, **no
+  violation missed**; P1's decisions, P2's results and P0's quantities still at 0 mismatches; no candidate overflowed.
+  No run moved a tap, so no row was compared. 7caf9259 (the dangling rows), all five runs, then the full list on
+  32103d98 (the open-branch formula):
+
+  | run | contingencies | screens compared | missed | candidates | side-opened live sides |
+  |---|---|---|---|---|---|
+  | network.xiidm, every branch | 10,538 | 31,614 | 0 | 574,876 | 434 |
+  | network.xiidm, the JSON list | 12,726 | 38,178 | 0 | 512,032 | 4,524 |
+  | network.xiidm, the full list | 37,282 | 111,846 | 0 | 2,439,876 | 36,784 |
+  | rte6515, branch kind | 9,037 | 27,111 | 0 | 1,543,423 | 0 |
+  | rte6515, generator kind | 1,389 | 4,167 | 0 | 231,229 | 0 |
+  | network.xiidm, the full list, 32103d98 | 37,282 | 111,846 | 0 | 2,439,876 | 36,784 |
+
+  Three screens per contingency: the one answered without the network, the one from the state, and the written-back
+  one of the comparison. The side-opened gap, the largest relative, I / P / S: 6.3e-16 / 8.7e-8 / 5.9e-16 on every
+  branch, 8.3e-16 / 3.9e-6 / 8.2e-16 on the full list with the dangling rows; 7.8e-16 / 1.1e-15 / 6.8e-16 with the
+  open-branch formula.
+- Not load-bearing on network.xiidm: with the side openings emitting nothing (a mutation), the JSON list misses no
+  violation and screens the same 512,032 candidates; no side-opened live side there comes near a limit. The fixture
+  above is what proves that path.
+- Timing, network.xiidm's full list, our batched LU, GPU arm, untraced, P2 918e0b60 against 7caf9259, alternating, each
+  arm with its own native library (the screen's JNI signature changed), cold then warm in one JVM; statuses identical
+  (CONVERGED 37,282, FAILED 6, MAX_ITERATION_REACHED 9):
+
+  | arm | cold, pair 1 / 2 | warm, pair 1 / 2 |
+  |---|---|---|
+  | P2 | 116.6 / 120.5 s | 120.1 / 114.2 s |
+  | P3 | 122.9 / 118.7 s | 116.2 / 114.2 s |
+
+  Neutral within the noise (means +2.3 s cold, −1.9 s warm, the pairs disagreeing): what P3 brings is completeness, which
+  P4 needs (the host reads only the candidates' inputs). The open-branch formula replaced the dangling row after this
+  A/B; it is the same work per branch.
+- Not done: P2 for contingencies with device taps or automation switches (the view reads the moved taps from the network:
+  it would need them without the write); lost buses' bus candidates (the host drops them); the scenario entries are
+  built on the host from the kept `BatchContingency` (P4 reads them from the solve context).
 
 ### P4 — screen in the solve context, targeted readback (§3.6)
 - Removes the state round trip and the state store for device-final contingencies; the re-upload (0.27–0.53 s) and
@@ -477,7 +570,7 @@ Per phase:
 - **e.** *Fixed (#91, the device's generator targets handed back).* An ACTIVE_POWER condition after a device parent sees only the loss-distribution targets, not the device's
   own slack distribution.
 - **f.** *No visible effect, left as is (#87).* The HVDC action on the device strategy path reads whatever the state vector holds at that moment.
-- **g.** *Host half fixed (36ce83ab, `GpuDeviceTaps`: the moved taps are written back before the result is built, and the retapped branches are scanned in full); the screen still reads base taps, which is P3.* The device's outer-loop tap moves are not applied by the screen nor by the host confirm (both use base
+- **g.** *Fixed: the host half in 36ce83ab (`GpuDeviceTaps`: the moved taps are written back before the result is built), the screen half in P3 (the screen reads the moved tap's row, checked bit for bit against the pi model, and the retapped branches are no longer scanned in full).* The device's outer-loop tap moves are not applied by the screen nor by the host confirm (both use base
   parameters plus the state's r1/a1); not visible on network.xiidm (no tap loop in the RTE parameters), not verified
   elsewhere — the SA tests compare voltages and violation counts, not flows.
 - **h.** *Done (#92): band 1e-7.* The screen band (1e-9) is 5× the device-vs-host gap L12 observed (2.1e-10), not 7 orders as commented.

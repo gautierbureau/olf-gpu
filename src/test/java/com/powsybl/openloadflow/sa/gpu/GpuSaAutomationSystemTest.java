@@ -37,6 +37,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -180,6 +181,25 @@ class GpuSaAutomationSystemTest extends AbstractGpuSaTest {
             assertNotNull(getPostContingencyResult(gpu, id).getNetworkResult().getBranchResult("l33p"), id + ": l33p closed");
         }
         assertNull(getPostContingencyResult(gpu, "tr2").getNetworkResult().getBranchResult("l33p"), "tr2: l33p open");
+    }
+
+    /**
+     * As above, l33p with a 1 A limit: open in the base, it violates only where the device closes it. The screen skips a
+     * base-open branch except in the scenarios that close it (GpuScreenScenario.IN), and the host no longer scans the
+     * switched branches in full: the violation is found by the screen alone.
+     */
+    @Test
+    void branchClosedOnTheDeviceViolatesItsLimit() {
+        List<Contingency> contingencies = branchContingencies("l12b", "tr1", "l3b4", "tr2");
+        SecurityAnalysisResult gpu = assertAutomationSystemMatchesCpu(() -> {
+            Network network = meshedWithBranchToClose();
+            network.getLine("l33p").getOrCreateSelectedOperationalLimitsGroup1().newCurrentLimits().setPermanentLimit(1).add();
+            return network;
+        }, contingencies);
+        for (String id : List.of("l12b", "tr1", "l3b4")) {
+            assertTrue(getPostContingencyResult(gpu, id).getLimitViolationsResult().getLimitViolations().stream()
+                    .anyMatch(v -> v.getSubjectId().equals("l33p")), id + ": l33p closed over its limit");
+        }
     }
 
     /**

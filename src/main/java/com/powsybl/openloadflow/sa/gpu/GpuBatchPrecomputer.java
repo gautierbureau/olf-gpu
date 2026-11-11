@@ -187,12 +187,28 @@ final class GpuBatchPrecomputer {
             }
 
             // The packed element data and the branch->element map, for the violation screen (see
-            // GpuViolationScreen). Extracted HERE rather than lifted out of the solver: at this point
-            // it is the cache hit the solver is about to take, and the plain (no base-open) flavor is
-            // self-consistent with the plain mapper below — a base-open branch simply maps to no
-            // element and falls back to the host scan.
-            GpuAcData screenData = GpuAcDataCache.extract(net, es, runGroup.settings().config().distributedSlackParameters());
-            GpuAcElementMapper screenMapper = new GpuAcElementMapper(net);
+            // GpuViolationScreen). Extracted HERE rather than lifted out of the solver: without a base-open branch it
+            // is the cache hit the solver is about to take. A branch a scenario closes (a strategy's reclosing, an
+            // automation system) is packed open as the solver packs it, closed in the scenarios that close it
+            // (GpuScreenScenario.IN), so the screen evaluates it as the device solved it.
+            java.util.Set<String> baseOpenIds = new java.util.HashSet<>();
+            for (List<BatchContingency> batch : batches) {
+                for (BatchContingency c : batch) {
+                    for (LfBranch reclosed : c.reclosedBranches()) {
+                        if (!reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                            baseOpenIds.add(reclosed.getId());
+                        }
+                    }
+                }
+            }
+            if (groups.stream().anyMatch(g -> g.settings().config().automationSystem())) {
+                baseOpenIds.addAll(com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.baseOpenOperatedBranchIds(net));
+            }
+            GpuAcData screenData = baseOpenIds.isEmpty()
+                    ? GpuAcDataCache.extract(net, es, runGroup.settings().config().distributedSlackParameters())
+                    : com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor.extract(net, es, baseOpenIds,
+                            java.util.Set.of(), runGroup.settings().config().distributedSlackParameters());
+            GpuAcElementMapper screenMapper = new GpuAcElementMapper(net, baseOpenIds);
 
             // Every batched scenario's state is held until the analysis ends (the violation screen decides on all of
             // them at once, the results are injected later in OLF's loop). Past GpuStateStore's threshold they go to
@@ -294,8 +310,15 @@ final class GpuBatchPrecomputer {
             System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batchSize + " batched scenarios on device"
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
+            // what each scenario was solved as: the screen evaluates its branches in that topology, with those parameters
+            Map<String, BatchContingency> scenarios = new HashMap<>();
+            for (List<BatchContingency> batch : batches) {
+                for (BatchContingency c : batch) {
+                    scenarios.put(c.contingencyId(), c);
+                }
+            }
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
-                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets);
+                    preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

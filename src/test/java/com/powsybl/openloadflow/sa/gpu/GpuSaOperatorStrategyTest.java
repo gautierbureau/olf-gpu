@@ -388,10 +388,10 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
 
     @Test
     void pstTapActionViolationOnTheRetappedTransformerMatchesCpu() {
-        // The strategy's violations come from the device screen's candidates, and the screen reads every branch with
-        // its BASE parameters: a retapped transformer's own flow is not what the screen evaluates. The tap moves PS1's
-        // current over a limit set between its post-contingency current and its post-action one; that violation is
-        // only found if the retapped branch is scanned in full on the host.
+        // The strategy's violations come from the device screen's candidates. The tap moves PS1's current over a limit
+        // set between its post-contingency current and its post-action one, and the host no longer scans the retapped
+        // transformer in full: the screen must read it with the action's tap row (GpuScreenScenario.ROW), as the device
+        // solved it, to find that violation.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
@@ -780,6 +780,32 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .setVoltageLevel1(l24.getTerminal1().getVoltageLevel().getId()).setBus1(l24.getTerminal1().getBusBreakerView().getBus().getId())
                 .setVoltageLevel2(l24.getTerminal2().getVoltageLevel().getId()).setBus2(l24.getTerminal2().getBusBreakerView().getBus().getId())
                 .setR(l24.getR() * 3).setX(l24.getX() * 3).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        ter.getTerminal1().disconnect();
+        ter.getTerminal2().disconnect();
+        List<Contingency> contingencies = List.of(new Contingency("l24_bis", new BranchContingency("l24_bis")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionAction("closeTer", "l24_ter", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sReclose",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeTer")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void baseOpenBranchReclosedByAStrategyViolatesItsLimitLikeCpu() {
+        // The screen skips a base-open branch except where a scenario closes it (GpuScreenScenario.IN), and the host no
+        // longer scans the branches the pair's actions close: the reclosed line's violation is found by the screen alone.
+        // It is open in the base and after the contingency, so its limit is crossed after the action only.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        com.powsybl.iidm.network.Line l24 = network.getLine("l24");
+        com.powsybl.iidm.network.Line ter = network.newLine().setId("l24_ter")
+                .setVoltageLevel1(l24.getTerminal1().getVoltageLevel().getId()).setBus1(l24.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l24.getTerminal2().getVoltageLevel().getId()).setBus2(l24.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l24.getR() * 3).setX(l24.getX() * 3).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        ter.getOrCreateSelectedOperationalLimitsGroup1().newCurrentLimits().setPermanentLimit(1).add();
         ter.getTerminal1().disconnect();
         ter.getTerminal2().disconnect();
         List<Contingency> contingencies = List.of(new Contingency("l24_bis", new BranchContingency("l24_bis")));

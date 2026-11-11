@@ -36,13 +36,4 @@ __global__ void scatterScenarios(long per, int nReal, const int* map, const doub
     dst[(long) map[c] * per + i % per] = compactedSource[i];
 }
 
-// Put nRows compact rows (src, row-major, n each) at their scenario slots of a [nS][n] buffer.
-__global__ void scatterRowsInt(int nRows, int n, const int* slots, const int* src, int* dst) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nRows * n) {
-        int r = idx / n;
-        dst[(size_t) slots[r] * n + idx % n] = src[idx];
-    }
-}
-
 }  // namespace olfgpu

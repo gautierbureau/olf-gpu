@@ -148,11 +148,9 @@ struct ScenarioInputs {
     const double* x0 = nullptr;                              // the base state (n)
     const double* target = nullptr;                          // the base targets (n)
     const int* baseRowMode = nullptr;                        // the base row modes (n)
-    // The row modes of the installed slots that differ from the base: their local slots and rows; every installed slot's
-    // row when rowModeSlots is null.
-    const int* rowMode = nullptr;
-    const int* rowModeSlots = nullptr;
-    int nRowModeSlots = 0;
+    // Where an installed scenario's row modes differ from the base: (local slot, row, mode) per entry.
+    int nRowModeOverrides = 0;
+    const int* rowModeOverrides = nullptr;
     const char* disabled = nullptr;                          // per installed slot, nElements
     int nTargetOverrides = 0;                                // (local slot * n + row, value)
     const int* targetOverrideIndex = nullptr;

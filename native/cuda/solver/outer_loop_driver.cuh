@@ -13,7 +13,7 @@ namespace olfgpu {
 
 // One batched solve of every scenario of the context (see solveBatchContext in the JNI layer for the arguments).
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
-                              const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
+                              int nRowModeOverrides, const int* rowModeOverrides,
                               const int* baseRowMode, const char* disabled,
                               int nTargetOverrides, const int* targetOverrideIndex, const double* targetOverrideValue,
                               const int* distributedSlackOverrideBus, const double* distributedSlackOverrideFactorDelta, const double* distributedSlackOverrideBaseTargetPDelta,

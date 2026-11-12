@@ -58,9 +58,10 @@ struct LinearSolverSettings {
 };
 
 // The elimination order of our batched LU (GpuBatchedLuOrdering): cuDSS's analysis order, the host's minimum degree of
-// A + A^T (minimum_degree.cuh), or whichever of the two has the fewer elimination levels on the structure.
+// A + A^T (minimum_degree.cuh), whichever of the two has the fewer elimination levels on the structure, or the host's
+// approximate minimum degree of A + A^T (amd_order.cuh): cuDSS's order under AMD, without a cuDSS analysis.
 enum BatchedLuOrdering : int { BATCHED_LU_ORDERING_CUDSS = 0, BATCHED_LU_ORDERING_MINIMUM_DEGREE = 1,
-                               BATCHED_LU_ORDERING_FEWEST_LEVELS = 2 };
+                               BATCHED_LU_ORDERING_FEWEST_LEVELS = 2, BATCHED_LU_ORDERING_AMD = 3 };
 extern LinearSolverSettings gLinearSolver;
 
 inline int configuredIterativeRefinementBaseSteps() {

@@ -49,6 +49,12 @@ public final class BatchedLuNative {
     /** The batch contexts this process built with a cuDSS handle: every one but those that solve on our batched LU. */
     public static native long cudssContexts();
 
+    /** The cuDSS analyses this process ran for an elimination order: none when our batched LU plans on AMD. */
+    public static native long cudssOrders();
+
+    /** The approximate minimum-degree elimination order of A + A^T (position -> original index): GpuBatchedLuOrdering.AMD. */
+    public static native int[] amdOrder(int n, int[] rowPtr, int[] colIdx);
+
     /**
      * Tests: true makes the pivoting engine run its one-thread-per-supernode kernels where it would spread a supernode's
      * rows (backward and split forward solve levels, the factorization of the diagonal blocks of FACTOR_ROWS_MIN rows or

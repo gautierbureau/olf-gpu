@@ -35,6 +35,7 @@ void cudssEliminationOrder(int n, int nnz, const int* dRowPtr, const int* dColId
     CUDSS_CHECK(cudssMatrixCreateDn(&solver.solutionMatrix, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE,
                                     CUDSS_LAYOUT_COL_MAJOR));
     gAnalysesMain++;
+    gCudssOrders++;
     {
         AnalysisTimer at_(__LINE__);
         CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_ANALYSIS, solver.config, solver.data, solver.systemMatrix,

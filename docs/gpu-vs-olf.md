@@ -139,13 +139,13 @@ stops iterating; when at most half the chunk is still active, the solve narrows 
 
 The device runs OLF's outer loops, in OLF's order and with OLF's stability rule: distributed slack, HVDC AC emulation
 freeze and limits, secondary voltage control, voltage monitoring, reactive limits, then the phase, transformer,
-transformer reactive power and shunt controls. The difference is scheduling. One loop index is shared by the whole
-chunk:
-- a **pass** is a Newton solve of the active lanes, then the current loop's check on every lane;
-- lanes the check changed are solved again in the next pass, and the others wait;
-- when the check changes no lane, the chunk moves to the next loop.
+transformer reactive power and shunt controls. The difference is scheduling. Each lane stands at its own loop:
+- a lane whose Newton solve converges is checked at once, at its own loop, while the other lanes go on iterating;
+- a check that changes the lane restarts its Newton, and the same loop checks it again afterwards;
+- a check that changes nothing moves the lane to its next loop, against the same state.
 
-Each lane therefore sees exactly OLF's sequence of solves and checks. In the code, the loops are the driver's
+Each lane therefore sees exactly OLF's sequence of solves and checks. The step-by-step workflow, with code, is
+[`outer-loops-on-device.md`](outer-loops-on-device.md). In the code, the loops are the driver's
 **phases** (`DevicePhases`). A loop the device cannot own (a controller its tables cannot express) is never split
 between the device and OLF: the whole work goes to the CPU, the security analysis run or the load flow's solve.
 

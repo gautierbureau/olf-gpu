@@ -25,6 +25,7 @@
 #include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "../common/check.cuh"
+#include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/stats.cuh"
 #include "../common/trace.cuh"
 #include "../lu/cudss_order.cuh"
@@ -518,6 +519,37 @@ LuPlan& luPlanOf(SharedStructure& structure) {
         structure.luPlan = std::move(plan);
     }
     return *structure.luPlan;
+}
+
+namespace {
+
+// What a BATCHED_LU slot holds besides our LU's lanes and its Jacobian values, in n-long doubles: the Newton, refinement
+// and guard vectors (x and its last converged value, the targets, F and its fill, b, dx, the reactive buffers, the
+// refinement's two and, with couplers, the internal refinement's two, the line search's previous x, the linear-solve
+// guard's two), then the fill staging, the row modes and masks, and the outer-loop tables. Measured by buffer size on
+// network.xiidm's three lists (2026-11-12): 19.5 on every branch, 20.7 on the JSON list, 22.3 on the full list.
+constexpr double BATCHED_LU_SLOT_VECTORS = 24.0;
+
+}  // namespace
+
+double slotBytes(SharedStructure& structure, int mode) {
+    const double n = structure.n;
+    if (mode == GpuLinearSolveMode::BATCHED_LU) {
+        LuPlan& plan = luPlanOf(structure);
+        const std::shared_ptr<const FastLuPlan> fast = fastLuPlanOf(plan);
+        // A lane of each engine as createScalarLu and createSupernodalLu allocate it: the factors and a work vector, the
+        // pivoting engine's row and column permutations (a byte per row each), and each engine's two per-lane ints. The
+        // pivoting engine is priced on every slot: it takes the whole bank in the first factorizations of a structure,
+        // while the fast engine learns its pivot delays.
+        const double fastLane = (static_cast<double>(fast->scalar.nnzLu) + n) * sizeof(double) + 2 * sizeof(int);
+        const double pivotingLane = (static_cast<double>(plan.supernodal.nStored) + n) * sizeof(double) + 2 * n
+                                    + 2 * sizeof(int);
+        return fastLane + pivotingLane + (static_cast<double>(structure.nnz) + BATCHED_LU_SLOT_VECTORS * n) * sizeof(double);
+    }
+    // cuDSS: its own estimate of one matrix's factorization, plus the values and 8n doubles - x, target, F, B, dx, dQbuf,
+    // dQbufClosed and the line search's previous x - the row modes and the disabled mask
+    return luBytesPerScenario(structure) + (static_cast<double>(structure.nnz) + 8.0 * n) * sizeof(double)
+            + n * sizeof(int) + static_cast<double>(structure.nElements);
 }
 
 }  // namespace olfgpu

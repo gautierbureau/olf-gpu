@@ -166,6 +166,10 @@ double luBytesPerScenario(SharedStructure& structure);
 // Our batched LU's plan of the structure's pattern in cuDSS's elimination order, built on first use and kept.
 LuPlan& luPlanOf(SharedStructure& structure);
 
+// The device bytes one slot of a batch context in that mode (GpuLinearSolveMode) takes, the price its bank is sized
+// with (recommendBatchSize).
+double slotBytes(SharedStructure& structure, int mode);
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_STRUCTURE_SHARED_STRUCTURE_CUH

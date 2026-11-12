@@ -101,12 +101,14 @@ final class GpuBatchChunkSolver {
         int n = in.base().n();
         double[][] resultsByIndex = in.sinks().resultsByIndex();
         int nb = batchedIndices.size();
-        // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
-        // is too optimistic the factorization fails to allocate mid-solve, and a thrown batch means
+        // Chunk sizing is a device-memory ESTIMATE (what a slot of the run's mode takes, priced on the shared structure).
+        // When it is too optimistic the factorization fails to allocate mid-solve, and a thrown batch means
         // the WHOLE run un-accelerates — so an allocation failure HALVES the chunk and retries
         // instead (measured on a 6.5k-bus RTE-like network: the probe recommended a chunk whose LU
-        // factors did not fit, and 9042 contingencies all fell back to the CPU).
-        int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
+        // factors did not fit, and 9042 contingencies all fell back to the CPU). Priced for the run's mode, the ROBUST
+        // retry pass included: it reuses the run's recommendation, its slots taking less.
+        int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData,
+                GpuBatchContextCache.resolveBatchMode(in.config().resolvedGpuParameters()));
         List<Integer> remaining = batchedIndices;
         while (true) {
             try {

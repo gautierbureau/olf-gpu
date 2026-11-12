@@ -53,6 +53,9 @@ public final class GpuBatchContextCache {
 
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
+    /** Absolute upper bound on an auto-sized chunk, so a huge free-memory reading never yields a pathological chunk. Our
+     *  batched LU keeps it too: on every branch of network.xiidm, 5,270 slots ran 1.5 % faster warm than the 3,514 it
+     *  gives, but 5.5 % slower cold. */
     static final int AUTO_MAX_CHUNK = 4096;
 
     private static CachedBatchContext cachedContext;
@@ -73,6 +76,7 @@ public final class GpuBatchContextCache {
      *  chunk boundaries decide which scenarios share a solve. */
     private static volatile int recommendedChunk;
     private static volatile GpuAcData recommendedFor;
+    private static volatile int recommendedMode;
 
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(GpuBatchContextCache::clearContextCache,
@@ -202,15 +206,15 @@ public final class GpuBatchContextCache {
         maxSafeChunk = Math.min(maxSafeChunk, Math.max(1, chunk / 2));
     }
 
-    /** The run's chunk recommendation for this extraction, priced ONCE (see {@link #recommendedChunk}).
+    /** The run's chunk recommendation for this extraction and mode, priced ONCE (see {@link #recommendedChunk}).
      *  {@code AUTO_MAX_CHUNK} rather than the caller's contingency count is deliberate: the answer must
      *  not depend on which partition asked first. */
-    private static synchronized int rememberedRecommendation(int n, GpuAcData gpuData) {
-        if (recommendedFor != null && recommendedFor.sameAs(gpuData) && recommendedChunk > 0) {
+    private static synchronized int rememberedRecommendation(int n, GpuAcData gpuData, int mode) {
+        if (recommendedFor != null && recommendedFor.sameAs(gpuData) && recommendedMode == mode && recommendedChunk > 0) {
             return recommendedChunk;
         }
-        // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
-        // only the first query per extraction pays the probe analysis)
+        // priced on the shared structure: our batched LU's own plan, or a cuDSS probe analysis cached there (only the first
+        // query per extraction pays it)
         long structure = GpuAcStructures.handle(n, gpuData);
         // The price is the FREE device memory. A context built on another extraction still holds its LU factors, and
         // acquireBatchContext destroys it for this one anyway: free it first. Priced while it was alive, the second
@@ -221,23 +225,26 @@ public final class GpuBatchContextCache {
             evictCachedContext("built on another extraction, freed before this one's chunk is priced");
         }
         java.util.function.IntSupplier pricing = chunkPricingForTests;
-        recommendedChunk = pricing != null ? pricing.getAsInt() : StructureNative.recommendBatchSize(structure, AUTO_MAX_CHUNK);
+        recommendedChunk = pricing != null ? pricing.getAsInt() : StructureNative.recommendBatchSize(structure, AUTO_MAX_CHUNK, mode);
         recommendedFor = gpuData;
+        recommendedMode = mode;
         return recommendedChunk;
     }
 
     /**
-     * Resolve the GPU batch chunk size, bounding the resident device memory (the uniform
-     * batched factorization holds an LU per scenario, so the footprint scales with the chunk).
+     * Resolve the GPU batch chunk size, bounding the resident device memory (a context holds an LU per slot, so the
+     * footprint scales with the chunk).
      * <ul>
      *   <li>AUTO-SIZED from free device memory via
-     *       {@link com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative#recommendBatchSize} (real Jacobian nnz + heuristic LU
-     *       estimate + safety margin).</li>
+     *       {@link com.powsybl.openloadflow.ac.equations.vector.gpu.StructureNative#recommendBatchSize} (what one slot of a
+     *       context in that mode takes, with a safety margin), up to {@code AUTO_MAX_CHUNK}.</li>
      *   <li>if auto-sizing is unavailable (no GPU / query error) — {@value #DEFAULT_MAX_BATCH}.</li>
      * </ul>
      * The result is always clamped to {@code [1, nb]}.
+     *
+     * @param mode the contexts' {@link GpuLinearSolveMode}, which their slots are priced for
      */
-    public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
+    public static int resolveChunkSize(int nb, int n, GpuAcData gpuData, int mode) {
         Integer explicit = chunkSizeForTests;
         if (GpuTrace.PHASE_TIME.isOn()) {
             System.err.printf("CHUNK_SIZING nb=%d explicit=%s%n", nb, explicit);
@@ -246,7 +253,7 @@ public final class GpuBatchContextCache {
             return Math.min(nb, explicit);
         }
         try {
-            int rec = rememberedRecommendation(n, gpuData);
+            int rec = rememberedRecommendation(n, gpuData, mode);
             return Math.min(Math.min(nb, maxSafeChunk), Math.max(1, rec));
         } catch (Throwable t) {
             LOGGER.debug("GPU batch auto-size unavailable ({}); using default chunk {}", t.toString(), DEFAULT_MAX_BATCH);

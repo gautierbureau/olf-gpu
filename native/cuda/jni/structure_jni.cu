@@ -176,7 +176,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, destroyStructure)(
 
 extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
-        JNIEnv* env, jclass, jlong structureHandle, jint maxCap) {
+        JNIEnv*, jclass, jlong structureHandle, jint maxCap, jint mode) {
     auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     int rec = 1;
     try {
@@ -184,25 +184,21 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, recommendBatchSize)(
             throw std::runtime_error("invalid structure handle");
         }
         SharedStructure& structure = **structurePointer;
-        // Per-scenario device footprint: the dominant term is cuDSS's LU numeric factors
-        // (the exact fill from a probe analysis — cached on the structure — or the heuristic),
-        // plus the value/state arrays (vals + x/target/F/B/dx). The LU index structure is
-        // shared across the batch.
-        constexpr double SAFETY = 0.7;                       // leave headroom for cuDSS workspace + fragmentation
-        double luBytes = luBytesPerScenario(structure);
+        // The bank that fits 70 % of the free device memory at what one slot of a context in that mode takes, the rest
+        // left to the libraries' workspace and fragmentation. What a context holds whatever its bank (the structure, the
+        // base load flow's context) is already on the device, or small.
+        constexpr double SAFETY = 0.7;
+        const double perSlotBytes = slotBytes(structure, mode);
         size_t freeBytes = 0;
         size_t totalBytes = 0;
-        CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the probe freed its buffers
-        // 8n doubles per scenario, not 5: x/target/F/B/dx PLUS dQbuf (the per-scenario reactive
-        // accumulator), dQbufClosed (its closed-branch part, kept by the Newton fills) and dLineSearchPreviousX (the
-        // line-search previous state, allocated under the RTE parameters' MAX_VOLTAGE_CHANGE scaling).
-        double perScenarioBytes = luBytes
-                + (static_cast<double>(structure.nnz) + 8.0 * structure.n) * sizeof(double)
-                + static_cast<double>(structure.n) * sizeof(int)    // dMode
-                + static_cast<double>(structure.nElements);         // dDisabled (char)
-        double budget = static_cast<double>(freeBytes) * SAFETY;
-        long fit = perScenarioBytes > 0 ? static_cast<long>(budget / perScenarioBytes) : maxCap;
+        CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the pricing freed what it allocated
+        const double budget = static_cast<double>(freeBytes) * SAFETY;
+        const long fit = perSlotBytes > 0 ? static_cast<long>(budget / perSlotBytes) : maxCap;
         rec = static_cast<int>(std::max<long>(1, std::min<long>(maxCap, fit)));
+        if (traceOn(Trace::PHASE_TIME)) {
+            fprintf(stderr, "CHUNK_PRICE mode=%d slot=%.2f MB free=%.2f GB fit=%ld cap=%d -> %d slots\n", static_cast<int>(mode),
+                    perSlotBytes / 1e6, static_cast<double>(freeBytes) / 1e9, fit, static_cast<int>(maxCap), rec);
+        }
     } catch (...) {
         rec = 1;                                             // a query failure yields the safest chunk
     }

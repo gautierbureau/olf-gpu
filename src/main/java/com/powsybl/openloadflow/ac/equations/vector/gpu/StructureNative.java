@@ -66,18 +66,16 @@ public final class StructureNative {
     public static native void destroyStructure(long handle);
 
     /**
-     * Recommend how many scenarios fit in one GPU batch chunk for this structure, from the
-     * free device memory ({@code cudaMemGetInfo}) and the per-scenario footprint. The
-     * dominant term, cuDSS's LU numeric factors, is sized from a cheap single-matrix probe
-     * ANALYSIS on the structure's device pattern that reads cuDSS's reported
-     * {@code CUDSS_DATA_LU_NNZ} (the exact fill-in), falling back to a heuristic multiplier
-     * over the Jacobian nnz only if that query is unavailable — and CACHED on the structure,
-     * so only the first query per extraction pays the probe. The value/state arrays are added
-     * and a safety margin applied; the result is clamped to {@code [1, maxCap]}.
+     * Recommend how many scenarios fit in one GPU batch chunk for this structure: 70 % of the free device memory
+     * ({@code cudaMemGetInfo}) over what one slot of a context in that mode takes. Our batched LU's slot is priced from
+     * its own plan (both engines' lanes), the Jacobian values and the context's per-slot vectors; cuDSS's from its
+     * memory estimate of one matrix (a probe ANALYSIS, cached on the structure) and the value and state arrays. The
+     * result is clamped to {@code [1, maxCap]}.
      *
      * @param structureHandle a structure from {@link #createStructure}
      * @param maxCap          absolute upper bound on the returned chunk size
+     * @param mode            the contexts' {@link com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode}
      * @return a recommended chunk size in {@code [1, maxCap]}
      */
-    public static native int recommendBatchSize(long structureHandle, int maxCap);
+    public static native int recommendBatchSize(long structureHandle, int maxCap, int mode);
 }

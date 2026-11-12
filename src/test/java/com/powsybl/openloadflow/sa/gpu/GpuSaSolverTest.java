@@ -383,7 +383,7 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
 
     /** linearSolver = BATCHED_LU solves the batched Newton steps on our batched LU, which factorizes only the
      *  contingencies still iterating: outages of different difficulty retire at different iterations, and a retired
-     *  slot must keep its state while the others go on. */
+     *  slot must keep its state while the others go on. Its contexts create no cuDSS handle. */
     @Test
     void batchedLuParameterSolvesOnOurLuAndMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -394,8 +394,10 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
         GpuLoadFlowParameters.create(lfp).setLinearSolver(GpuLinearSolver.BATCHED_LU);
         long factorizations = BatchedLuNative.factorizationCounts()[0];
+        long cudssContexts = BatchedLuNative.cudssContexts();
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
         assertTrue(BatchedLuNative.factorizationCounts()[0] > factorizations, "the run factorizes on our batched LU");
+        assertEquals(cudssContexts, BatchedLuNative.cudssContexts(), "no context of the run creates a cuDSS handle");
     }
 
     /** LINE_SEARCH state-vector scaling in the batched SA. The scope used to map it to an undamped Newton (only

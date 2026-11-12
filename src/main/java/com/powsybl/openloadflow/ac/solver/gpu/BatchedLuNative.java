@@ -46,6 +46,9 @@ public final class BatchedLuNative {
      */
     public static native long[] factorizationCounts();
 
+    /** The batch contexts this process built with a cuDSS handle: every one but those that solve on our batched LU. */
+    public static native long cudssContexts();
+
     /**
      * Tests: true makes the pivoting engine run its one-thread-per-supernode kernels where it would spread a supernode's
      * rows (backward and split forward solve levels, the factorization of the diagonal blocks of FACTOR_ROWS_MIN rows or

@@ -50,7 +50,7 @@ public class GpuLoadFlowParameters extends AbstractExtension<LoadFlowParameters>
     public static final String ITERATIVE_REFINEMENT_MAX_STEPS_PARAM_NAME = "iterativeRefinementMaxSteps";
     public static final String ITERATIVE_REFINEMENT_TOLERANCE_PARAM_NAME = "iterativeRefinementTolerance";
 
-    public static final GpuLinearSolver LINEAR_SOLVER_DEFAULT_VALUE = GpuLinearSolver.CUDSS;
+    public static final GpuLinearSolver LINEAR_SOLVER_DEFAULT_VALUE = GpuLinearSolver.BATCHED_LU;
     public static final GpuReorderingAlgorithm REORDERING_ALGORITHM_DEFAULT_VALUE = GpuReorderingAlgorithm.AUTO;
     public static final GpuBatchedLuOrdering BATCHED_LU_ORDERING_DEFAULT_VALUE = GpuBatchedLuOrdering.CUDSS;
     public static final boolean BATCHED_LU_SPLIT_LONG_ROWS_DEFAULT_VALUE = true;

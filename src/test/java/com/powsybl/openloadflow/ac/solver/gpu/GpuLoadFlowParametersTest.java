@@ -40,7 +40,7 @@ class GpuLoadFlowParametersTest {
     @Test
     void defaultsAreTheDevicesHistoricSettings() {
         GpuLoadFlowParameters p = new GpuLoadFlowParameters();
-        assertEquals(GpuLinearSolver.CUDSS, p.getLinearSolver());
+        assertEquals(GpuLinearSolver.BATCHED_LU, p.getLinearSolver());
         assertEquals(GpuReorderingAlgorithm.AUTO, p.getReorderingAlgorithm());
         assertEquals(GpuMatchingAlgorithm.AUTO, p.getMatchingAlgorithm());
         assertEquals(GpuPivotType.BY_ORDERING, p.getPivotType());
@@ -73,11 +73,11 @@ class GpuLoadFlowParametersTest {
     /** The linear solver is the mode the batch contexts are built in. */
     @Test
     void linearSolverPicksTheBatchMode() {
-        assertEquals(GpuLinearSolveMode.UBATCH, GpuBatchContextCache.resolveBatchMode(new GpuLoadFlowParameters()));
-        assertEquals(GpuLinearSolveMode.BATCHED_LU, GpuBatchContextCache.resolveBatchMode(
-                new GpuLoadFlowParameters().setLinearSolver(GpuLinearSolver.BATCHED_LU)));
-        assertEquals(GpuLinearSolver.BATCHED_LU, GpuLoadFlowParameters.load(java.util.Map.of(
-                GpuLoadFlowParameters.LINEAR_SOLVER_PARAM_NAME, "BATCHED_LU")).getLinearSolver());
+        assertEquals(GpuLinearSolveMode.BATCHED_LU, GpuBatchContextCache.resolveBatchMode(new GpuLoadFlowParameters()));
+        assertEquals(GpuLinearSolveMode.UBATCH, GpuBatchContextCache.resolveBatchMode(
+                new GpuLoadFlowParameters().setLinearSolver(GpuLinearSolver.CUDSS)));
+        assertEquals(GpuLinearSolver.CUDSS, GpuLoadFlowParameters.load(java.util.Map.of(
+                GpuLoadFlowParameters.LINEAR_SOLVER_PARAM_NAME, "CUDSS")).getLinearSolver());
     }
 
     @Test

@@ -15,6 +15,7 @@ package com.powsybl.openloadflow.ac.solver.gpu;
 public enum GpuLinearSolver {
     /** cuDSS's uniform batch: every slot of the bank is factorized, an idle one as an identity system. */
     CUDSS,
-    /** Our batched sparse LU: only the scenarios still iterating are factorized, in cuDSS's elimination order. */
+    /** Our batched sparse LU, the default: only the scenarios still iterating are factorized, in cuDSS's elimination
+     *  order. */
     BATCHED_LU
 }

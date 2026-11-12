@@ -18,7 +18,10 @@ public enum GpuBatchedLuOrdering {
      *  tree on a network with few couplers. */
     MINIMUM_DEGREE(1),
     /** Whichever of the two has the fewer elimination levels on the system's pattern. */
-    FEWEST_LEVELS(2);
+    FEWEST_LEVELS(2),
+    /** SuiteSparse's approximate minimum degree of the Jacobian's symmetrized pattern, computed on the host: cuDSS's own
+     *  order under {@link GpuReorderingAlgorithm#AUTO}, position for position, without a cuDSS analysis. */
+    AMD(3);
 
     private final int nativeCode;
 

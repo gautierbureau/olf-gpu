@@ -5,6 +5,7 @@
 // factorization and solve on a lane map, and the elimination order cuDSS's analysis picks for the same pattern.
 #include "jni_common.cuh"
 #include "../solver/batched_lu_solve.cuh"
+#include "../lu/amd_order.cuh"
 #include "../lu/minimum_degree.cuh"
 #include "../lu/supernodal_lu.cuh"
 
@@ -54,6 +55,27 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, setPivotingEngineOneThreadKernelsForTest
 extern "C" JNIEXPORT jlong JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, cudssContexts)(JNIEnv*, jclass) {
     return static_cast<jlong>(gCudssContexts);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, cudssOrders)(JNIEnv*, jclass) {
+    return static_cast<jlong>(gCudssOrders);
+}
+
+// The approximate minimum-degree elimination order of A + A^T (position -> original index), as luPlanOf takes it.
+extern "C" JNIEXPORT jintArray JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, amdOrder)(JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> order = approximateMinimumDegreeOrder(n, rowPtr.data(), colIdx.data());
+        jintArray out = env->NewIntArray(n);
+        env->SetIntArrayRegion(out, 0, n, order.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+        return nullptr;
+    }
 }
 
 // The fast engine's plan: {LU entries, contributions, factorization steps, forward levels, backward levels}

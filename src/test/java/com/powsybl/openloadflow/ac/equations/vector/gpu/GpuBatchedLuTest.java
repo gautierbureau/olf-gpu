@@ -1170,6 +1170,25 @@ class GpuBatchedLuTest {
     }
 
     /**
+     * The AMD elimination order (GpuBatchedLuOrdering.AMD), computed on the host, is the order cuDSS's analysis returns
+     * under AMD, position for position: on coupler systems of several sizes and densities, hub structures and a line
+     * group. Checked to fail with the minimum-degree order in its place.
+     */
+    @Test
+    void amdOrderIsCudssOrder() {
+        List<Csr> structures = new ArrayList<>(List.of(LINE_GROUP, hubPairs(12), hubAndChain(40, false), hubAndChain(40, true)));
+        for (long seed = 1; seed <= 6; seed++) {
+            structures.add(couplerSystem(seed, 60 + 40 * (int) seed, (int) seed, 0.01 * seed).csr());
+        }
+        for (Csr csr : structures) {
+            int[] rowOrder = new int[csr.n()];
+            int[] colOrder = new int[csr.n()];
+            BatchedLuNative.cudssReorder(csr.n(), csr.rowPtr(), csr.colIdx(), rowOrder, colOrder);
+            assertArrayEquals(rowOrder, BatchedLuNative.amdOrder(csr.n(), csr.rowPtr(), csr.colIdx()), "n " + csr.n());
+        }
+    }
+
+    /**
      * The adaptive refinement solves its corrections on the lanes still refining only, and each lane's Newton step in a
      * batch is the one it takes alone, bit for bit: the coupler systems refine on the pivoting engine and the nearly
      * singular lane on the fast engine, beside lanes done after the plain solve and a scenario outside the lane map.

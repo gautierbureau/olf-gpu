@@ -400,6 +400,25 @@ class GpuSaSolverTest extends AbstractGpuSaTest {
         assertEquals(cudssContexts, BatchedLuNative.cudssContexts(), "no context of the run creates a cuDSS handle");
     }
 
+    /** Our batched LU planned on the host's AMD order (GpuBatchedLuOrdering.AMD) matches the CPU at 1e-12 and runs no
+     *  cuDSS analysis for its elimination order. Checked to fail with the plan taking cuDSS's order. */
+    @Test
+    void amdOrderingPlansWithoutCudssAndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create118();
+        List<Contingency> ctgs = network.getLineStream().limit(60)
+                .map(l -> new Contingency(l.getId(), new BranchContingency(l.getId()))).toList();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        GpuLoadFlowParameters.create(lfp).setLinearSolver(GpuLinearSolver.BATCHED_LU)
+                .setBatchedLuOrdering(com.powsybl.openloadflow.ac.solver.gpu.GpuBatchedLuOrdering.AMD);
+        long factorizations = BatchedLuNative.factorizationCounts()[0];
+        long cudssOrders = BatchedLuNative.cudssOrders();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertTrue(BatchedLuNative.factorizationCounts()[0] > factorizations, "the run factorizes on our batched LU");
+        assertEquals(cudssOrders, BatchedLuNative.cudssOrders(), "no cuDSS analysis orders the run's plans");
+    }
+
     /** LINE_SEARCH state-vector scaling in the batched SA. The scope used to map it to an undamped Newton (only
      *  MAX_VOLTAGE_CHANGE reached the device), so a contingency whose first steps overshoot took another trajectory
      *  than OLF's backtracking one. Two-bus network loaded near the nose of its PV curve with a parallel line: losing

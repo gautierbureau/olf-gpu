@@ -39,7 +39,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 86)
 endif()
 
-project(olfgpu LANGUAGES CXX CUDA)
+project(olfgpu LANGUAGES C CXX CUDA)
 
 find_package(JNI REQUIRED)
 find_package(CUDAToolkit REQUIRED)
@@ -83,6 +83,27 @@ endif()
 # from the solver's context, only the generated flow formulas — so it compiles in seconds and
 # cannot perturb the solver's codegen (adding a parameter to a solve kernel has flipped a 1e-12
 # test before).
+# SuiteSparse's approximate minimum degree (AMD 3.3.3 of SuiteSparse 7.8.3, BSD-3-clause, by Timothy A. Davis, Patrick R.
+# Amestoy and Iain S. Duff): the elimination order our batched LU is planned on, computed without cuDSS. The release
+# archive is downloaded at configure time, as powsybl-math-native does for KLU, and checked against its sha256; only
+# the 32-bit integer AMD and SuiteSparse_config are compiled, unmodified, into libolfgpu with hidden visibility, so
+# they never clash with another AMD loaded in the same JVM. Offline: -DFETCHCONTENT_SOURCE_DIR_SUITESPARSE=<unpacked
+# archive>.
+include(FetchContent)
+set(SUITESPARSE_VERSION 7.8.3)
+FetchContent_Declare(suitesparse
+    URL https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/refs/tags/v${SUITESPARSE_VERSION}.tar.gz
+    URL_HASH SHA256=ce39b28d4038a09c14f21e02c664401be73c0cb96a9198418d6a98a7db73a259
+)
+FetchContent_GetProperties(suitesparse)
+if(NOT suitesparse_POPULATED)
+    FetchContent_Populate(suitesparse)   # sources only: SuiteSparse's own CMake build is not used
+endif()
+set(SUITESPARSE_AMD_SOURCES ${suitesparse_SOURCE_DIR}/SuiteSparse_config/SuiteSparse_config.c)
+foreach(unit 1 2 aat control defaults info order postorder post_tree preprocess valid version)
+    list(APPEND SUITESPARSE_AMD_SOURCES ${suitesparse_SOURCE_DIR}/AMD/Source/amd_${unit}.c)
+endforeach()
+set(SUITESPARSE_AMD_INCLUDE_DIRS ${suitesparse_SOURCE_DIR}/AMD/Include ${suitesparse_SOURCE_DIR}/SuiteSparse_config)
 add_library(olfgpu SHARED
     native/cuda/jni/area_interchange_control_jni.cu
     native/cuda/jni/automation_system_jni.cu
@@ -169,11 +190,14 @@ add_library(olfgpu SHARED
     native/cuda/diagnostics/driver_traces.cu
     native/cuda/diagnostics/matrix_scan.cu
     native/cuda/sa/olf_gpu_violations.cu
+    native/cuda/lu/amd_order.cu
+    ${SUITESPARSE_AMD_SOURCES}
 )
 target_include_directories(olfgpu
     PRIVATE
     ${JNI_INCLUDE_DIRS}
     ${CUDSS_INCLUDE_DIR}
+    ${SUITESPARSE_AMD_INCLUDE_DIRS}
 )
 # cuBLAS supplies the BATCHED dense LU the SecondaryVoltageControl phase solves its per-scenario zone
 # systems with (cublasDgetrfBatched/cublasDgetrsBatched) — many small matrices is exactly its case, and
@@ -184,7 +208,8 @@ target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY} CUDA::cublas)
 # CUDSS_VERSION so the same source builds against 0.7.x and 0.8 (CUDSS_ROOT picks the install).
 set_target_properties(olfgpu PROPERTIES CUDA_RUNTIME_LIBRARY Static)
 # Only the JNI entry points (JNIEXPORT) are exported; everything in namespace olfgpu stays internal to the library.
-set_target_properties(olfgpu PROPERTIES CXX_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+set_target_properties(olfgpu PROPERTIES C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden
+                      VISIBILITY_INLINES_HIDDEN ON)
 # No implicit build-tree RUNPATH: the artifact is used straight from the build
 # output (never `cmake --install`ed), and a baked machine-local path would defeat
 # the distributable no-RPATH default. CUDSS_EMBED_RPATH adds it back explicitly.
@@ -202,5 +227,7 @@ set(OLF_NATIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/target/classes/nativ
 set_target_properties(olfgpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${OLF_NATIVE_OUTPUT_DIRECTORY})
 set_target_properties(olfgpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG ${OLF_NATIVE_OUTPUT_DIRECTORY})
 set_target_properties(olfgpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${OLF_NATIVE_OUTPUT_DIRECTORY})
+# AMD's license travels with the library that contains it (BSD-3-clause: binary redistributions carry the notice).
+configure_file(${suitesparse_SOURCE_DIR}/AMD/Doc/License.txt ${OLF_NATIVE_OUTPUT_DIRECTORY}/SuiteSparse-AMD-License.txt COPYONLY)
 
 message(STATUS "olfgpu -> ${OLF_NATIVE_OUTPUT_DIRECTORY} (full GPU Newton-Raphson, CUDA arch ${CMAKE_CUDA_ARCHITECTURES}, dynamic cuDSS)")

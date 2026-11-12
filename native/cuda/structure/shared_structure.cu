@@ -28,6 +28,7 @@
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/stats.cuh"
 #include "../common/trace.cuh"
+#include "../lu/amd_order.cuh"
 #include "../lu/cudss_order.cuh"
 #include "../lu/minimum_degree.cuh"
 #include "../solver/linear_solver_settings.cuh"
@@ -459,16 +460,22 @@ LuPlan& luPlanOf(SharedStructure& structure) {
     if (!structure.luPlan) {
         std::vector<int> rowOrder;
         std::vector<int> colOrder;
-        int64_t cudssLuNnz = 0;
-        cudssEliminationOrder(structure.n, structure.nnz, structure.dRowPtr.as<int>(), structure.dColIdx.as<int>(),
-                              structure.nZeroImpedanceBranch > 0, rowOrder, colOrder, cudssLuNnz);
+        int64_t cudssLuNnz = -1;
         // the elimination order the plan is built on (BatchedLuOrdering); cuDSS's row and column orders are the same
-        // permutation on our symmetric-pattern Jacobians, and the minimum degree is symmetric by construction
+        // permutation on our symmetric-pattern Jacobians, and AMD and the minimum degree are symmetric by construction
         const int ordering = gLinearSolver.batchedLuOrdering;
         const char* chosen = "cudss";
         int cudssLevels = -1;
         int minimumDegreeLevels = -1;
-        if (ordering != BATCHED_LU_ORDERING_CUDSS) {
+        if (ordering == BATCHED_LU_ORDERING_AMD) {           // cuDSS's AMD order without a cuDSS analysis
+            rowOrder = approximateMinimumDegreeOrder(structure.n, structure.rowPtr.data(), structure.colIdx.data());
+            colOrder = rowOrder;
+            chosen = "amd";
+        } else {
+            cudssEliminationOrder(structure.n, structure.nnz, structure.dRowPtr.as<int>(), structure.dColIdx.as<int>(),
+                                  structure.nZeroImpedanceBranch > 0, rowOrder, colOrder, cudssLuNnz);
+        }
+        if (ordering == BATCHED_LU_ORDERING_MINIMUM_DEGREE || ordering == BATCHED_LU_ORDERING_FEWEST_LEVELS) {
             std::vector<int> minimumDegree = minimumDegreeOrder(structure.n, structure.rowPtr.data(), structure.colIdx.data());
             minimumDegreeLevels = eliminationLevels(structure.n, structure.rowPtr.data(), structure.colIdx.data(), minimumDegree);
             bool take = ordering == BATCHED_LU_ORDERING_MINIMUM_DEGREE;

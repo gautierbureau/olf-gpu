@@ -68,6 +68,7 @@ extern long long gOuterLoopNotConverged, gOuterLoopNotConvergedIterations;
 extern long long gAnalysesMain;
 // Batch contexts that created a cuDSS handle: every one but our batched LU's.
 extern long long gCudssContexts;
+extern long long gCudssOrders;                              // cuDSS analyses run for an elimination order (cudss_order.cuh)
 extern long long gAnalysesCompact;
 // Adaptive iterative refinement: the refinement solves actually run and the residual checks (one per batched
 // iteration at least).

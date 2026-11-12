@@ -38,6 +38,7 @@ long long gCheckRounds = 0;
 long long gOuterLoopPassHistogramCount[16] = {0}, gOuterLoopPassHistogramFirstSolveIterations[16] = {0}, gOuterLoopPassHistogramTotalIterations[16] = {0};
 long long gOuterLoopNotConverged = 0, gOuterLoopNotConvergedIterations = 0;
 long long gAnalysesMain = 0;
+long long gCudssContexts = 0;
 long long gAnalysesCompact = 0;
 long gIterativeRefinementExtraSolves = 0;
 long gIterativeRefinementChecks = 0;

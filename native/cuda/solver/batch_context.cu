@@ -304,19 +304,21 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         ctx->dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
-    // ---- cuDSS handle/config/data (shared by both solve paths) ----
     CUDA_CHECK(cudaStreamCreate(&ctx->stream));
-    CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
-    CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
-    CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
-    int ir = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-    CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    if (mode == GpuLinearSolveMode::ROBUST) {
-        applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
-    } else {
-        applyReorderAlg(ctx->solver.config, ctx->structure->nZeroImpedanceBranch > 0);
+    if (mode != GpuLinearSolveMode::BATCHED_LU) {            // our batched LU solves without cuDSS
+        gCudssContexts++;
+        CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
+        CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
+        CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
+        int ir = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
+        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+        if (mode == GpuLinearSolveMode::ROBUST) {
+            applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
+        } else {
+            applyReorderAlg(ctx->solver.config, ctx->structure->nZeroImpedanceBranch > 0);
+        }
+        CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
     }
-    CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
 
     if (mode == GpuLinearSolveMode::UBATCH) {
         setupBatchMatricesUbatch(ctx.get());

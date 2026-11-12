@@ -51,6 +51,11 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, setPivotingEngineOneThreadKernelsForTest
     setPivotingEngineOneThreadKernelsForTests(on == JNI_TRUE);
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, cudssContexts)(JNIEnv*, jclass) {
+    return static_cast<jlong>(gCudssContexts);
+}
+
 // The fast engine's plan: {LU entries, contributions, factorization steps, forward levels, backward levels}
 extern "C" JNIEXPORT jlongArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchedLuNative, scalarPlanStatistics)(

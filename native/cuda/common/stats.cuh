@@ -66,6 +66,8 @@ extern long long gOuterLoopNotConverged, gOuterLoopNotConvergedIterations;
 // cuDSS symbolic analyses run: the main contexts (a batch, the base load flow) and the straggler-compaction
 // context (one per compact WIDTH it is analyzed at).
 extern long long gAnalysesMain;
+// Batch contexts that created a cuDSS handle: every one but our batched LU's.
+extern long long gCudssContexts;
 extern long long gAnalysesCompact;
 // Adaptive iterative refinement: the refinement solves actually run and the residual checks (one per batched
 // iteration at least).

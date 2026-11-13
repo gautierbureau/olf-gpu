@@ -41,7 +41,7 @@
     <properties>
         <powsybl.config.dirs>${project.build.directory}</powsybl.config.dirs>
         <java.version>21</java.version>
-        <powsybl-open-loadflow.version>2.4.0-SNAPSHOT-gpu</powsybl-open-loadflow.version>
+        <powsybl-open-loadflow.version>2.4.0-SNAPSHOT-gpu-dc</powsybl-open-loadflow.version>
         <!-- The cuDSS-enabled core/math-native forks this extension currently builds against
              (CuDssMatrixFactory + the libmathcudss JNI). OLF itself is version-agnostic here:
              these pins override its transitive 7.3.0 core. -->

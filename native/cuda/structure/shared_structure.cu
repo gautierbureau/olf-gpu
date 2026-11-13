@@ -25,6 +25,7 @@
 #include "../equations/generated/hvdc_ac_emulation_scatter.h"
 
 #include "../common/check.cuh"
+#include "../diagnostics/structure_fingerprint.cuh"
 #include "../common/codes/gpu_linear_solve_mode.cuh"
 #include "../common/stats.cuh"
 #include "../common/trace.cuh"
@@ -382,6 +383,9 @@ SharedStructure* buildStructure(int n,
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);
     structure->dDiagPos.upload(diagPos.data(), n * sizeof(int));
     CUDA_CHECK(cudaDeviceSynchronize());                     // every structure upload done before first use
+    if (traceOn(Trace::STRUCTURE_FINGERPRINT)) {
+        traceStructureFingerprint(*structure);
+    }
     return structure.release();
 }
 

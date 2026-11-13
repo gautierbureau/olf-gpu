@@ -10,10 +10,13 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.ContingencyElement;
 import com.powsybl.contingency.ContingencyElementType;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.impl.LfBranchImpl;
 import com.powsybl.openloadflow.sa.PreContingencyNetworkResult;
+import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.monitor.StateMonitorIndex;
@@ -47,11 +50,32 @@ final class GpuMonitoredBranchResults {
     private final StateMonitorIndex monitorIndex;
     private final boolean applies;
     private final List<LfBranch> monitored;
+    /** Every monitored branch a line or a two-winding transformer of non-zero impedance (LfBranchImpl), whose result is
+     *  its six evaluables: then the results can be read from a state (branchResultsFromState). */
+    private final boolean readableFromState;
+    private final double[] currentScale1;
+    private final double[] currentScale2;
 
     private GpuMonitoredBranchResults(StateMonitorIndex monitorIndex, boolean applies, List<LfBranch> monitored) {
         this.monitorIndex = monitorIndex;
         this.applies = applies;
         this.monitored = monitored;
+        this.readableFromState = monitored.stream().allMatch(b -> b instanceof LfBranchImpl && !b.isZeroImpedance(LoadFlowModel.DC)
+                && b.getBus1() != null && b.getBus2() != null);
+        this.currentScale1 = new double[monitored.size()];
+        this.currentScale2 = new double[monitored.size()];
+        if (readableFromState) {
+            for (int k = 0; k < monitored.size(); k++) {
+                // LfBranchImpl.createBranchResult's scales: the nominal voltage of each terminal's level, its bus's
+                currentScale1[k] = PerUnit.ib(monitored.get(k).getBus1().getNominalV());
+                currentScale2[k] = PerUnit.ib(monitored.get(k).getBus2().getNominalV());
+            }
+        }
+    }
+
+    /** Whether {@link #branchResultsFromState} can answer this run's contingencies (no result extension asked). */
+    boolean readableFromState(boolean createResultExtension) {
+        return readableFromState && !createResultExtension;
     }
 
     static GpuMonitoredBranchResults build(LfNetwork network, StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex) {
@@ -86,19 +110,7 @@ final class GpuMonitoredBranchResults {
         if (monitored.isEmpty()) {
             return out;
         }
-        double preContingencyBranchOfContingencyP1 = Double.NaN;
-        if (contingency.getElements().size() == 1) {
-            ContingencyElement element = contingency.getElements().getFirst();
-            if (element.getType() == ContingencyElementType.BRANCH
-                    || element.getType() == ContingencyElementType.LINE
-                    || element.getType() == ContingencyElementType.BOUNDARY_LINE
-                    || element.getType() == ContingencyElementType.TWO_WINDINGS_TRANSFORMER) {
-                BranchResult result = preContingency.getBranchResult(element.getId());
-                if (result != null) {
-                    preContingencyBranchOfContingencyP1 = result.getP1();
-                }
-            }
-        }
+        double preContingencyBranchOfContingencyP1 = preContingencyBranchOfContingencyP1(contingency, preContingency);
         Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = new HashMap<>();
         double threshold = modified.getPowerModificationThreshold();
         for (LfBranch branch : monitored) {
@@ -114,6 +126,69 @@ final class GpuMonitoredBranchResults {
             }
         }
         return out;
+    }
+
+    /**
+     * {@link #branchResults} without the state loaded into OLF's model: each monitored branch's
+     * {@code LfBranchImpl.createBranchResult} (no extension), its evaluables read from {@code state} through
+     * {@code reader}: {@code AbstractImpedantLfBranch.buildBranchResult}, operation for operation.
+     */
+    List<BranchResult> branchResultsFromState(Contingency contingency, Predicate<LfBranch> isBranchDisabled, PreContingencyNetworkResult preContingency,
+                                              SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified, GpuDcStateReader reader,
+                                              double[] state, double dcPowerFactor) {
+        List<BranchResult> out = new ArrayList<>();
+        if (monitored.isEmpty()) {
+            return out;
+        }
+        double preContingencyBranchOfContingencyP1 = preContingencyBranchOfContingencyP1(contingency, preContingency);
+        double threshold = modified.getPowerModificationThreshold();
+        for (int k = 0; k < monitored.size(); k++) {
+            LfBranch branch = monitored.get(k);
+            if (isBranchDisabled.test(branch)) {
+                continue;
+            }
+            BranchResult pre = preContingency.getBranchResult(branch.getId());
+            double preP1 = pre != null ? pre.getP1() : Double.NaN;
+            double flowP1 = reader.p(state, branch, GpuTwoSides.ONE) * PerUnit.SB;
+            double flowQ1 = branch.getQ1().eval() * PerUnit.SB;
+            double flowP2 = reader.p(state, branch, GpuTwoSides.TWO) * PerUnit.SB;
+            double flowQ2 = branch.getQ2().eval() * PerUnit.SB;
+            double currentI1 = reader.i(state, branch, GpuTwoSides.ONE, dcPowerFactor) * currentScale1[k];
+            double currentI2 = reader.i(state, branch, GpuTwoSides.TWO, dcPowerFactor) * currentScale2[k];
+            double flowTransfer = Double.NaN;
+            if (!Double.isNaN(preP1) && !Double.isNaN(preContingencyBranchOfContingencyP1)) {
+                double flowChange = flowP1 - preP1;
+                if (Math.abs(preContingencyBranchOfContingencyP1) > P_EPSILON_SI) {
+                    flowTransfer = flowChange / preContingencyBranchOfContingencyP1;
+                } else {
+                    flowTransfer = 0.;
+                }
+            }
+            BranchResult result = new BranchResult(branch.getId(), flowP1, flowQ1, currentI1, flowP2, flowQ2, currentI2, flowTransfer);
+            if (changed(pre, result, threshold)) {
+                out.add(result);
+            }
+        }
+        return out;
+    }
+
+    /** AbstractImpedantLfBranch.P_EPSILON_SI: below it, the contingency's pre-contingency flow is taken as zero. */
+    private static final double P_EPSILON_SI = 1e-6;
+
+    private static double preContingencyBranchOfContingencyP1(Contingency contingency, PreContingencyNetworkResult preContingency) {
+        if (contingency.getElements().size() == 1) {
+            ContingencyElement element = contingency.getElements().getFirst();
+            if (element.getType() == ContingencyElementType.BRANCH
+                    || element.getType() == ContingencyElementType.LINE
+                    || element.getType() == ContingencyElementType.BOUNDARY_LINE
+                    || element.getType() == ContingencyElementType.TWO_WINDINGS_TRANSFORMER) {
+                BranchResult result = preContingency.getBranchResult(element.getId());
+                if (result != null) {
+                    return result.getP1();
+                }
+            }
+        }
+        return Double.NaN;
     }
 
     private static boolean changed(double pre, double post, double threshold) {

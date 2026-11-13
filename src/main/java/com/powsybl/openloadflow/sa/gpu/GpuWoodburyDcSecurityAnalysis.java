@@ -15,6 +15,7 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationTerm;
@@ -114,6 +115,18 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     /** The last base accuracy measured under that hook (the main component's), or null. */
     public static final java.util.concurrent.atomic.AtomicReference<GpuDcBaseAccuracy.Result> LAST_BASE_ACCURACY =
             new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** Test hook: also load each contingency's state into OLF's model and compare every branch value the state reader
+     *  gives (P, I, S of both sides) with OLF's evaluation, bit for bit. */
+    public static final AtomicBoolean CHECK_STATE_READER = new AtomicBoolean();
+
+    /** Branch values differing between the state reader and OLF's model under that hook, and the contingencies answered
+     *  from their state without loading it, accumulated (a test resets them). */
+    public static final AtomicInteger STATE_READER_MISMATCH_COUNT = new AtomicInteger();
+    public static final AtomicInteger STATE_FREE_CONTINGENCY_COUNT = new AtomicInteger();
+
+    /** The branch values of a state, read without loading it (built with the device's branch arrays). */
+    private GpuDcStateReader stateReader;
 
     /** Test hook: build the monitored branch results on BOTH paths (GpuMonitoredBranchResults and OLF's update), compare. */
     public static final AtomicBoolean CHECK_NETWORK_RESULTS = new AtomicBoolean();
@@ -230,7 +243,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             long tFactor = System.nanoTime();
             int elementCount;
             try {
-                prepareBranches(solver, lfNetwork, equationSystem, creationParameters);
+                stateReader = prepareBranches(solver, lfNetwork, equationSystem, creationParameters);
                 elementCount = prepareElements(solver, equationSystem, creationParameters, elementByBranch.values(), actionElements, strategySetup);
             } catch (RuntimeException e) {
                 solver.close();
@@ -450,6 +463,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         GpuMonitoredBranchResults monitoredBranchResults = GpuMonitoredBranchResults.build(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
         boolean needBusResults = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                 || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty());
+        // contingencies answered from their state, as the AC path does: no voltage-angle limit or monitored bus (they read
+        // the buses' angles), no operator strategy (it re-runs on the loaded state), monitored branches whose results the
+        // state gives
+        boolean stateFree = stateReader != null && !needAngles && !needBusResults
+                && strategySetup.operatorStrategiesByContingencyId().isEmpty()
+                && monitoredBranchResults.readableFromState(createResultExtension);
+        boolean checkStateReader = stateFree && CHECK_STATE_READER.get();
         long tSetup = System.nanoTime();
 
         // --- chunks
@@ -543,30 +563,38 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 lfNetwork.setReportNode(postContSimReportNode);
                 logPostContingencyStart(lfNetwork, lfContingency);
 
-                // the post-contingency state into the equation system: the vectorized DC network recomputes the flows
+                // the post-contingency state: answered from the array where the run allows it (stateFree), else
+                // loaded into the equation system, where the vectorized DC network recomputes every branch flow
                 double[] state = Arrays.copyOfRange(states, i * n, (i + 1) * n);
-                equationSystem.getStateVector().set(state);
-                if (needAngles) {
-                    updateNetwork(lfNetwork, equationSystem, state);
+                int emitted = records[i];
+                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
+                if (!fromState || checkStateReader) {
+                    equationSystem.getStateVector().set(state);
+                    if (needAngles) {
+                        updateNetwork(lfNetwork, equationSystem, state);
+                    }
                 }
                 Map<LfBranch, DisabledBranchStatus> disabledBranches = lfContingency.getDisabledNetwork().getBranchesStatus();
                 Predicate<LfBranch> isBranchDisabled = disabledBranches::containsKey;
 
-                // violations: the screen's candidates confirmed on OLF's own values
+                // violations: the screen's candidates confirmed on OLF's own values (read from the state, or from the model)
                 var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
-                int emitted = records[i];
                 if (emitted > CAPACITY) {
                     hostScreened++;
                     postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabled);
                 } else {
                     int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
                     Arrays.sort(candidates);             // table order: a group's limits contiguous, most severe first
-                    scanner.detectFromCandidates(lfNetwork, postContingencyLimitViolationManager, candidates, isBranchDisabled);
+                    scanner.detectFromCandidates(lfNetwork, postContingencyLimitViolationManager, candidates, isBranchDisabled, new int[0],
+                            fromState ? stateReader : null, state, dcPowerFactor);
                 }
 
-                NetworkResult networkResult = networkResult(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled,
-                        needBusResults, monitorIndexes, createResultExtension, preContingencyNetworkResult, dcPowerFactor,
-                        securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                NetworkResult networkResult = fromState
+                        ? networkResultFromState(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled, state, checkStateReader,
+                                monitorIndexes, preContingencyNetworkResult, dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters())
+                        : networkResult(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled,
+                                needBusResults, monitorIndexes, createResultExtension, preContingencyNetworkResult, dcPowerFactor,
+                                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
                 var connectivityResult = new ConnectivityResult(
                         lfContingency.getCreatedSynchronousComponentsCount(), 0,
@@ -774,7 +802,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** The branch model, in LfNetwork order (== GpuLimitTable order == branch num). */
-    private static void prepareBranches(GpuDcSolver solver, LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+    private static GpuDcStateReader prepareBranches(GpuDcSolver solver, LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
                                         DcEquationSystemCreationParameters creationParameters) {
         int busCount = lfNetwork.getBuses().size();
         int branchCount = lfNetwork.getBranches().size();
@@ -810,6 +838,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     creationParameters.getDcApproximationType(), branch.getPiModel()) : 0;
         }
         solver.setBranches(ph1Row, ph2Row, a1Row, a1Const, power);
+        return new GpuDcStateReader(ph1Row, ph2Row, a1Row, a1Const, power);
     }
 
     private int actionElementOffset;
@@ -1156,6 +1185,44 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         }
         return new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                 postContingencyNetworkResult.getThreeWindingsTransformerResults());
+    }
+
+    /** The contingency's network result read from its state (stateFree runs); the check hook compares it with OLF's. */
+    private NetworkResult networkResultFromState(GpuMonitoredBranchResults monitoredBranchResults, LfNetwork lfNetwork, DeviceCandidate candidate,
+                                                 Contingency contingency, Predicate<LfBranch> isBranchDisabled, double[] state, boolean check,
+                                                 AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
+                                                 PreContingencyNetworkResult preContingencyNetworkResult, double dcPowerFactor,
+                                                 SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified) {
+        List<BranchResult> branchResults = monitoredBranchResults.branchResultsFromState(contingency, isBranchDisabled, preContingencyNetworkResult,
+                modified, stateReader, state, dcPowerFactor);
+        STATE_FREE_CONTINGENCY_COUNT.incrementAndGet();
+        if (check) {
+            List<BranchResult> olf = networkResult(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled, false, monitorIndexes,
+                    false, preContingencyNetworkResult, dcPowerFactor, modified).getBranchResults();
+            STATE_READER_MISMATCH_COUNT.addAndGet(compareStateReader(lfNetwork, state, dcPowerFactor) + GpuMonitoredBranchResults.compare(branchResults, olf));
+        }
+        return new NetworkResult(branchResults, List.of(), List.of());
+    }
+
+    /** The check hook: every branch value of the state reader against OLF's model with the state loaded; the differences. */
+    private int compareStateReader(LfNetwork lfNetwork, double[] state, double dcPowerFactor) {
+        int differences = 0;
+        for (LfBranch branch : lfNetwork.getBranches()) {
+            double[] reader = {stateReader.p(state, branch, GpuTwoSides.ONE), stateReader.p(state, branch, GpuTwoSides.TWO),
+                stateReader.i(state, branch, GpuTwoSides.ONE, dcPowerFactor), stateReader.i(state, branch, GpuTwoSides.TWO, dcPowerFactor),
+                stateReader.s(state, branch, GpuTwoSides.ONE), stateReader.s(state, branch, GpuTwoSides.TWO)};
+            double[] model = {branch.getP1().eval(), branch.getP2().eval(), branch.getI1().eval(), branch.getI2().eval(),
+                branch.computeApparentPower1(), branch.computeApparentPower2()};
+            for (int k = 0; k < reader.length; k++) {
+                if (Double.doubleToLongBits(reader[k]) != Double.doubleToLongBits(model[k])) {
+                    if (differences < 5) {
+                        System.err.printf("DC_STATE_READER_CHECK branch %s value %d: reader %.17g model %.17g%n", branch.getId(), k, reader[k], model[k]);
+                    }
+                    differences++;
+                }
+            }
+        }
+        return differences;
     }
 
     /**

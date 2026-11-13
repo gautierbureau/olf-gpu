@@ -58,6 +58,11 @@ final class GpuLimitScanner {
      *  through {@link GpuStateView}, which returns the same doubles without the state written into OLF's objects. Set by
      *  every scan. */
     private GpuStateView view;
+
+    /** The DC path's reader of branch values from {@link #dcState} (null: from OLF's model), and the DC power factor. */
+    private GpuDcStateReader dcReader;
+    private double[] dcState;
+    private double dcPowerFactor;
     private double[] state;
     /** Which branches, sides and buses the current scan reads as out of service: the network's flags, or the
      *  contingency's topology for a contingency answered without being applied. Set by every scan. */
@@ -85,6 +90,7 @@ final class GpuLimitScanner {
     void detectViolations(LfNetwork network, LimitViolationManager manager, GpuStateView view, double[] state,
                           GpuContingencyTopology topology) {
         this.view = view;
+        this.dcReader = null;
         this.state = state;
         this.topology = topology;
         LfBranch[] branches = table.branches();
@@ -164,6 +170,7 @@ final class GpuLimitScanner {
                               GpuViolationScreen screen, int[] uncoveredBranches, java.util.BitSet sideOpened,
                               GpuStateView view, double[] state, GpuContingencyTopology topology) {
         this.view = view;
+        this.dcReader = null;
         this.state = state;
         this.topology = topology;
         LfBranch[] branches = table.branches();
@@ -274,9 +281,20 @@ final class GpuLimitScanner {
     /** Same, plus a full scan of the branches the screen could not evaluate (their model changed on the host). */
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               java.util.function.Predicate<LfBranch> isBranchDisabled, int[] uncoveredBranches) {
-        this.view = null;                                    // the values are the network's, the topology the predicate's
+        detectFromCandidates(network, manager, candidates, isBranchDisabled, uncoveredBranches, null, null, Double.NaN);
+    }
+
+    /** As above, the branch values read from {@code state} through {@code reader} when it is non-null, instead of from
+     *  OLF's model: the contingency's state need not be loaded into the equation system. */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              java.util.function.Predicate<LfBranch> isBranchDisabled, int[] uncoveredBranches,
+                              GpuDcStateReader reader, double[] state, double dcPowerFactor) {
+        this.view = null;                                    // the topology is the predicate's
         this.state = null;
         this.topology = GpuContingencyTopology.NETWORK;
+        this.dcReader = reader;
+        this.dcState = state;
+        this.dcPowerFactor = dcPowerFactor;
         confirmBranchCandidates(manager, candidates, isBranchDisabled);
         LfBranch[] branches = table.branches();
         for (int b : uncoveredBranches) {
@@ -378,7 +396,9 @@ final class GpuLimitScanner {
             return quantityCache[slot];
         }
         double value;
-        if (view != null) {
+        if (dcReader != null) {
+            value = dcReader.branch(dcState, branch, side, quantity, dcPowerFactor);
+        } else if (view != null) {
             value = view.branch(state, branch, side, quantity, topology);
         } else if (side == GpuTwoSides.ONE) {
             value = switch (quantity) {

@@ -38,8 +38,17 @@ factors (`GpuLodfCalculator`).
   is the 1.5e-4 MW on a 521 MW line. cuDSS refinement (1-3 steps) brings the device residual to KLU's (5.4e-6 vs
   4.0e-6 MW) but leaves the state ~9e-9 rad from KLU's; matching off gives NaN (empty structural diagonal); the default
   ordering changes nothing; pivot threshold 1 is worse. On the 50-contingency network (7416 buses, |J| <= 2e8) the
-  same gap is 5.9e-6 MW. Decision for the user: the gate tolerance for networks with retained switches, and/or the
-  upstream OLF question of modelling a retained switch in DC as zero impedance instead of x = 1e-8.
+  same gap is 5.9e-6 MW.
+  DECIDED (user, 2026-11-13): a per-network gate. `DcWoodburyBaselineProbe` keeps 1e-8 MW on a network without stiff
+  branches (rte6515: 2.5e-10 MW, 2.5 % of it) and, on one with them, derives the tolerance per branch from the
+  measured base uncertainty: 3 x 2 x power(b) x (device + LU distance to the refined state), never below 1e-8 MW
+  (network.xiidm: 9.4e-4 MW on the worst branch, 16 % used). Not asked upstream (the zero-impedance model of a
+  retained switch in DC stays an option).
+- OPEN, consistency: the DC context factorizes with cuDSS, the AC batch with our batched LU (the default since
+  1b6ae05e). DC's shape is one matrix and thousands of right-hand sides (S, chunk target columns, PTDF blocks): our LU
+  would need a multi-RHS solve on one lane's factors. Worth it for one linear solver and no cuDSS on the DC path, not for
+  speed (the LU is ~0.5 s of a network.xiidm run) nor accuracy (the gap above is the double floor; our fast engine does
+  not pivot, and this matrix is where pivoting matters - measure before choosing).
 - Next for speed (the AC design, `docs/device-final-results-plan.md`): (a) answer each contingency from its state
   without the network write-back (`GpuStateView` + `GpuContingencyTopology`) and read back only the rows the
   confirmation needs — the host per-contingency loop is now the largest part (10–14 s); (b) the operator strategies'

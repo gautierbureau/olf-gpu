@@ -298,12 +298,17 @@ contingencies need a modified target column (2160 lose power, the others island 
 |---|---|---|---|---|---|---|---|
 | 14d49714 (host-built columns) | 33.5–35.6 | 24.5–34.6 | x1.02–1.36 | 10.9–11.6 | 7.8–8.3 | 1.5–1.6 | statuses + 79 violations identical; flows 1.5e-4 MW |
 | device-built columns | 35.6–37.8 | 17.8–20.9 | x1.93 | 1.7–2.9 (kernel 1.7) | 9.7–13.8 (noisy) | 0.35–0.5 | same |
+| per-network gate | 32.9 | 16.1 | x2.04 | — | — | — | flows 1.5e-4 MW = 16 % of the derived tolerance (9.4e-4 MW), violations 1 % |
+
+Same day, rte6515_full (9042 branches, no stiff branch, gate 1e-8 MW): CPU 8t 17.9 s, GPU 8.7 s (x2.06), 98955
+violations identical, flows 2.5e-10 MW.
 
 The columns are now built on the device (`ctgTargetsPrepare` + `ctgFillTargets`: each column's own copy of the generator
 and load tables, OLF's `distributeSlack` and `DcTargetVector` arithmetic) and checked bit for bit against the exact host
 replay of the stock column: 0 differing values over 5297 x 7789 (`OLF_DC_CHECK_TARGETS=1`). The flow parity gap is
-unchanged and is not the columns': stock OLF on cuDSS vs KLU already differs by 5.8e-6 MW on this network (KLU vs our
-device path 1.5e-4 MW, uniform over every contingency) — open, see `docs/tasks.md` #94.
+unchanged and is not the columns': it is the conditioning of the DC matrix (380 retained switches at x = 1e-8 pu), which
+determines the angles to ~2e-8 rad in double precision only; the probe's gate on such a network is derived from that
+measurement (`docs/tasks.md` #94).
 
 ### DC - the full PTDF assembled on the device (GpuPtdfMatrix, 2026-09-16)
 

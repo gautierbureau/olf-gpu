@@ -535,6 +535,44 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
 
+    /**
+     * Generator and load actions as a DC load flow takes them (OLF's fast DC, 2026-11): one on a generator the contingency
+     * disconnects does not apply (B8-G, behind L7-8-1), and with a distributed slack their power enters the balance the
+     * distribution restores (an unbalanced redispatch, a load change). The device builds those columns bit for bit.
+     */
+    @Test
+    void injectionActionsEnterTheSlackDistribution() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("g8Up").withGeneratorId("B8-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("g3Set").withGeneratorId("B3-G").withActivePowerRelativeValue(false).withActivePowerValue(10.0).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("load9Up").withLoadId("B9-L").withRelativeValue(true).withActivePowerValue(15.0).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new ArrayList<>();
+        for (Contingency c : contingencies) {
+            strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("redispatch-" + c.getId(), ContingencyContext.specificContingency(c.getId()),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("g8Up", "g2Down")));
+            strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("unbalanced-" + c.getId(), ContingencyContext.specificContingency(c.getId()),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("g3Set", "load9Up")));
+        }
+        GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(true);
+        GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
+        try {
+            SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+            SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+            assertSameResults(cpu, gpu);
+            assertEquals(2 * contingencies.size(), cpu.getOperatorStrategyResults().size());
+        } finally {
+            GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
+        }
+        assertTrue(GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get() > 0, "the device must have built the columns");
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get(), "device columns differing from the host's");
+    }
+
     /** The security analysis on cuDSS too (GpuLoadFlowParameters.linearSolver = CUDSS): the default is our batched LU. */
     @Test
     void cudssLinearSolverMatchesStock() {

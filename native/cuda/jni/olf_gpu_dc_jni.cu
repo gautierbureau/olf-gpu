@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -196,6 +197,7 @@ struct DcContext {
     Buf genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, genPart;
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
+    Buf ctCompact, ctMap;                                           // the distinct columns built, and each column's one
     Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
     Buf ctGoPtr, ctGoGen, ctGoTarget, ctGoInit, ctGoPart;
     Buf ctEdPtr, ctEdRow, ctEdKind, ctEdVal;                       // operator strategies' row edits (set / add), in order
@@ -1103,6 +1105,17 @@ __global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, c
 
 /** The rows the stock zeroes (islanded buses' P, disabled branches' alpha), then an operator strategy's edits in the
  *  stock's order (WoodburyEngine.runDcLoadFlowWithModifiedTargetVector's actions part): kind 0 sets the row, 1 adds. */
+/** Each column from its distinct one (columns with no injection change share the plain column). */
+__global__ void ctgExpand(int n, int cols, const int* map, const double* compact, double* out) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) n * cols) {
+        return;
+    }
+    int j = (int) (t / n);
+    int c = (int) (t % n);
+    out[t] = compact[(size_t) map[j] * n + c];
+}
+
 __global__ void ctgZeroRows(int n, int cols, const int* zrPtr, const int* zrCol, const int* edPtr, const int* edRow, const int* edKind,
                             const double* edVal, double* out) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1871,6 +1884,22 @@ void uploadCsr(JNIEnv* env, Buf& ptrBuf, Buf& valBuf, jintArray jPtr, jintArray 
     ptrBuf.uploadInto(ptr.p, (size_t) ptr.len * sizeof(int));
     valBuf.uploadInto(val.p, (size_t) std::max<jsize>(val.len, 1) * sizeof(int));
 }
+/** A chunk's per-column lists (ints, or doubles), compacted onto its distinct columns. */
+struct CompactCsr {
+    std::vector<int> ptr{0};
+    std::vector<int> val;
+    void addFrom(const jint* srcPtr, const jint* srcVal, int j) {
+        for (int k = srcPtr[j]; k < srcPtr[j + 1]; k++) {
+            val.push_back(srcVal[k]);
+        }
+        ptr.push_back((int) val.size());
+    }
+};
+
+void uploadVec(Buf& buf, const void* p, size_t bytes) {
+    static const double zero = 0.0;
+    buf.uploadInto(bytes > 0 ? p : &zero, std::max<size_t>(bytes, sizeof(double)));
+}
 }  // namespace
 
 /**
@@ -1904,23 +1933,87 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         }
         int n = ctx->n;
         int cols = nBases;
-        uploadCsr(env, ctx->ctExPtr, ctx->ctExBus, jExPtr, jExBus, cols, "excluded buses");
-        uploadCsr(env, ctx->ctLdPtr, ctx->ctLdBus, jLdPtr, jLdBus, cols, "bus loads");
-        {
-            DoubleArray ldVal(env, jLdVal);
-            ctx->ctLdVal.uploadInto(ldVal.p, (size_t) std::max<jsize>(ldVal.len, 1) * sizeof(double));
+        // the columns' injection changes, compacted: the columns with none (a topological strategy on a contingency
+        // without lost power) all prepare the same plain column, built once and expanded (bit for bit what each
+        // column's thread computes from the same tables)
+        IntArray exPtr(env, jExPtr), exBus(env, jExBus), ldPtr(env, jLdPtr), ldBus(env, jLdBus), lgPtr(env, jLgPtr), lgGen(env, jLgGen),
+                hzPtr(env, jHzPtr), hzGen(env, jHzGen), goPtr(env, jGoPtr), goGen(env, jGoGen), goPart(env, jGoPart);
+        DoubleArray ldVal(env, jLdVal), goTarget(env, jGoTarget), goInit(env, jGoInit);
+        for (IntArray* list : {&exPtr, &ldPtr, &lgPtr, &hzPtr, &goPtr}) {
+            if (list->len != cols + 1) {
+                throw std::runtime_error("malformed column list");
+            }
         }
-        uploadCsr(env, ctx->ctLgPtr, ctx->ctLgGen, jLgPtr, jLgGen, cols, "lost generators");
-        uploadCsr(env, ctx->ctHzPtr, ctx->ctHzGen, jHzPtr, jHzGen, cols, "HVDC stations");
-        uploadCsr(env, ctx->ctGoPtr, ctx->ctGoGen, jGoPtr, jGoGen, cols, "generator actions");
-        {
-            DoubleArray goTarget(env, jGoTarget);
-            DoubleArray goInit(env, jGoInit);
-            IntArray goPart(env, jGoPart);
-            ctx->ctGoTarget.uploadInto(goTarget.p, (size_t) std::max<jsize>(goTarget.len, 1) * sizeof(double));
-            ctx->ctGoInit.uploadInto(goInit.p, (size_t) std::max<jsize>(goInit.len, 1) * sizeof(double));
-            ctx->ctGoPart.uploadInto(goPart.p, (size_t) std::max<jsize>(goPart.len, 1) * sizeof(int));
+        std::vector<int> map(cols);
+        CompactCsr cEx, cLd, cLg, cHz, cGo;
+        std::vector<double> cLdVal, cGoTarget, cGoInit;
+        std::vector<int> cGoPart;
+        // columns with the same changes (none: a topological strategy; the same contingency's lost power and no
+        // injection action: its strategies) share their distinct column
+        std::map<std::vector<int64_t>, int> distinctOf;
+        int distinct = 0;
+        for (int j = 0; j < cols; j++) {
+            std::vector<int64_t> key;
+            auto addInts = [&key, j](const IntArray& ptr, const IntArray& val) {
+                key.push_back(ptr.p[j + 1] - ptr.p[j]);
+                for (int k = ptr.p[j]; k < ptr.p[j + 1]; k++) {
+                    key.push_back(val.p[k]);
+                }
+            };
+            auto addDoubles = [&key, j](const IntArray& ptr, const DoubleArray& val) {
+                for (int k = ptr.p[j]; k < ptr.p[j + 1]; k++) {
+                    int64_t bits;
+                    std::memcpy(&bits, &val.p[k], sizeof(bits));
+                    key.push_back(bits);
+                }
+            };
+            addInts(exPtr, exBus);
+            addInts(ldPtr, ldBus);
+            addDoubles(ldPtr, ldVal);
+            addInts(lgPtr, lgGen);
+            addInts(hzPtr, hzGen);
+            addInts(goPtr, goGen);
+            addDoubles(goPtr, goTarget);
+            addDoubles(goPtr, goInit);
+            for (int k = goPtr.p[j]; k < goPtr.p[j + 1]; k++) {
+                key.push_back(goPart.p[k]);
+            }
+            auto found = distinctOf.find(key);
+            if (found != distinctOf.end()) {
+                map[j] = found->second;
+                continue;
+            }
+            map[j] = distinct++;
+            distinctOf.emplace(std::move(key), map[j]);
+            cEx.addFrom(exPtr.p, exBus.p, j);
+            cLd.addFrom(ldPtr.p, ldBus.p, j);
+            for (int k = ldPtr.p[j]; k < ldPtr.p[j + 1]; k++) {
+                cLdVal.push_back(ldVal.p[k]);
+            }
+            cLg.addFrom(lgPtr.p, lgGen.p, j);
+            cHz.addFrom(hzPtr.p, hzGen.p, j);
+            cGo.addFrom(goPtr.p, goGen.p, j);
+            for (int k = goPtr.p[j]; k < goPtr.p[j + 1]; k++) {
+                cGoTarget.push_back(goTarget.p[k]);
+                cGoInit.push_back(goInit.p[k]);
+                cGoPart.push_back(goPart.p[k]);
+            }
         }
+        uploadVec(ctx->ctExPtr, cEx.ptr.data(), cEx.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctExBus, cEx.val.data(), cEx.val.size() * sizeof(int));
+        uploadVec(ctx->ctLdPtr, cLd.ptr.data(), cLd.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctLdBus, cLd.val.data(), cLd.val.size() * sizeof(int));
+        uploadVec(ctx->ctLdVal, cLdVal.data(), cLdVal.size() * sizeof(double));
+        uploadVec(ctx->ctLgPtr, cLg.ptr.data(), cLg.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctLgGen, cLg.val.data(), cLg.val.size() * sizeof(int));
+        uploadVec(ctx->ctHzPtr, cHz.ptr.data(), cHz.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctHzGen, cHz.val.data(), cHz.val.size() * sizeof(int));
+        uploadVec(ctx->ctGoPtr, cGo.ptr.data(), cGo.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctGoGen, cGo.val.data(), cGo.val.size() * sizeof(int));
+        uploadVec(ctx->ctGoTarget, cGoTarget.data(), cGoTarget.size() * sizeof(double));
+        uploadVec(ctx->ctGoInit, cGoInit.data(), cGoInit.size() * sizeof(double));
+        uploadVec(ctx->ctGoPart, cGoPart.data(), cGoPart.size() * sizeof(int));
+        uploadVec(ctx->ctMap, map.data(), map.size() * sizeof(int));
         uploadCsr(env, ctx->ctZrPtr, ctx->ctZrCol, jZrPtr, jZrCol, cols, "zeroed rows");
         uploadCsr(env, ctx->ctEdPtr, ctx->ctEdRow, jEdPtr, jEdRow, cols, "row edits");
         {
@@ -1932,16 +2025,21 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         int scWidth = ctx->nSc > 0 ? ctx->nSc : 1;
         size_t dStride = (size_t) 3 * ctx->nGen + 2 * (size_t) ctx->nBuses + scWidth;
         size_t iStride = (size_t) 2 * ctx->nGen + ctx->nBuses;
-        ctx->ctWsDouble.ensure(dStride * cols * sizeof(double));
-        ctx->ctWsInt.ensure(std::max<size_t>(iStride * cols, 1) * sizeof(int));
-        ctx->ctDsOut.ensure((size_t) 2 * cols * sizeof(double));
+        bool compacted = distinct < cols;
+        ctx->ctWsDouble.ensure(dStride * distinct * sizeof(double));
+        ctx->ctWsInt.ensure(std::max<size_t>(iStride * distinct, 1) * sizeof(int));
+        ctx->ctDsOut.ensure((size_t) 2 * distinct * sizeof(double));
         ctx->ctTargets.ensure((size_t) n * cols * sizeof(double));
+        if (compacted) {
+            ctx->ctCompact.ensure((size_t) n * distinct * sizeof(double));
+        }
+        double* built = compacted ? ctx->ctCompact.as<double>() : ctx->ctTargets.as<double>();
         double t0 = 0;
         if (dcTiming()) {
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             t0 = dcNowMs();
         }
-        ctgTargetsPrepare<<<grid(cols), BLOCK, 0, ctx->stream>>>(cols, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
+        ctgTargetsPrepare<<<grid(distinct), BLOCK, 0, ctx->stream>>>(distinct, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
                 ctx->busGenStart.as<int>(), ctx->busLoadP.as<double>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(),
                 ctx->genPart.as<int>(), ctx->genMinT.as<double>(), ctx->genMaxT.as<double>(), ctx->genMinP.as<double>(),
                 ctx->genMaxP.as<double>(), ctx->genDroop.as<double>(), ctx->genPf.as<double>(),
@@ -1952,18 +2050,22 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 distributed ? 1 : 0, referenceGenerator, participationType, useActiveLimits ? 1 : 0,
                 ctx->ctWsDouble.as<double>(), ctx->ctWsInt.as<int>(), ctx->ctDsOut.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
-        ctgFillTargets<<<grid((long) n * cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->nBuses, ctx->nGen, ctx->nSc,
+        ctgFillTargets<<<grid((long) n * distinct), BLOCK, 0, ctx->stream>>>(n, distinct, ctx->nBuses, ctx->nGen, ctx->nSc,
                 ctx->targetKind.as<int>(), ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(), ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(),
                 ctx->rhsCoef.as<double>(), ctx->busFlags.as<int>(), ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(),
                 ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->ctWsDouble.as<double>(),
-                ctx->ctWsInt.as<int>(), ctx->ctTargets.as<double>());
+                ctx->ctWsInt.as<int>(), built);
         DC_CUDA_CHECK(cudaGetLastError());
+        if (compacted) {
+            ctgExpand<<<grid((long) n * cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctMap.as<int>(), built, ctx->ctTargets.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
         ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctEdPtr.as<int>(),
                 ctx->ctEdRow.as<int>(), ctx->ctEdKind.as<int>(), ctx->ctEdVal.as<double>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         if (dcTiming()) {
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            std::fprintf(stderr, "DC_TIMING modified targets cols=%d %.2f ms\n", cols, dcNowMs() - t0);
+            std::fprintf(stderr, "DC_TIMING modified targets cols=%d distinct=%d %.2f ms\n", cols, distinct, dcNowMs() - t0);
         }
         if (jOutTargets != nullptr) {
             if (env->GetArrayLength(jOutTargets) < (jsize) ((size_t) n * cols)) {

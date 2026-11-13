@@ -60,6 +60,14 @@ void solveScalarLanes(ScalarLu& lu, const double* b, double* x, cudaStream_t str
 void solveScalarSelectedLanes(ScalarLu& lu, const int* selected, int count, const double* b, double* x,
                               cudaStream_t stream);
 
+// cols right-hand sides on ONE lane's factors (a position of the last factorization's lane map): x[k * n ..] =
+// A^-1 b[k * n ..] for k < cols, both column-major. The same operations as solveScalarLanes gives a lane, each column
+// in its own thread: the factors are read once per level for every column, which is what a single system with many
+// right-hand sides needs (the batch keeps one right-hand side per lane). work: n x cols; identityLanes: 0 .. cols - 1
+// on the device (the column maps of the permutations in and out).
+void solveScalarLaneColumns(ScalarLu& lu, int lane, int cols, const double* b, double* x, double* work,
+                            const int* identityLanes, cudaStream_t stream);
+
 // The last factorization's trouble counts, per lane of its lane map (synchronizes the stream): a lane with any needs
 // the pivoting engine.
 std::vector<int> readScalarTrouble(ScalarLu& lu, cudaStream_t stream);

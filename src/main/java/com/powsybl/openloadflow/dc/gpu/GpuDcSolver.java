@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.dc.gpu;
 
 import com.powsybl.math.matrix.SparseMatrix;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver;
 
 import java.util.Objects;
 
@@ -112,12 +113,22 @@ public final class GpuDcSolver implements AutoCloseable {
      * host-side matrix at all.
      */
     public static GpuDcSolver createAssembled(GpuDcAssembly a) {
+        return createAssembled(a, GpuLinearSolver.BATCHED_LU);
+    }
+
+    /**
+     * The device context of an assembled DC system, factorized and solved by {@code linearSolver}: our batched LU
+     * (one lane, many right-hand sides per solve, ordered on the system's own element structure) or cuDSS.
+     */
+    public static GpuDcSolver createAssembled(GpuDcAssembly a, GpuLinearSolver linearSolver) {
         Objects.requireNonNull(a);
+        Objects.requireNonNull(linearSolver);
         if (!isAvailable()) {
             throw new IllegalStateException("GPU native library not available");
         }
+        boolean ourLu = linearSolver == GpuLinearSolver.BATCHED_LU;
         long handle = createAssembled(a.n, a.rowPtr, a.colIdx, a.contribPtr, a.contribKind, a.contribElem, a.contribCoef,
-                a.targetKind, a.targetElem, a.rhsPtr, a.rhsKind, a.rhsElem, a.rhsCoef);
+                a.targetKind, a.targetElem, a.rhsPtr, a.rhsKind, a.rhsElem, a.rhsCoef, ourLu, ourLu ? a.luRowForColumn : null);
         GpuDcSolver solver = new GpuDcSolver(a.n, handle);
         try {
             solver.setBranches(a.ph1Row, a.ph2Row, a.a1Row, a.a1, a.power);
@@ -467,7 +478,7 @@ public final class GpuDcSolver implements AutoCloseable {
 
     private static native long createAssembled(int n, int[] rowPtr, int[] colIdx, int[] contribPtr, int[] contribKind, int[] contribElem,
                                                double[] contribCoef, int[] targetKind, int[] targetElem, int[] rhsPtr, int[] rhsKind,
-                                               int[] rhsElem, double[] rhsCoef);
+                                               int[] rhsElem, double[] rhsCoef, boolean ourLu, int[] luRowForColumn);
 
     private static native void setBuses(long handle, int[] pColumn, int[] phRow, double[] loadP, int[] flags, int[] sc, int[] genStart,
                                         int[] scBusPtr, int[] scBusList, int[] scSlackCount);

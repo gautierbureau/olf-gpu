@@ -125,6 +125,11 @@ public final class GpuDcAssembly {
     // --- buses (LfNetwork.getBuses() order)
     final int[] busPColumn;             // the active P equation's column, or -1
     final int[] busPhRow;               // the angle variable's row, or -1
+    /** Our LU's matching: per variable row, the equation column of its own element (a bus angle: the bus's P equation,
+     *  or its angle target on a slack bus; a phase shift: its alpha target), -1 for a variable no element equation is
+     *  paired with (the native side completes it). Gives the LU's diagonal the system's own structure: OLF numbers
+     *  equations and variables independently, so A's diagonal means nothing as it stands. */
+    final int[] luRowForColumn;
     final double[] busLoadTargetP;
     final int[] busFlags;               // bit 0 disabled, bit 1 participating, bit 2 fictitious, bit 3 slack
     final int[] busSc;                  // synchronous component index
@@ -174,6 +179,7 @@ public final class GpuDcAssembly {
         power = b.power;
         busPColumn = b.busPColumn;
         busPhRow = b.busPhRow;
+        luRowForColumn = b.luRowForColumn;
         busLoadTargetP = b.busLoadTargetP;
         busFlags = b.busFlags;
         busSc = b.busSc;
@@ -363,6 +369,7 @@ public final class GpuDcAssembly {
         double[] power;
         int[] busPColumn;
         int[] busPhRow;
+        int[] luRowForColumn;
         double[] busLoadTargetP;
         int[] busFlags;
         int[] busSc;
@@ -402,7 +409,36 @@ public final class GpuDcAssembly {
             branches();
             buses();
             equations();
+            luMatching();
             return new GpuDcAssembly(this);
+        }
+
+        /** Each element's equation paired with its own variable (see GpuDcAssembly.luRowForColumn). */
+        private void luMatching() {
+            luRowForColumn = new int[n];
+            Arrays.fill(luRowForColumn, -1);
+            boolean[] rowTaken = new boolean[n];
+            for (LfBus bus : network.getBuses()) {
+                int phi = busPhRow[bus.getNum()];
+                pair(phi, equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_PHI), rowTaken);
+                pair(phi, equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P), rowTaken);
+            }
+            for (LfBranch branch : network.getBranches()) {
+                pair(a1RowOfBranch[branch.getNum()], equationSystem.getEquation(branch.getNum(), DcEquationType.BRANCH_TARGET_ALPHA1), rowTaken);
+            }
+        }
+
+        private void pair(int variableRow, java.util.Optional<com.powsybl.openloadflow.equations.Equation<DcVariableType, DcEquationType>> equation,
+                          boolean[] rowTaken) {
+            if (variableRow < 0 || luRowForColumn[variableRow] >= 0) {
+                return;
+            }
+            equation.filter(com.powsybl.openloadflow.equations.Equation::isActive).ifPresent(eq -> {
+                if (!rowTaken[eq.getColumn()]) {
+                    luRowForColumn[variableRow] = eq.getColumn();
+                    rowTaken[eq.getColumn()] = true;
+                }
+            });
         }
 
         private void variables() {

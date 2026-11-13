@@ -549,6 +549,38 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertAllOnDevice(cpu);
     }
 
+    /**
+     * Each contingency's report is a child of the network's, as the AC security analysis builds it: siblings, every one
+     * at the same depth, not each nested in the previous contingency's (which also made each report re-check the
+     * values of every report before it).
+     */
+    @Test
+    void postContingencyReportsAreSiblings() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = allBranches(network);
+        com.powsybl.commons.report.ReportNode root = com.powsybl.commons.report.ReportNode.newRootReportNode()
+                .withMessageTemplate("test").build();
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            runSecurityAnalysis(network, contingencies, monitorAll(network), dcFastParameters(), root);
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        java.util.Map<Integer, Integer> postContingencyNodesByDepth = new java.util.TreeMap<>();
+        java.util.Deque<java.util.Map.Entry<com.powsybl.commons.report.ReportNode, Integer>> stack = new java.util.ArrayDeque<>();
+        stack.push(java.util.Map.entry(root, 0));
+        while (!stack.isEmpty()) {
+            var e = stack.pop();
+            if ("olf.postContingencySimulation".equals(e.getKey().getMessageKey())) {
+                postContingencyNodesByDepth.merge(e.getValue(), 1, Integer::sum);
+            }
+            e.getKey().getChildren().forEach(child -> stack.push(java.util.Map.entry(child, e.getValue() + 1)));
+        }
+        assertEquals(1, postContingencyNodesByDepth.size(), "post-contingency reports at several depths: " + postContingencyNodesByDepth);
+        assertTrue(postContingencyNodesByDepth.values().iterator().next() >= 10, "the contingencies have their reports");
+    }
+
     @Test
     void ieee14WithoutMonitorsMatchStock() {
         assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");

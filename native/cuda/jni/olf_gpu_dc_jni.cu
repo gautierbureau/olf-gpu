@@ -676,9 +676,10 @@ __global__ void scMismatches(int nSc, const int* scBusPtr, const int* scBusList,
 /** DcTargetVector.init, one thread per equation column: the base by kind (bus targetP with the
  *  multi-slack share, the phase shifter's a1, A2 - a1, or 0) minus the sequential sum of the active
  *  terms' rhs (-p (A2 - a1fixed) / +p (A2 - a1fixed) for the branch terms, ±p0 for HVDC). */
+template <typename GenT, typename LoadT, typename ScT>
 __device__ inline double targetValue(int c, const int* tKind, const int* tElem, const int* rhsPtr, const int* rhsKind, const int* rhsElem,
-                                     const double* rhsCoef, const double* genP, const double* loadP, const int* busFlags, const int* busSc,
-                                     const int* scSlackCount, const double* scMismatch, const double* a1Const, const int* a1Row,
+                                     const double* rhsCoef, GenT genP, LoadT loadP, const int* busFlags, const int* busSc,
+                                     const int* scSlackCount, ScT scMismatch, const double* a1Const, const int* a1Row,
                                      const double* power) {
     double base;
     switch (tKind[c]) {
@@ -755,9 +756,22 @@ __device__ inline double javaMin(double a, double b) {
     return a <= b ? a : b;
 }
 
+/** A per-column array interleaved by column (entry i of column j at i * stride + j): what the modified-target build
+ *  keeps per column, so the 32 columns of a warp read consecutive addresses. Indexes like a pointer. */
+template <typename T>
+struct Strided {
+    T* p;
+    int stride;
+    __device__ __forceinline__ T& operator[](int i) const { return p[static_cast<size_t>(i) * stride]; }
+};
+
+__device__ __forceinline__ bool excludedAt(const int* excluded, int b) { return excluded != nullptr && excluded[b]; }
+__device__ __forceinline__ bool excludedAt(Strided<int> excluded, int b) { return excluded[b] != 0; }
+
 /** DoubleStream.sum() as the JDK (17+) computes it: Kahan compensation, sequential, with the
  *  simple-sum fallback for an infinite total — ParticipatingElement.participationFactorNorm. */
-__device__ inline double javaStreamSum(const double* v, int count) {
+template <typename V>
+__device__ inline double javaStreamSum(V v, int count) {
     double sum = 0.0;
     double comp = 0.0;
     double simple = 0.0;
@@ -824,11 +838,12 @@ __device__ inline bool stepParticipating(int type, int participating, double dro
  * water-filling loop with the JDK's compensated norm, normalized factors, sign-preserving limits and
  * iterator removal. Writes out[0] = remaining mismatch, out[1] = iterations.
  */
-__device__ void distributeSlackSequential(int nBuses, const int* busFlags, const int* excluded, const int* busGenStart,
-                                          const double* genInit, double* genTarget, const double* genMinT, const double* genMaxT,
+template <typename ExcludedT, typename InitT, typename TargetT, typename PartT, typename ElementsT, typename FactorsT>
+__device__ void distributeSlackSequential(int nBuses, const int* busFlags, ExcludedT excluded, const int* busGenStart,
+                                          InitT genInit, TargetT genTarget, const double* genMinT, const double* genMaxT,
                                           const double* genMinP, const double* genMaxP, const double* genDroop, const double* genPf,
-                                          const int* genPart, int refGen, int type, int useActiveLimits, double mismatch,
-                                          int* elements, double* factors, double* out) {
+                                          PartT genPart, int refGen, int type, int useActiveLimits, double mismatch,
+                                          ElementsT elements, FactorsT factors, double* out) {
     // Step.resetToInitialState: the reference generator first (the interface default), then the
     // generation step's own loop over every participating generator of a participating bus, in bus
     // order — two separately accumulated amounts, added at the end, then added to the mismatch
@@ -841,7 +856,7 @@ __device__ void distributeSlackSequential(int nBuses, const int* busFlags, const
     double stepPrevious = 0.0;
     for (int b = 0; b < nBuses; b++) {
         bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS)
-                     && !(excluded != nullptr && excluded[b]);
+                     && !excludedAt(excluded, b);
         if (!busOk) {
             continue;
         }
@@ -857,7 +872,7 @@ __device__ void distributeSlackSequential(int nBuses, const int* busFlags, const
     int count = 0;
     for (int b = 0; b < nBuses; b++) {
         bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS)
-                     && !(excluded != nullptr && excluded[b]);
+                     && !excludedAt(excluded, b);
         if (!busOk) {
             continue;
         }
@@ -944,25 +959,44 @@ __global__ void distributeSlack(int nBuses, const int* busFlags, const int* excl
 // DC load flow uses, so the arithmetic is OLF's operation for operation.
 // ---------------------------------------------------------------------------------------------
 
-/** Per-column workspace of a modified-target build, carved from one device buffer. */
+/** Per-column workspace of a modified-target build, interleaved by column: entry i of column j at i * cols + j in each
+ *  array's region, so the columns of a warp read consecutive addresses. */
 struct CtgTargetWork {
-    double* genTarget;   // nGen per column
-    double* genInit;     // nGen
-    double* factors;     // nGen
-    double* genP;        // nBuses
-    double* loadP;       // nBuses
-    double* scMismatch;  // nSc (>= 1)
-    int* genPart;        // nGen
-    int* elements;       // nGen
-    int* excluded;       // nBuses
+    Strided<double> genTarget;   // nGen
+    Strided<double> genInit;     // nGen
+    Strided<double> factors;     // nGen
+    Strided<double> genP;        // nBuses
+    Strided<double> loadP;       // nBuses
+    Strided<double> scMismatch;  // nSc (>= 1)
+    Strided<int> genPart;        // nGen
+    Strided<int> elements;       // nGen
+    Strided<int> excluded;       // nBuses
 };
 
+/** Column j's workspace: the double regions genTarget, genInit, factors (nGen each), genP, loadP (nBuses each),
+ *  scMismatch (max(nSc, 1)); the int regions genPart, elements (nGen each), excluded (nBuses). */
+__device__ inline CtgTargetWork ctgWork(int j, int cols, int nGen, int nBuses, double* wsDouble, int* wsInt) {
+    const size_t g = static_cast<size_t>(nGen) * cols;
+    const size_t b = static_cast<size_t>(nBuses) * cols;
+    CtgTargetWork w;
+    w.genTarget = {wsDouble + j, cols};
+    w.genInit = {wsDouble + g + j, cols};
+    w.factors = {wsDouble + 2 * g + j, cols};
+    w.genP = {wsDouble + 3 * g + j, cols};
+    w.loadP = {wsDouble + 3 * g + b + j, cols};
+    w.scMismatch = {wsDouble + 3 * g + 2 * b + j, cols};
+    w.genPart = {wsInt + j, cols};
+    w.elements = {wsInt + g + j, cols};
+    w.excluded = {wsInt + 2 * g + j, cols};
+    return w;
+}
+
 /**
- * One thread per column: the column's generator and load tables from the base, then its contingency's
- * changes in processLostPowerChanges' order (lost loads: the bus load total given; lost generators:
- * target, initial target and participation to zero; HVDC stations left without power: target to zero),
- * then DcLoadFlowEngine.distributeSlack over the remaining buses when the slack is distributed, then the
- * per-bus generation and the components' mismatches the target vector reads.
+ * One thread per column: the column's generator and load tables from the base, then its contingency's changes in
+ * processLostPowerChanges' order (lost loads: the bus load total given; lost generators: target, initial target and
+ * participation to zero; HVDC stations left without power: target to zero), then DcLoadFlowEngine.distributeSlack over
+ * the remaining buses when the slack is distributed, then the per-bus generation and the components' mismatches the
+ * target vector reads.
  */
 __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const int* busFlags, const int* busGenStart,
                                   const double* baseLoadP, const double* baseInit, const double* baseTarget, const int* basePart,
@@ -976,22 +1010,7 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
     if (j >= cols) {
         return;
     }
-    int scWidth = nSc > 0 ? nSc : 1;
-    size_t dStride = (size_t) 3 * nGen + 2 * (size_t) nBuses + scWidth;
-    size_t iStride = (size_t) 2 * nGen + nBuses;
-    CtgTargetWork w;
-    double* d = wsDouble + (size_t) j * dStride;
-    int* i = wsInt + (size_t) j * iStride;
-    w.genTarget = d;
-    w.genInit = d + nGen;
-    w.factors = d + 2 * (size_t) nGen;
-    w.genP = d + 3 * (size_t) nGen;
-    w.loadP = w.genP + nBuses;
-    w.scMismatch = w.loadP + nBuses;
-    w.genPart = i;
-    w.elements = i + nGen;
-    w.excluded = i + 2 * (size_t) nGen;
-
+    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, wsDouble, wsInt);
     for (int g = 0; g < nGen; g++) {
         w.genTarget[g] = baseTarget[g];
         w.genInit[g] = baseInit[g];
@@ -1051,24 +1070,21 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
     }
 }
 
-/** DcTargetVector.init of every column from its own tables, then the rows the stock zeroes. */
+/** DcTargetVector.init of every column from its own tables: one thread per (equation column, contingency column), the
+ *  contingency column fastest, so a warp shares the equation's formula and reads its columns' tables side by side. */
 __global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, const int* tKind, const int* tElem, const int* rhsPtr,
                                const int* rhsKind, const int* rhsElem, const double* rhsCoef, const int* busFlags, const int* busSc,
                                const int* scSlackCount, const double* a1Const, const int* a1Row, const double* power,
-                               const double* wsDouble, double* out) {
+                               double* wsDouble, int* wsInt, double* out) {
     long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= (long) n * cols) {
         return;
     }
-    int j = (int) (t / n);
-    int c = (int) (t % n);
-    int scWidth = nSc > 0 ? nSc : 1;
-    size_t dStride = (size_t) 3 * nGen + 2 * (size_t) nBuses + scWidth;
-    const double* genP = wsDouble + (size_t) j * dStride + 3 * (size_t) nGen;
-    const double* loadP = genP + nBuses;
-    const double* scMismatch = loadP + nBuses;
-    out[(size_t) j * n + c] = targetValue(c, tKind, tElem, rhsPtr, rhsKind, rhsElem, rhsCoef, genP, loadP, busFlags, busSc, scSlackCount,
-                                          scMismatch, a1Const, a1Row, power);
+    int c = (int) (t / cols);
+    int j = (int) (t % cols);
+    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, wsDouble, wsInt);
+    out[(size_t) j * n + c] = targetValue(c, tKind, tElem, rhsPtr, rhsKind, rhsElem, rhsCoef, w.genP, w.loadP, busFlags, busSc, scSlackCount,
+                                          w.scMismatch, a1Const, a1Row, power);
 }
 
 __global__ void ctgZeroRows(int n, int cols, const int* zrPtr, const int* zrCol, double* out) {
@@ -1899,7 +1915,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 ctx->targetKind.as<int>(), ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(), ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(),
                 ctx->rhsCoef.as<double>(), ctx->busFlags.as<int>(), ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(),
                 ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->ctWsDouble.as<double>(),
-                ctx->ctTargets.as<double>());
+                ctx->ctWsInt.as<int>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
@@ -2077,8 +2093,12 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jc
             throw std::runtime_error("rhs arrays inconsistent with rhsPtr");
         }
         ctx->ourLu = ourLu == JNI_TRUE;
+        double tc0 = dcTiming() ? dcNowMs() : 0;
         if (ctx->ourLu) {
             DC_CUDA_CHECK(cudaStreamCreate(&ctx->stream));
+            if (dcTiming()) {
+                std::fprintf(stderr, "DC_TIMING createAssembled first stream (CUDA start-up) %.1f ms\n", dcNowMs() - tc0);
+            }
             ctx->hRowPtr.assign(rowPtr.p, rowPtr.p + n + 1);
             ctx->hColIdx.assign(colIdx.p, colIdx.p + ctx->nnz);
             if (jLuRowForColumn != nullptr) {
@@ -2114,6 +2134,9 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jc
         }
         ctx->ensureRhs(1);
         ctx->assembled = true;
+        if (dcTiming()) {
+            std::fprintf(stderr, "DC_TIMING createAssembled total %.1f ms\n", dcNowMs() - tc0);
+        }
         return reinterpret_cast<jlong>(ctx);
     } catch (const std::exception& e) {
         delete ctx;

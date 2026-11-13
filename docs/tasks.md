@@ -11,6 +11,24 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #94 — OPEN: the DC port, back onto main (2026-11-13)
+
+Branch `dc-port` (from `main`) carries the `dc` branch's DC work: the Woodbury DC security analysis on the device
+(every contingency class, operator strategies), the full DC load flow assembled, distributed and solved on the device
+(`GpuLoadFlowProvider.runDcEngine`), the DC outer loops as kernels, the DC sensitivity analysis, the device-resident
+PTDF, and the native cuDSS analysis mutex. Deliberately NOT brought back: the time-series DC load flow, and the LODF
+factors (`GpuLodfCalculator`).
+- OLF: `olf-local-patches-dc-port` (worktree `~/Projects/powsybl/powsybl-open-loadflow-dcport`, version
+  `2.4.0-SNAPSHOT-gpu-dc`) = `olf-local-patches` + `gb/pr/vectorized-dc` (vectorized DC, ON by default) + the seams
+  (`runDcEngine`, `DcOuterLoopContext` constructor, DC sensitivity extensibility, Woodbury generator/load actions,
+  `ConnectivityBreakAnalysis` widening) + the DC sensitivity tests in the test jar. NOT carried: upstream PR #1475
+  (the `dc` branch adapted three listeners to it; `olf-local-patches` predates it) and the time-series API.
+  math-native: `cudss_solver_dc` (`1.6.0-SNAPSHOT-gpu-dc`: matching for an empty structural diagonal, the
+  zero-column dense solve).
+- Next: (1) LODF, ported onto upstream's `LodfEngine` (`origin/lodf-matrix`) when wanted; (2) re-measure the DC
+  numbers on this base (`docs/numbers.md` DC rows are from September); (3) fold the DC dependency into
+  `olf-local-patches` (one OLF version again) once the seams settle.
+
 ### #93 — DONE: the tests' tolerance switches are gone (2026-11-10)
 
 `AbstractGpuSaTest`'s two comparison helpers read `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` (falling back to

@@ -218,6 +218,11 @@ public final class GpuDcAssembly {
         return generators;
     }
 
+    /** The reference generator's index in {@link #generators()}, or -1. */
+    public int referenceGeneratorIndex() {
+        return referenceGenerator;
+    }
+
     /** The bus P column ({@code -1} when the bus has no active P equation — the first slack bus). */
     public int busPColumn(int bus) {
         return busPColumn[bus];

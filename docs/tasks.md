@@ -25,7 +25,18 @@ factors (`GpuLodfCalculator`).
   (the `dc` branch adapted three listeners to it; `olf-local-patches` predates it) and the time-series API.
   math-native: `cudss_solver_dc` (`1.6.0-SNAPSHOT-gpu-dc`: matching for an empty structural diagonal, the
   zero-column dense solve).
-- Next: (1) LODF, ported onto upstream's `LodfEngine` (`origin/lodf-matrix`) when wanted; (2) re-measure the DC
+- DONE 2026-11-13: the modified target columns (lost power, islanding, lost phase shifter) are built on the device,
+  bit for bit the stock replay's (gate `GpuWoodburyDcSecurityAnalysisTest.deviceTargetsAreTheHostOnesBitForBit`; all
+  5297 columns of network.xiidm's branch N-1). network.xiidm: GPU 17.8–20.9 s vs CPU-8t ~36 s (was 24.5–34.6 s).
+- OPEN, accuracy: on network.xiidm the GPU flows differ from KLU's by 1.5e-4 MW (every contingency, also before the
+  device columns), 25x the cuDSS-drop-in-vs-KLU gap (5.8e-6 MW). Candidates: the DC context's cuDSS configuration
+  (AMD + matching, no refinement). Measure residuals per arm before choosing.
+- Next for speed (the AC design, `docs/device-final-results-plan.md`): (a) answer each contingency from its state
+  without the network write-back (`GpuStateView` + `GpuContingencyTopology`) and read back only the rows the
+  confirmation needs — the host per-contingency loop is now the largest part (10–14 s); (b) the operator strategies'
+  columns still use the host array model (`DcSlackDistributionModel`); (c) the column kernel is one thread per column
+  (1.7 s over 22 chunks) — a warp per column if it ever matters.
+- Later: (1) LODF, ported onto upstream's `LodfEngine` (`origin/lodf-matrix`) when wanted; (2) re-measure the other DC
   numbers on this base (`docs/numbers.md` DC rows are from September); (3) fold the DC dependency into
   `olf-local-patches` (one OLF version again) once the seams settle.
 

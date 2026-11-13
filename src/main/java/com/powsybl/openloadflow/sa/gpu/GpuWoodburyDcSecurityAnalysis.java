@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedSwitchBranchElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedTapPositionChangeElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
+import com.powsybl.openloadflow.dc.gpu.GpuDcAssembly;
 import com.powsybl.openloadflow.dc.gpu.GpuDcLoadFlowEngine;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.equations.Equation;
@@ -51,7 +52,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 import static com.powsybl.openloadflow.dc.DcLoadFlowEngine.updateNetwork;
@@ -103,6 +106,15 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
     /** Candidate records per contingency the device buffer holds; overflow = host screen. */
     static final int CAPACITY = 1024;
+
+    /** Test hook: build the modified target columns on BOTH sides and compare them bit for bit. */
+    public static final AtomicBoolean CHECK_DEVICE_TARGETS = new AtomicBoolean();
+
+    /** Modified target columns built on the device, and (check hook) target values that differed from the host's,
+     *  accumulated over the runs (a test resets them): a run solves each connected component separately. */
+    public static final AtomicInteger DEVICE_TARGET_COUNT = new AtomicInteger();
+    public static final AtomicInteger TARGET_MISMATCH_COUNT = new AtomicInteger();
+    public static final AtomicLong LAST_TARGET_MAX_DIFF_BITS = new AtomicLong();
 
     private record DeviceCandidate(ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity,
                                    List<ComputedContingencyElement> elements, LfContingency lfContingency) {
@@ -258,7 +270,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
             try (solver) {
                 if (!device.isEmpty()) {
-                    onDevice = runOnDevice(solver, elementCount, lfNetwork, context, device, strategySetup, elementByBranch,
+                    onDevice = runOnDevice(solver, engine.getAssembly(), elementCount, lfNetwork, context, device, strategySetup, elementByBranch,
                             preContingencyStates, preContingencyNetworkResult,
                             preContingencyLimitViolationManager, monitorIndexes, createResultExtension, securityAnalysisParameters,
                             limitReductions, dcPowerFactor, resultById, strategyResultsByContingency);
@@ -361,7 +373,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** The device pass over the qualified contingencies; returns the number solved on the device. */
-    private int runOnDevice(GpuDcSolver solver, int elementCount, LfNetwork lfNetwork, DcLoadFlowContext context, List<DeviceCandidate> device,
+    private int runOnDevice(GpuDcSolver solver, GpuDcAssembly assembly, int elementCount, LfNetwork lfNetwork, DcLoadFlowContext context, List<DeviceCandidate> device,
                             StrategySetup strategySetup, Map<String, ComputedContingencyElement> elementByBranch,
                             double[] preContingencyStates, PreContingencyNetworkResult preContingencyNetworkResult,
                             LimitViolationManager preContingencyLimitViolationManager, AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
@@ -371,7 +383,6 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         List<StrategyScenario> strategyScenarios = new ArrayList<>();
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         int n = equationSystem.getIndex().getColumnCount();
-        int branchCount = lfNetwork.getBranches().size();
         long t0 = System.nanoTime();
         solver.setBase(preContingencyStates);
         long tFactor = t0;
@@ -379,28 +390,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         long tS = t0;
 
         // --- limit table
-        LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
-        GpuLimitTable table = GpuLimitTable.build(lfNetwork, limitReductionManager);
-        int groupCount = table.groupCount();
-        int[] branchGroupStart = new int[branchCount];
-        int[] branchGroupEnd = new int[branchCount];
-        for (int b = 0; b < branchCount; b++) {
-            branchGroupStart[b] = table.groupStart(b);
-            branchGroupEnd[b] = table.groupEnd(b);
-        }
-        int[] groupQuantity = new int[groupCount];
-        int[] groupLimitStart = new int[groupCount];
-        int[] groupLimitEnd = new int[groupCount];
-        for (int g = 0; g < groupCount; g++) {
-            groupQuantity[g] = table.quantity(g);
-            groupLimitStart[g] = table.limitStart(g);
-            groupLimitEnd[g] = table.limitEnd(g);
-        }
-        double[] limitThreshold = new double[table.limitCount()];
-        for (int l = 0; l < limitThreshold.length; l++) {
-            limitThreshold[l] = table.threshold(l);
-        }
-        solver.setLimitTable(branchGroupStart, branchGroupEnd, groupQuantity, groupLimitStart, groupLimitEnd, limitThreshold, dcPowerFactor);
+        GpuLimitTable table = uploadLimitTable(solver, lfNetwork, limitReductions, dcPowerFactor);
         GpuLimitScanner scanner = new GpuLimitScanner(table);
         long tTable = System.nanoTime();
         boolean needAngles = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
@@ -427,6 +417,14 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 ? DcSlackDistributionModel.build(lfNetwork, context.getParameters().getBalanceType(),
                         context.getParameters().getNetworkParameters().isUseActiveLimits())
                 : null;
+        // the device build of the modified target columns: generation balance types only (a lost load's
+        // getUpdatedLoadP0 has no factor there), on the generator and load tables as NetworkState.save left them
+        int participationType = GpuDcLoadFlowEngine.participationType(context.getParameters().getBalanceType());
+        boolean deviceTargets = participationType >= 0;
+        boolean checkTargets = deviceTargets && CHECK_DEVICE_TARGETS.get();
+        Map<LfGenerator, Integer> generatorIndex = deviceTargets ? syncInjectionTables(solver, assembly, lfNetwork) : Map.of();
+        int deviceTargetCount = 0;
+        int targetMismatches = 0;
         boolean needBusResults = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                 || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty());
         long tSetup = System.nanoTime();
@@ -440,6 +438,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         long tColumns = 0;
         int hostScreened = 0;
         int modifiedTargets = 0;
+        int replayedTargets = 0;
         for (int from = 0; from < device.size(); from += DEVICE_CHUNK) {
             int to = Math.min(from + DEVICE_CHUNK, device.size());
             int count = to - from;
@@ -448,6 +447,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             List<Integer> elemList = new ArrayList<>();
             int nBases = 0;
             long tb0 = System.nanoTime();
+            ChunkChanges changes = deviceTargets ? new ChunkChanges() : null;
             for (int i = 0; i < count; i++) {
                 DeviceCandidate candidate = device.get(from + i);
                 for (ComputedContingencyElement element : candidate.elements()) {
@@ -464,19 +464,47 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 });
                 boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
                 if (lostPower || needsModifiedTarget(candidate)) {
-                    if (!lostPower && arrayModelApplies) {
+                    if (changes != null && !changes.add(candidate, lostPower, lfNetwork, equationSystem, generatorIndex)) {
+                        changes = null;                      // something the device cannot place: this chunk on the host
+                        modifiedTargets -= nBases;
+                        nBases = 0;
+                        for (int k = 0; k < i; k++) {
+                            ctgBase[k] = -1;
+                        }
+                        i = -1;                              // rebuild the chunk's columns on the host from the start
+                        elemList.clear();
+                        continue;
+                    }
+                    if (changes != null && !checkTargets) {
+                        ctgBase[i] = nBases++;
+                        modifiedTargets++;
+                        continue;
+                    }
+                    if (!lostPower && arrayModelApplies && !checkTargets) {   // the check compares with the exact replay
                         buildModifiedTarget(candidate, lfNetwork, equationSystem, baseTargets, busNetInjection, distribution, targets, nBases * n);
                     } else {
                         buildModifiedTargetByReplay(candidate, lostPower, lfNetwork, context, targets, nBases * n);
+                        replayedTargets++;
                     }
                     ctgBase[i] = nBases++;
                     modifiedTargets++;
                 }
             }
-            tColumns += System.nanoTime() - tb0;
             int[] ctgElem = elemList.stream().mapToInt(Integer::intValue).toArray();
+            if (changes != null && nBases > 0) {
+                double[] built = checkTargets ? new double[n * nBases] : null;
+                solver.buildChunkTargets(changes.build(), context.getParameters().isDistributedSlack(), participationType,
+                        context.getParameters().getNetworkParameters().isUseActiveLimits(), assembly.referenceGeneratorIndex(), built);
+                deviceTargetCount += nBases;
+                if (built != null) {
+                    targetMismatches += compareTargets(built, targets, n * nBases, n, targetMismatches);
+                }
+                tColumns += System.nanoTime() - tb0;
+            } else {
+                tColumns += System.nanoTime() - tb0;
+                solver.setChunkTargets(targets, nBases);
+            }
             long tc0 = System.nanoTime();
-            solver.setChunkTargets(targets, nBases);
             int[] records = solver.woodburyChunk(ctgPtr, ctgElem, ctgBase, GpuViolationScreen.BAND, CAPACITY, states);
             tDevice += System.nanoTime() - tc0;
 
@@ -563,11 +591,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         equationSystem.getStateVector().set(preContingencyStates);
         updateNetwork(lfNetwork, equationSystem, preContingencyStates);
         if (GpuTrace.PHASE_TIME.isOn()) {
-            System.err.printf("DC_WOODBURY_PHASE n=%d elements=%d device=%d modifiedTargets=%d setup=%.0f ms [factor=%.0f branches=%.0f S=%.0f table=%.0f model=%.0f]"
+            System.err.printf("DC_WOODBURY_PHASE n=%d elements=%d device=%d modifiedTargets=%d (replayed %d, device-built %d) setup=%.0f ms [factor=%.0f branches=%.0f S=%.0f table=%.0f model=%.0f]"
                         + " columns=%.0f ms device=%.0f ms host=%.0f ms hostScreened=%d%n",
-                    n, elementCount, device.size(), modifiedTargets, (tSetup - t0) / 1e6, (tFactor - t0) / 1e6, (tBranches - tFactor) / 1e6,
+                    n, elementCount, device.size(), modifiedTargets, replayedTargets, deviceTargetCount, (tSetup - t0) / 1e6, (tFactor - t0) / 1e6, (tBranches - tFactor) / 1e6,
                     (tS - tBranches) / 1e6, (tTable - tS) / 1e6, (tSetup - tTable) / 1e6, tColumns / 1e6, tDevice / 1e6, tHost / 1e6, hostScreened);
         }
+        DEVICE_TARGET_COUNT.addAndGet(deviceTargetCount);
+        TARGET_MISMATCH_COUNT.addAndGet(targetMismatches);
         return device.size();
     }
 
@@ -1045,6 +1075,181 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     }
                 }
             }
+        }
+    }
+
+    /** The limit table, built as the host scanner reads it, and its copy on the device for the screen. */
+    private static GpuLimitTable uploadLimitTable(GpuDcSolver solver, LfNetwork lfNetwork, List<LimitReduction> limitReductions, double dcPowerFactor) {
+        int branchCount = lfNetwork.getBranches().size();
+        LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
+        GpuLimitTable table = GpuLimitTable.build(lfNetwork, limitReductionManager);
+        int groupCount = table.groupCount();
+        int[] branchGroupStart = new int[branchCount];
+        int[] branchGroupEnd = new int[branchCount];
+        for (int b = 0; b < branchCount; b++) {
+            branchGroupStart[b] = table.groupStart(b);
+            branchGroupEnd[b] = table.groupEnd(b);
+        }
+        int[] groupQuantity = new int[groupCount];
+        int[] groupLimitStart = new int[groupCount];
+        int[] groupLimitEnd = new int[groupCount];
+        for (int g = 0; g < groupCount; g++) {
+            groupQuantity[g] = table.quantity(g);
+            groupLimitStart[g] = table.limitStart(g);
+            groupLimitEnd[g] = table.limitEnd(g);
+        }
+        double[] limitThreshold = new double[table.limitCount()];
+        for (int l = 0; l < limitThreshold.length; l++) {
+            limitThreshold[l] = table.threshold(l);
+        }
+        solver.setLimitTable(branchGroupStart, branchGroupEnd, groupQuantity, groupLimitStart, groupLimitEnd, limitThreshold, dcPowerFactor);
+        return table;
+    }
+
+    /**
+     * The device generator and load tables as {@code NetworkState.save} left the network (every initial
+     * target P re-anchored to the base dispatch), and each generator's index in them.
+     */
+    private static Map<LfGenerator, Integer> syncInjectionTables(GpuDcSolver solver, GpuDcAssembly assembly, LfNetwork lfNetwork) {
+        Map<LfGenerator, Integer> generatorIndex = new IdentityHashMap<>();
+        List<LfGenerator> generators = assembly.generators();
+        double[] initialTargets = new double[generators.size()];
+        double[] generatorTargets = new double[generators.size()];
+        for (int g = 0; g < generators.size(); g++) {
+            generatorIndex.put(generators.get(g), g);
+            initialTargets[g] = generators.get(g).getInitialTargetP();
+            generatorTargets[g] = generators.get(g).getTargetP();
+        }
+        solver.setGeneratorInitialTargets(initialTargets);
+        solver.setGeneratorTargets(generatorTargets);
+        double[] busLoads = new double[lfNetwork.getBuses().size()];
+        for (LfBus bus : lfNetwork.getBuses()) {
+            busLoads[bus.getNum()] = bus.getLoadTargetP();
+        }
+        solver.setBusLoads(busLoads);
+        return generatorIndex;
+    }
+
+    /** The check hook: the device-built columns against the host-built ones, bit for bit; returns the differing values. */
+    private static int compareTargets(double[] built, double[] targets, int length, int n, int alreadyReported) {
+        int mismatches = 0;
+        double maxDiff = Double.longBitsToDouble(LAST_TARGET_MAX_DIFF_BITS.get());
+        for (int k = 0; k < length; k++) {
+            if (Double.doubleToRawLongBits(built[k]) != Double.doubleToRawLongBits(targets[k])) {
+                if (alreadyReported + mismatches < 10) {
+                    System.err.printf("DC_TARGET_CHECK column %d row %d: device %.17g host %.17g%n", k / n, k % n, built[k], targets[k]);
+                }
+                mismatches++;
+                maxDiff = Math.max(maxDiff, Math.abs(built[k] - targets[k]));
+            }
+        }
+        LAST_TARGET_MAX_DIFF_BITS.set(Double.doubleToRawLongBits(maxDiff));
+        return mismatches;
+    }
+
+    /**
+     * What each modified target column of a chunk changes from the base, for the device build: the
+     * same inputs the stock column reads, gathered without touching the network. A lost load's new
+     * bus total is summed exactly as {@code AbstractLfBus.getLoadTargetP} sums it, with the load's
+     * target as {@code processLostLoads} leaves it (generation balance types: {@code getUpdatedLoadP0}
+     * is the shift's active power).
+     */
+    private static final class ChunkChanges {
+        private int count;
+        private final List<Integer> excludedPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> excludedBus = new ArrayList<>();
+        private final List<Integer> loadPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> loadBus = new ArrayList<>();
+        private final List<Double> loadP = new ArrayList<>();
+        private final List<Integer> lostGeneratorPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> lostGenerator = new ArrayList<>();
+        private final List<Integer> stationPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> station = new ArrayList<>();
+        private final List<Integer> zeroRowPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> zeroRow = new ArrayList<>();
+
+        /** One column; false (nothing added) when an element is not in the device tables. */
+        boolean add(DeviceCandidate candidate, boolean lostPower, LfNetwork lfNetwork,
+                    EquationSystem<DcVariableType, DcEquationType> equationSystem, Map<LfGenerator, Integer> generatorIndex) {
+            List<Integer> gens = new ArrayList<>();
+            List<Integer> stations = new ArrayList<>();
+            Map<LfBus, Map<LfLoad, Double>> changedLoads = new LinkedHashMap<>();
+            if (lostPower) {
+                Optional<LfContingency> lfContingency = candidate.connectivity().toLfContingency();
+                if (lfContingency.isPresent()) {
+                    for (Map.Entry<LfLoad, LfLostLoad> e : lfContingency.get().getLostLoads().entrySet()) {
+                        LfLoad load = e.getKey();
+                        if (load.getBus() == null) {
+                            return false;
+                        }
+                        double p0 = e.getValue().getPowerShift().getActive() + (load.getTargetP() - load.getInitialTargetP()) * 0.0;
+                        changedLoads.computeIfAbsent(load.getBus(), b -> new IdentityHashMap<>()).put(load, load.getTargetP() - p0);
+                    }
+                    for (LfGenerator generator : lfContingency.get().getLostGenerators()) {
+                        Integer g = generatorIndex.get(generator);
+                        if (g == null) {
+                            return false;
+                        }
+                        gens.add(g);
+                    }
+                    for (LfHvdc hvdc : candidate.connectivity().getHvdcsWithoutPower()) {
+                        for (LfGenerator converterStation : List.<LfGenerator>of(hvdc.getConverterStation1(), hvdc.getConverterStation2())) {
+                            Integer g = generatorIndex.get(converterStation);
+                            if (g == null) {
+                                return false;
+                            }
+                            stations.add(g);
+                        }
+                    }
+                }
+            }
+            for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
+                excludedBus.add(bus.getNum());
+            }
+            for (Map.Entry<LfBus, Map<LfLoad, Double>> e : changedLoads.entrySet()) {
+                LfBus bus = e.getKey();
+                double total = 0.0;
+                for (LfLoad load : bus.getLoads()) {
+                    double targetP = e.getValue().getOrDefault(load, load.getTargetP());
+                    total += targetP * load.getLoadModel().flatMap(lm -> lm.getExpTermP(0).map(LfLoadModel.ExpTerm::c)).orElse(1d);
+                }
+                loadBus.add(bus.getNum());
+                loadP.add(total + bus.getFictitiousInjectionTargetP());
+            }
+            lostGenerator.addAll(gens);
+            station.addAll(stations);
+            for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
+                int column = pColumnOrMinusOne(equationSystem, bus);
+                if (column >= 0) {
+                    zeroRow.add(column);
+                }
+            }
+            PropagatedContingency c = candidate.connectivity().getPropagatedContingency();
+            List<LfBranch> disabledBranches = new ArrayList<>();
+            c.getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
+            disabledBranches.addAll(candidate.connectivity().getPartialDisabledBranches());
+            for (LfBranch branch : disabledBranches) {
+                equationSystem.getEquation(branch.getNum(), DcEquationType.BRANCH_TARGET_ALPHA1)
+                        .filter(Equation::isActive)
+                        .ifPresent(eq -> zeroRow.add(eq.getColumn()));
+            }
+            count++;
+            excludedPtr.add(excludedBus.size());
+            loadPtr.add(loadBus.size());
+            lostGeneratorPtr.add(lostGenerator.size());
+            stationPtr.add(station.size());
+            zeroRowPtr.add(zeroRow.size());
+            return true;
+        }
+
+        GpuDcSolver.ChunkTargetChanges build() {
+            return new GpuDcSolver.ChunkTargetChanges(count, ints(excludedPtr), ints(excludedBus), ints(loadPtr), ints(loadBus),
+                    loadP.stream().mapToDouble(Double::doubleValue).toArray(), ints(lostGeneratorPtr), ints(lostGenerator),
+                    ints(stationPtr), ints(station), ints(zeroRowPtr), ints(zeroRow));
+        }
+
+        private static int[] ints(List<Integer> list) {
+            return list.stream().mapToInt(Integer::intValue).toArray();
         }
     }
 

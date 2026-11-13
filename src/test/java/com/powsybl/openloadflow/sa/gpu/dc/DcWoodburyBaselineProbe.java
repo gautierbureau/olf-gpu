@@ -316,6 +316,11 @@ class DcWoodburyBaselineProbe {
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(checkResults);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.set(0);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.set(0);
+        // OLF_DC_CHECK_STATE=1: every branch value read from a state checked bit for bit against OLF's model
+        boolean checkState = gpuProvider && "1".equals(System.getenv("OLF_DC_CHECK_STATE"));
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(checkState);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.set(0);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.set(0);
         long t0 = System.nanoTime();
         SecurityAnalysisResult result = provider.run(network, network.getVariantManager().getWorkingVariantId(),
                         n -> contingencies, runParameters)
@@ -323,7 +328,12 @@ class DcWoodburyBaselineProbe {
         long wallMs = (System.nanoTime() - t0) / 1_000_000;
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(false);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(false);
         if (gpuProvider) {
+            System.out.printf("DC-BASELINE contingencies answered from their state: %d%s%n",
+                    com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get(),
+                    checkState ? " | values differing from OLF's model: "
+                            + com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.get() : "");
             System.out.printf("DC-BASELINE network results from the monitored branches found once: %d%s%n",
                     com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get(),
                     checkResults ? " | differing from OLF's update: "

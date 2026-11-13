@@ -77,8 +77,16 @@ factors (`GpuLodfCalculator`).
       order-exact distribution per column (a warp per column would need OLF's summation order preserved).
   The 2 s seen in some cold runs is the NVIDIA driver initializing an idle GPU (first cudaStreamCreate; persistence
   mode avoids it), not our code.
-- Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (state set into the equation system
-  ~0.3 s: the AC GpuStateView design), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
+- DONE 2026-11-13, contingencies answered from their state (the AC design, GpuStateView): GpuDcStateReader reads every
+  branch's P / I / S of both sides from the state array, OLF's own DC formulas operation for operation (the device's
+  branch arrays); the limit scanner confirms on it and GpuMonitoredBranchResults builds the LfBranchImpl results on it;
+  the state is no longer loaded into the equation system (no vectorized flow refresh per contingency). A run falls back
+  to loading it with voltage-angle limits or monitored buses, operator strategies, the result extension or monitored
+  branches that are not impedant LfBranchImpl; a contingency does when the screen overflowed or it has its own monitor.
+  Gate contingenciesAnsweredFromTheirState (reader vs model bit for bit on every branch, results vs OLF); network.xiidm:
+  all 9959 answered from their state, 0 differing values (OLF_DC_CHECK_STATE=1). Host per-contingency loop 0.6 -> 0.25-
+  0.30 s. (GPU-side timings of that day were taken with another session's test run using the GPU at 92 %.)
+- Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (now ~0.3 s), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
   connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
 - Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off
   per JVM); (b) the host connectivity analysis, 2.0 s for 5288 potentially breaking contingencies (graph work, as on

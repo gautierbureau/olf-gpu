@@ -390,6 +390,7 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(true);
         GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.set(0);
         GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.set(0);
         try {
             List<java.util.function.Supplier<Network>> networks = List.of(
                     IeeeCdfNetworkFactory::create14,
@@ -421,8 +422,12 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         } finally {
             GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(false);
         }
-        assertTrue(GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get() > 500,
-                "the fast path must have built the results: " + GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get());
+        // a run that answers its contingencies from their state builds them there (contingenciesAnsweredFromTheirState
+        // checks those against this path); the others on the monitored branches found once, checked here against OLF's
+        assertTrue(GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get() > 100,
+                "the fast path must have built results: " + GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get());
+        assertTrue(GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get() + GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get() > 500,
+                "the results must have been built off OLF's update");
         assertEquals(0, GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.get(), "network results differing from OLF's update");
     }
 
@@ -579,6 +584,51 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         }
         assertEquals(1, postContingencyNodesByDepth.size(), "post-contingency reports at several depths: " + postContingencyNodesByDepth);
         assertTrue(postContingencyNodesByDepth.values().iterator().next() >= 10, "the contingencies have their reports");
+    }
+
+    /**
+     * Each contingency answered from its state, without loading it into OLF's model (the AC path's design): every branch
+     * value the state reader gives (P, I, S of both sides) is OLF's own evaluation with the state loaded, bit for bit, the
+     * monitored results are OLF's, and the results match the stock arm. Networks with islanding, busbar sections, a
+     * VSC HVDC link and a phase shifter; the modification threshold at 0 and at 1 MW.
+     */
+    @Test
+    void contingenciesAnsweredFromTheirState() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(true);
+        GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.set(0);
+        try {
+            List<java.util.function.Supplier<Network>> networks = List.of(
+                    IeeeCdfNetworkFactory::create14,
+                    IeeeCdfNetworkFactory::create118,
+                    com.powsybl.openloadflow.network.NodeBreakerNetworkFactory::create,
+                    com.powsybl.openloadflow.network.HvdcNetworkFactory::createTwoCcLinkedByAHvdcVscWithGenerators,
+                    com.powsybl.openloadflow.network.PhaseControlFactory::createWithOneT2wtTwoLines);
+            for (java.util.function.Supplier<Network> factory : networks) {
+                for (int variant = 0; variant < 2; variant++) {
+                    Network network = factory.get();
+                    addActivePowerLimits(network, 0.9);
+                    List<Contingency> contingencies = new ArrayList<>(allElements(network));
+                    network.getBusbarSectionStream().forEach(b -> contingencies.add(new Contingency(b.getId(),
+                            new com.powsybl.contingency.BusbarSectionContingency(b.getId()))));
+                    Set<String> branchIds = network.getBranchStream().map(Branch::getId).collect(Collectors.toCollection(LinkedHashSet::new));
+                    List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), branchIds, Set.of(), Set.of()));
+                    SecurityAnalysisParameters sap = dcFastParameters();
+                    if (variant == 1) {
+                        sap.getModifiedMonitoredElementsParameters().setPowerModificationThreshold(1);
+                    }
+                    SecurityAnalysisResult cpu = runStock(network, contingencies, monitors, sap);
+                    SecurityAnalysisResult gpu = runGpu(network, contingencies, monitors, sap);
+                    assertSameResults(cpu, gpu);
+                }
+            }
+        } finally {
+            GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(false);
+        }
+        assertTrue(GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get() > 500,
+                "contingencies answered from their state: " + GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get());
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.get(), "values differing between the state reader and OLF's model");
     }
 
     @Test

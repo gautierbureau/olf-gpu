@@ -367,9 +367,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** One (contingency, operator strategy) scenario of the strategy pass. */
+    /** {@code strategyContingency}: the LfContingency whose lost loads and generators the strategy's column takes (its
+     *  contingency's: they do not depend on the buses lost); the disabled elements are the connectivity result's. */
     private record StrategyScenario(DeviceCandidate candidate, Indexed<OperatorStrategy> operatorStrategy, LfOperatorStrategy lfOperatorStrategy,
                                     ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity, List<ComputedElement> elements,
-                                    ReportNode contingencyReportNode) {
+                                    ReportNode contingencyReportNode, LfContingency strategyContingency) {
     }
 
     /**
@@ -625,7 +627,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         List<String> actionIds = checkCondition(operatorStrategy.value(), postContingencyViolations, lfNetwork);
                         List<LfAction> lfActions = actionIds.stream().map(strategySetup.lfActionById()::get).filter(Objects::nonNull).toList();
                         LfOperatorStrategy lfOperatorStrategy = new LfOperatorStrategy(operatorStrategy, lfActions);
-                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null, postContSimReportNode));
+                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null, postContSimReportNode, null));
                     }
                 }
             }
@@ -662,6 +664,62 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * built with the contingency and the actions APPLIED on the network (the vectorized flows of a
      * re-tapped transformer need its new model), and restored.
      */
+    /**
+     * Each strategy's connectivity (the contingency's when its actions cannot change it, OLF's graph check otherwise,
+     * counted in {@code graphChecks}), its LfContingency and its Woodbury elements.
+     */
+    private static List<StrategyScenario> resolveStrategies(List<StrategyScenario> scenarios, double[] maxSum, LfNetwork lfNetwork,
+                                                            Map<String, ComputedContingencyElement> elementByBranch, StrategySetup strategySetup,
+                                                            int[] graphChecks) {
+        List<StrategyScenario> resolved = new ArrayList<>();
+        for (int i = 0; i < scenarios.size(); i++) {
+            StrategyScenario sc = scenarios.get(i);
+            ConnectivityBreakAnalysis.ConnectivityAnalysisResult postContingency = sc.candidate().connectivity();
+            LfOperatorStrategy los = sc.lfOperatorStrategy();
+            boolean topological = los.getActions().stream().anyMatch(a -> a instanceof AbstractLfBranchAction<?>);
+            ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity;
+            LfContingency strategyContingency;
+            if (!topological || maxSum[i] <= 1d - CONNECTIVITY_LOSS_THRESHOLD) {
+                connectivity = postContingency.withOperatorStrategy(los);
+                strategyContingency = sc.candidate().lfContingency();    // the same disabled elements: the contingency's
+            } else {
+                graphChecks[0]++;
+                Optional<ConnectivityBreakAnalysis.ConnectivityAnalysisResult> breaking = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(
+                        lfNetwork, postContingency.getPropagatedContingency(), elementByBranch, los, strategySetup.actionElementsByLfAction(), false);
+                connectivity = breaking.orElseGet(() -> ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
+                        postContingency.getPropagatedContingency(), los, lfNetwork));
+                // its LfContingency only serves the lost loads and generators of the target column, which
+                // PropagatedContingency.toLfContingency takes from the contingency alone (whatever buses are lost): the
+                // contingency's (the disabled branches come from the connectivity result itself)
+                strategyContingency = sc.candidate().lfContingency();
+            }
+            Set<String> toReconnect = connectivity.getElementsToReconnect();
+            List<ComputedElement> elements = new ArrayList<>();
+            for (String id : postContingency.getPropagatedContingency().getBranchIdsToOpen().keySet()) {
+                if (!toReconnect.contains(id)) {
+                    elements.add(elementByBranch.get(id));
+                }
+            }
+            for (LfAction action : los.getActions()) {
+                List<ComputedElement> actionElements = strategySetup.actionElementsByLfAction().get(action);
+                if (actionElements != null) {
+                    for (ComputedElement element : actionElements) {
+                        if (!toReconnect.contains(element.getLfBranch().getId())) {
+                            elements.add(element);
+                        }
+                    }
+                }
+            }
+            if (elements.size() > GpuDcSolver.MAX_ELEMENTS) {
+                throw new IllegalStateException("operator strategy " + los.getIndexedOperatorStrategy().value().getId()
+                        + " has more than " + GpuDcSolver.MAX_ELEMENTS + " Woodbury elements");
+            }
+            resolved.add(new StrategyScenario(sc.candidate(), sc.operatorStrategy(), los, connectivity, elements, sc.contingencyReportNode(),
+                    strategyContingency));
+        }
+        return resolved;
+    }
+
     private void runStrategies(GpuDcSolver solver, LfNetwork lfNetwork, DcLoadFlowContext context, List<StrategyScenario> scenarios,
                                StrategySetup strategySetup, Map<String, ComputedContingencyElement> elementByBranch,
                                double[] baseTargets, double[] busNetInjection, DcSlackDistributionModel distribution, boolean arrayModelApplies,
@@ -708,46 +766,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             ctgPtr[i + 1] = criterionElems.size();
         }
         double[] maxSum = solver.connectivityCriterion(ctgPtr, criterionElems.stream().mapToInt(Integer::intValue).toArray());
-        List<StrategyScenario> resolved = new ArrayList<>();
-        for (int i = 0; i < scenarios.size(); i++) {
-            StrategyScenario sc = scenarios.get(i);
-            ConnectivityBreakAnalysis.ConnectivityAnalysisResult postContingency = sc.candidate().connectivity();
-            LfOperatorStrategy los = sc.lfOperatorStrategy();
-            boolean topological = los.getActions().stream().anyMatch(a -> a instanceof AbstractLfBranchAction<?>);
-            ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity;
-            if (!topological || maxSum[i] <= 1d - CONNECTIVITY_LOSS_THRESHOLD) {
-                connectivity = postContingency.withOperatorStrategy(los);
-            } else {
-                graphChecks++;
-                connectivity = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, postContingency.getPropagatedContingency(),
-                                elementByBranch, los, strategySetup.actionElementsByLfAction(), false)
-                        .orElseGet(() -> ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
-                                postContingency.getPropagatedContingency(), los, lfNetwork));
-            }
-            Set<String> toReconnect = connectivity.getElementsToReconnect();
-            List<ComputedElement> elements = new ArrayList<>();
-            for (String id : postContingency.getPropagatedContingency().getBranchIdsToOpen().keySet()) {
-                if (!toReconnect.contains(id)) {
-                    elements.add(elementByBranch.get(id));
-                }
-            }
-            for (LfAction action : los.getActions()) {
-                List<ComputedElement> actionElements = strategySetup.actionElementsByLfAction().get(action);
-                if (actionElements != null) {
-                    for (ComputedElement element : actionElements) {
-                        if (!toReconnect.contains(element.getLfBranch().getId())) {
-                            elements.add(element);
-                        }
-                    }
-                }
-            }
-            if (elements.size() > GpuDcSolver.MAX_ELEMENTS) {
-                throw new IllegalStateException("operator strategy " + los.getIndexedOperatorStrategy().value().getId()
-                        + " has more than " + GpuDcSolver.MAX_ELEMENTS + " Woodbury elements");
-            }
-            resolved.add(new StrategyScenario(sc.candidate(), sc.operatorStrategy(), los, connectivity, elements, sc.contingencyReportNode()));
-        }
-
+        int[] graphCheckCount = new int[1];
+        List<StrategyScenario> resolved = resolveStrategies(scenarios, maxSum, lfNetwork, elementByBranch, strategySetup, graphCheckCount);
+        graphChecks = graphCheckCount[0];
         long tConnectivity = System.nanoTime() - t0;
         // --- chunks: every strategy scenario has a modified target (the stock re-solves whenever an action is present)
         double[] states = new double[n * DEVICE_CHUNK];
@@ -767,7 +788,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 StrategyScenario sc = resolved.get(from + i);
                 PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
                 boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
-                if (!changes.add(new DeviceCandidate(sc.connectivity(), List.of(), sc.candidate().lfContingency()), lostPower, lfNetwork,
+                if (!changes.add(new DeviceCandidate(sc.connectivity(), List.of(), sc.strategyContingency()), lostPower, lfNetwork,
                         equationSystem, deviceTargets.generatorIndex(), sc.lfOperatorStrategy().getActions())) {
                     changes = null;
                 }
@@ -851,7 +872,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 Set<LfBranch> disabledBranches = new HashSet<>();
                 sc.connectivity().getPropagatedContingency().getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
                 disabledBranches.addAll(sc.connectivity().getPartialDisabledBranches());
-                sc.connectivity().toLfContingency().ifPresent(c -> disabledBranches.addAll(c.getDisabledNetwork().getBranchesStatus().keySet()));
+                // PropagatedContingency.toLfContingency's disabled network: every branch of a bus out of the main component
+                for (LfBus bus : sc.connectivity().getDisabledBuses()) {
+                    disabledBranches.addAll(bus.getBranches());
+                }
                 for (LfAction action : lfActions) {
                     if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
                         disabledBranches.addAll(branchAction.getDisabledBranches());
@@ -1570,7 +1594,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             List<Integer> stations = new ArrayList<>();
             Map<LfBus, Map<LfLoad, Double>> changedLoads = new LinkedHashMap<>();
             if (lostPower) {
-                Optional<LfContingency> lfContingency = candidate.connectivity().toLfContingency();
+                // the candidate's LfContingency, built once (the connectivity result's toLfContingency)
+                Optional<LfContingency> lfContingency = Optional.ofNullable(candidate.lfContingency());
                 if (lfContingency.isPresent()) {
                     for (Map.Entry<LfLoad, LfLostLoad> e : lfContingency.get().getLostLoads().entrySet()) {
                         LfLoad load = e.getKey();

@@ -195,6 +195,7 @@ struct DcContext {
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
     Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
+    Buf ctEdPtr, ctEdRow, ctEdKind, ctEdVal;                       // operator strategies' row edits (set / add), in order
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
     // --- DC sensitivity (GpuDcSensitivityContext): the factor and flow states live here and never
@@ -1087,13 +1088,20 @@ __global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, c
                                           w.scMismatch, a1Const, a1Row, power);
 }
 
-__global__ void ctgZeroRows(int n, int cols, const int* zrPtr, const int* zrCol, double* out) {
+/** The rows the stock zeroes (islanded buses' P, disabled branches' alpha), then an operator strategy's edits in the
+ *  stock's order (WoodburyEngine.runDcLoadFlowWithModifiedTargetVector's actions part): kind 0 sets the row, 1 adds. */
+__global__ void ctgZeroRows(int n, int cols, const int* zrPtr, const int* zrCol, const int* edPtr, const int* edRow, const int* edKind,
+                            const double* edVal, double* out) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= cols) {
         return;
     }
     for (int k = zrPtr[j]; k < zrPtr[j + 1]; k++) {
         out[(size_t) j * n + zrCol[k]] = 0.0;
+    }
+    for (int k = edPtr[j]; k < edPtr[j + 1]; k++) {
+        double* row = out + (size_t) j * n + edRow[k];
+        *row = edKind[k] == 0 ? edVal[k] : __dadd_rn(*row, edVal[k]);
     }
 }
 
@@ -1863,6 +1871,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                                                                    jintArray jExPtr, jintArray jExBus, jintArray jLdPtr, jintArray jLdBus,
                                                                    jdoubleArray jLdVal, jintArray jLgPtr, jintArray jLgGen,
                                                                    jintArray jHzPtr, jintArray jHzGen, jintArray jZrPtr, jintArray jZrCol,
+                                                                   jintArray jEdPtr, jintArray jEdRow, jintArray jEdKind, jdoubleArray jEdVal,
                                                                    jboolean distributed, jint participationType, jboolean useActiveLimits,
                                                                    jint referenceGenerator, jdoubleArray jOutTargets) {
     DcContext* ctx = ctxOf(handle);
@@ -1889,6 +1898,13 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         uploadCsr(env, ctx->ctLgPtr, ctx->ctLgGen, jLgPtr, jLgGen, cols, "lost generators");
         uploadCsr(env, ctx->ctHzPtr, ctx->ctHzGen, jHzPtr, jHzGen, cols, "HVDC stations");
         uploadCsr(env, ctx->ctZrPtr, ctx->ctZrCol, jZrPtr, jZrCol, cols, "zeroed rows");
+        uploadCsr(env, ctx->ctEdPtr, ctx->ctEdRow, jEdPtr, jEdRow, cols, "row edits");
+        {
+            IntArray edKind(env, jEdKind);
+            DoubleArray edVal(env, jEdVal);
+            ctx->ctEdKind.uploadInto(edKind.p, (size_t) std::max<jsize>(edKind.len, 1) * sizeof(int));
+            ctx->ctEdVal.uploadInto(edVal.p, (size_t) std::max<jsize>(edVal.len, 1) * sizeof(double));
+        }
         int scWidth = ctx->nSc > 0 ? ctx->nSc : 1;
         size_t dStride = (size_t) 3 * ctx->nGen + 2 * (size_t) ctx->nBuses + scWidth;
         size_t iStride = (size_t) 2 * ctx->nGen + ctx->nBuses;
@@ -1917,7 +1933,8 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->ctWsDouble.as<double>(),
                 ctx->ctWsInt.as<int>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
-        ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctTargets.as<double>());
+        ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctEdPtr.as<int>(),
+                ctx->ctEdRow.as<int>(), ctx->ctEdKind.as<int>(), ctx->ctEdVal.as<double>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         if (dcTiming()) {
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

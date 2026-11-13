@@ -753,7 +753,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             List<Integer> elemList = new ArrayList<>();
             // the strategies' columns: built on the device (the contingency's changes, then the actions as row edits),
             // or replayed on the host when the device cannot place them; the check hook builds both
-            ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges() : null;
+            ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges(deviceTargets.distributed(), parameters.getNetworkParameters()) : null;
             for (int i = 0; i < count && changes != null; i++) {
                 StrategyScenario sc = resolved.get(from + i);
                 PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
@@ -1091,11 +1091,19 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                                                     DcLoadFlowContext context, double[] out, int offset) {
         DcLoadFlowParameters parameters = context.getParameters();
         Set<LfBus> disabledBuses = candidate.connectivity().getDisabledBuses();
+        List<LfGeneratorAction> generatorActions = ChunkChanges.applicableGeneratorActions(lfActions, disabledBuses);
+        List<LfLoadAction> loadActions = ChunkChanges.applicableLoadActions(lfActions, disabledBuses);
+        boolean injectionsInBalance = parameters.isDistributedSlack() && (!generatorActions.isEmpty() || !loadActions.isEmpty());
         List<BusDcState> busStates = ElementState.save(lfNetwork.getBuses(), BusDcState::save);
         try {
             if (lostPower) {
                 candidate.connectivity().toLfContingency()
                         .ifPresent(lfContingency -> lfContingency.processLostPowerChanges(parameters.getBalanceType(), false));
+            }
+            if (injectionsInBalance) {
+                // WoodburyEngine.runDcLoadFlowWithModifiedTargetVector: in the balance the distribution restores
+                generatorActions.forEach(a -> a.apply(lfNetwork, null, parameters.getNetworkParameters()));
+                loadActions.forEach(a -> a.apply(lfNetwork, null, parameters.getNetworkParameters()));
             }
             if (parameters.isDistributedSlack()) {
                 Collection<LfBus> remaining;
@@ -1138,17 +1146,15 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             .ifPresent(eq -> out[offset + eq.getColumn()] = tapAction.getChange().getNewPiModel().getA1());
                 }
             }
-            for (LfAction action : lfActions) {
-                if (action instanceof LfGeneratorAction genAction && !genAction.getGenerator().isDisabled()) {
+            if (!injectionsInBalance) {
+                for (LfGeneratorAction genAction : generatorActions) {
                     LfBus bus = genAction.getGenerator().getBus();
                     double deltaTargetP = genAction.getNewTargetP() - genAction.getGenerator().getTargetP();
                     equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
                             .filter(Equation::isActive)
                             .ifPresent(eq -> out[offset + eq.getColumn()] += deltaTargetP);
                 }
-            }
-            for (LfAction action : lfActions) {
-                if (action instanceof LfLoadAction loadAction && loadAction.isValid() && !loadAction.getLfLoad().isOriginalLoadDisabled(loadAction.getLoadId())) {
+                for (LfLoadAction loadAction : loadActions) {
                     LfBus bus = loadAction.getLfLoad().getBus();
                     double deltaTargetP = -loadAction.getPowerShift().getActive();
                     equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
@@ -1470,6 +1476,26 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         private final List<Integer> lostGenerator = new ArrayList<>();
         private final List<Integer> stationPtr = new ArrayList<>(List.of(0));
         private final List<Integer> station = new ArrayList<>();
+        private final List<Integer> generatorActionPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> generatorActionGen = new ArrayList<>();
+        private final List<Double> generatorActionTarget = new ArrayList<>();
+        private final List<Double> generatorActionInitialTarget = new ArrayList<>();
+        private final List<Integer> generatorActionParticipating = new ArrayList<>();
+        /** Whether the slack is distributed: an operator strategy's generator and load actions then enter the balance
+         *  (the generator tables' overrides, the bus loads), otherwise they shift their bus's target (row edits). */
+        private final boolean distributed;
+        private final LfNetworkParameters networkParameters;
+
+        /** Contingencies only: no operator strategy action. */
+        ChunkChanges() {
+            this(false, null);
+        }
+
+        ChunkChanges(boolean distributed, LfNetworkParameters networkParameters) {
+            this.distributed = distributed;
+            this.networkParameters = networkParameters;
+        }
+
         private final List<Integer> zeroRowPtr = new ArrayList<>(List.of(0));
         private final List<Integer> zeroRow = new ArrayList<>();
         private final List<Integer> editPtr = new ArrayList<>(List.of(0));
@@ -1523,6 +1549,21 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
                 excludedBus.add(bus.getNum());
             }
+            Set<LfBus> disabledBuses = candidate.connectivity().getDisabledBuses();
+            List<LfGeneratorAction> generatorActions = applicableGeneratorActions(lfActions, disabledBuses);
+            List<LfLoadAction> loadActions = applicableLoadActions(lfActions, disabledBuses);
+            boolean injectionsInBalance = distributed && (!generatorActions.isEmpty() || !loadActions.isEmpty());
+            if (injectionsInBalance) {
+                // WoodburyEngine.runDcLoadFlowWithModifiedTargetVector: the actions applied after the lost power, before the distribution
+                for (LfLoadAction loadAction : loadActions) {
+                    LfLoad load = loadAction.getLfLoad();
+                    Map<LfLoad, Double> busLoads = changedLoads.computeIfAbsent(load.getBus(), b -> new IdentityHashMap<>());
+                    busLoads.put(load, busLoads.getOrDefault(load, load.getTargetP()) + loadAction.getPowerShift().getActive());
+                }
+                if (!addGeneratorOverrides(generatorActions, gens, generatorIndex)) {
+                    return false;
+                }
+            }
             for (Map.Entry<LfBus, Map<LfLoad, Double>> e : changedLoads.entrySet()) {
                 LfBus bus = e.getKey();
                 double total = 0.0;
@@ -1550,18 +1591,80 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         .filter(Equation::isActive)
                         .ifPresent(eq -> zeroRow.add(eq.getColumn()));
             }
-            addActionEdits(lfActions, equationSystem);
+            addActionEdits(lfActions, equationSystem, injectionsInBalance ? List.of() : generatorActions, injectionsInBalance ? List.of() : loadActions);
             count++;
             excludedPtr.add(excludedBus.size());
             loadPtr.add(loadBus.size());
             lostGeneratorPtr.add(lostGenerator.size());
             stationPtr.add(station.size());
+            generatorActionPtr.add(generatorActionGen.size());
             zeroRowPtr.add(zeroRow.size());
             editPtr.add(editRow.size());
             return true;
         }
 
-        private void addActionEdits(List<LfAction> lfActions, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+        /**
+         * The generator and load actions that apply ({@code WoodburyEngine.runDcLoadFlowWithModifiedTargetVector}): not on a
+         * disabled generator or load, nor on a bus the contingency disconnects.
+         */
+        private static List<LfGeneratorAction> applicableGeneratorActions(List<LfAction> lfActions, Set<LfBus> disabledBuses) {
+            return lfActions.stream().filter(LfGeneratorAction.class::isInstance).map(LfGeneratorAction.class::cast)
+                    .filter(a -> !a.getGenerator().isDisabled() && !disabledBuses.contains(a.getGenerator().getBus()))
+                    .toList();
+        }
+
+        private static List<LfLoadAction> applicableLoadActions(List<LfAction> lfActions, Set<LfBus> disabledBuses) {
+            return lfActions.stream().filter(LfLoadAction.class::isInstance).map(LfLoadAction.class::cast)
+                    .filter(a -> a.isValid() && !a.getLfLoad().isOriginalLoadDisabled(a.getLoadId())
+                            && !disabledBuses.contains(a.getLfLoad().getBus()))
+                    .toList();
+        }
+
+        /**
+         * The generator tables after the actions, as {@code LfGeneratorAction.apply} leaves them (on the generator as the
+         * contingency's lost power left it): applied to the generators, read, and the generators restored.
+         */
+        private boolean addGeneratorOverrides(List<LfGeneratorAction> generatorActions, List<Integer> lostGenerators,
+                                              Map<LfGenerator, Integer> generatorIndex) {
+            Map<LfGenerator, double[]> saved = new LinkedHashMap<>();
+            Map<LfGenerator, Boolean> savedParticipating = new IdentityHashMap<>();
+            try {
+                for (LfGeneratorAction action : generatorActions) {
+                    LfGenerator generator = action.getGenerator();
+                    Integer g = generatorIndex.get(generator);
+                    if (g == null) {
+                        return false;
+                    }
+                    if (!saved.containsKey(generator)) {
+                        saved.put(generator, new double[] {generator.getTargetP(), generator.getInitialTargetP()});
+                        savedParticipating.put(generator, generator.isParticipating());
+                        if (lostGenerators.contains(g)) {
+                            // LfContingency.processLostPowerChanges
+                            generator.setTargetP(0);
+                            generator.setInitialTargetP(0);
+                            generator.setParticipating(false);
+                        }
+                    }
+                    action.apply(null, null, networkParameters);
+                }
+                for (LfGenerator generator : saved.keySet()) {
+                    generatorActionGen.add(generatorIndex.get(generator));
+                    generatorActionTarget.add(generator.getTargetP());
+                    generatorActionInitialTarget.add(generator.getInitialTargetP());
+                    generatorActionParticipating.add(generator.isParticipating() ? 1 : 0);
+                }
+                return true;
+            } finally {
+                saved.forEach((generator, values) -> {
+                    generator.setTargetP(values[0]);
+                    generator.setInitialTargetP(values[1]);
+                    generator.setParticipating(savedParticipating.get(generator));
+                });
+            }
+        }
+
+        private void addActionEdits(List<LfAction> lfActions, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                    List<LfGeneratorAction> generatorActions, List<LfLoadAction> loadActions) {
             if (lfActions.isEmpty()) {
                 return;
             }
@@ -1573,23 +1676,20 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.SET, a1));
                 }
             }
-            for (LfAction action : lfActions) {
-                if (action instanceof LfGeneratorAction genAction && !genAction.getGenerator().isDisabled()) {
-                    LfBus bus = genAction.getGenerator().getBus();
-                    double deltaTargetP = genAction.getNewTargetP() - genAction.getGenerator().getTargetP();
-                    equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
-                            .filter(Equation::isActive)
-                            .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
-                }
+            // without slack distribution: the generator and load actions shift their bus's target
+            for (LfGeneratorAction genAction : generatorActions) {
+                LfBus bus = genAction.getGenerator().getBus();
+                double deltaTargetP = genAction.getNewTargetP() - genAction.getGenerator().getTargetP();
+                equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
+                        .filter(Equation::isActive)
+                        .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
             }
-            for (LfAction action : lfActions) {
-                if (action instanceof LfLoadAction loadAction && loadAction.isValid() && !loadAction.getLfLoad().isOriginalLoadDisabled(loadAction.getLoadId())) {
-                    LfBus bus = loadAction.getLfLoad().getBus();
-                    double deltaTargetP = -loadAction.getPowerShift().getActive();
-                    equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
-                            .filter(Equation::isActive)
-                            .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
-                }
+            for (LfLoadAction loadAction : loadActions) {
+                LfBus bus = loadAction.getLfLoad().getBus();
+                double deltaTargetP = -loadAction.getPowerShift().getActive();
+                equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
+                        .filter(Equation::isActive)
+                        .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
             }
             for (LfAction action : lfActions) {
                 if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
@@ -1613,7 +1713,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         GpuDcSolver.ChunkTargetChanges build() {
             return new GpuDcSolver.ChunkTargetChanges(count, ints(excludedPtr), ints(excludedBus), ints(loadPtr), ints(loadBus),
                     loadP.stream().mapToDouble(Double::doubleValue).toArray(), ints(lostGeneratorPtr), ints(lostGenerator),
-                    ints(stationPtr), ints(station), ints(zeroRowPtr), ints(zeroRow), ints(editPtr), ints(editRow), ints(editKind),
+                    ints(stationPtr), ints(station), ints(generatorActionPtr), ints(generatorActionGen),
+                    generatorActionTarget.stream().mapToDouble(Double::doubleValue).toArray(),
+                    generatorActionInitialTarget.stream().mapToDouble(Double::doubleValue).toArray(), ints(generatorActionParticipating),
+                    ints(zeroRowPtr), ints(zeroRow), ints(editPtr), ints(editRow), ints(editKind),
                     editValue.stream().mapToDouble(Double::doubleValue).toArray());
         }
 

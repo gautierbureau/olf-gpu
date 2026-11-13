@@ -26,6 +26,7 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import org.junit.jupiter.api.Test;
 
@@ -66,6 +67,12 @@ class DcWoodburyBaselineProbe {
     private record Arm(String name, SecurityAnalysisResult result, long wallMs) {
     }
 
+    /** The non-fast DC security analysis arm (a full DC load flow per state): the ground truth of a disagreement. */
+    private static final String REFERENCE = "DC-REF";
+
+    /** The operator strategies of the run ({@code OLF_DC_STRATEGIES} per contingency), or null: N-1 only. */
+    private static TopologyStudy.Study study;
+
     /** Plain-JVM entry point (profiling runs: {@code java -XX:StartFlightRecording ... DcWoodburyBaselineProbe}). */
     public static void main(String[] args) {
         new DcWoodburyBaselineProbe().woodburyKluVersusCuDss();
@@ -86,6 +93,30 @@ class DcWoodburyBaselineProbe {
         int maxCtg = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_MAX_CTG", "0"));
         if (maxCtg > 0 && contingencies.size() > maxCtg) {
             contingencies = contingencies.subList(0, maxCtg);
+        }
+        // OLF_DC_STRATEGIES=n: n operator strategies per contingency (TopologyStudy: coupler/breaker switching near it,
+        // a share OLF_DC_REDISPATCH_SHARE (default 0.3) of OLF_DC_REDISPATCH_MW (default 50) redispatch pairs);
+        // OLF_DC_RETAIN_BREAKERS=1 declares an action on every breaker, so OLF keeps them all
+        int strategiesPerContingency = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_STRATEGIES", "0"));
+        study = strategiesPerContingency > 0
+                ? TopologyStudy.generate(network, contingencies, strategiesPerContingency,
+                        Double.parseDouble(System.getenv().getOrDefault("OLF_DC_REDISPATCH_SHARE", "0.3")),
+                        Double.parseDouble(System.getenv().getOrDefault("OLF_DC_REDISPATCH_MW", "50")),
+                        "1".equals(System.getenv("OLF_DC_RETAIN_BREAKERS")),
+                        Long.parseLong(System.getenv().getOrDefault("OLF_DC_SEED", "42")))
+                : null;
+        // OLF_DC_ONLY_STRATEGIES=id,id: replay these strategies of the study alone, with their contingencies (diagnosis)
+        String onlyStrategies = System.getenv("OLF_DC_ONLY_STRATEGIES");
+        if (study != null && onlyStrategies != null && !onlyStrategies.isEmpty()) {
+            Set<String> ids = Set.of(onlyStrategies.split(","));
+            List<com.powsybl.contingency.strategy.OperatorStrategy> kept = study.strategies().stream().filter(s -> ids.contains(s.getId())).toList();
+            Set<String> ctgIds = kept.stream().map(s -> s.getContingencyContext().getContingencyId()).collect(Collectors.toSet());
+            contingencies = contingencies.stream().filter(c -> ctgIds.contains(c.getId())).toList();
+            study = new TopologyStudy.Study(study.actions(), kept, study.description() + ", replaying " + kept.size());
+            kept.forEach(s -> System.out.printf("DC-BASELINE replay %s: %s%n", s.getId(), s.getConditionalActions().get(0).getActionIds()));
+        }
+        if (study != null) {
+            System.out.printf("DC-BASELINE study: %s%n", study.description());
         }
         int monitored = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_MONITORED", "100"));
         List<String> monitoredBranches = mainComponentBranchContingencies(network).stream().limit(monitored).map(Contingency::getId).toList();
@@ -124,8 +155,14 @@ class DcWoodburyBaselineProbe {
             System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d | x%.2f vs KLU | %d/%d on the device%n",
                     gpu.name(), gpu.wallMs(), gpu.wallMs() / (double) contingencies.size(), statusCounts(gpu.result()),
                     violationCount(gpu.result()), klu.wallMs() / (double) gpu.wallMs(), onDevice, contingencies.size());
+            com.powsybl.openloadflow.sa.gpu.GpuDcBaseAccuracy.Result baseAccuracy = com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_BASE_ACCURACY.get();
+            // OLF_DC_REFERENCE=1: also the non-fast DC security analysis, and OLF_DC_PRINT_BRANCHES=id,id printed in each arm
+            if ("1".equals(System.getenv("OLF_DC_REFERENCE"))) {
+                Arm reference = run(REFERENCE, new SparseMatrixFactory(), network, contingencies, monitoredBranches, threads);
+                printBranches(List.of(reference, klu, gpu));
+            }
             compare(klu, gpu, contingencies.size(),
-                    new FlowTolerance(com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_BASE_ACCURACY.get(), network,
+                    new FlowTolerance(baseAccuracy, network,
                             JsonLoadFlowParameters.read(PARAMS_FILE).getDcPowerFactor()));
             assertTrue(onDevice > 0, "the device must have solved contingencies");
             return;
@@ -293,7 +330,7 @@ class DcWoodburyBaselineProbe {
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         sap.addExtension(OpenSecurityAnalysisParameters.class,
-                new OpenSecurityAnalysisParameters().setDcFastMode(true).setThreadCount(threads));
+                new OpenSecurityAnalysisParameters().setDcFastMode(!name.equals(REFERENCE)).setThreadCount(threads));
         List<StateMonitor> monitors = List.of(new StateMonitor(com.powsybl.contingency.ContingencyContext.all(),
                 new LinkedHashSet<>(monitoredBranches), Set.of(), Set.of()));
         OpenSecurityAnalysisProvider provider = gpuProvider
@@ -302,6 +339,9 @@ class DcWoodburyBaselineProbe {
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setSecurityAnalysisParameters(sap)
                 .setMonitors(monitors);
+        if (study != null) {
+            runParameters.setOperatorStrategies(study.strategies()).setActions(study.actions());
+        }
         // OLF_DC_CHECK_TARGETS=1: the device-built modified targets checked bit for bit against the host's
         boolean checkTargets = gpuProvider && "1".equals(System.getenv("OLF_DC_CHECK_TARGETS"));
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(checkTargets);
@@ -378,6 +418,9 @@ class DcWoodburyBaselineProbe {
         for (PostContingencyResult p : r.getPostContingencyResults()) {
             counts.merge(p.getStatus().name(), 1L, Long::sum);
         }
+        for (OperatorStrategyResult o : r.getOperatorStrategyResults()) {
+            counts.merge("strategy " + o.getStatus().name(), 1L, Long::sum);
+        }
         return counts;
     }
 
@@ -385,6 +428,9 @@ class DcWoodburyBaselineProbe {
         return r.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().size()
                 + r.getPostContingencyResults().stream()
                 .mapToLong(p -> p.getLimitViolationsResult().getLimitViolations().size())
+                .sum()
+                + r.getOperatorStrategyResults().stream()
+                .mapToLong(o -> o.getLimitViolationsResult().getLimitViolations().size())
                 .sum();
     }
 
@@ -400,6 +446,10 @@ class DcWoodburyBaselineProbe {
             m.put(p.getContingency().getId(), p.getLimitViolationsResult().getLimitViolations().stream()
                     .collect(Collectors.toMap(DcWoodburyBaselineProbe::key, v -> v, (a, b) -> a)));
         }
+        for (OperatorStrategyResult o : r.getOperatorStrategyResults()) {
+            m.put("strategy " + o.getOperatorStrategy().getId(), o.getLimitViolationsResult().getLimitViolations().stream()
+                    .collect(Collectors.toMap(DcWoodburyBaselineProbe::key, v -> v, (a, b) -> a)));
+        }
         return m;
     }
 
@@ -412,12 +462,45 @@ class DcWoodburyBaselineProbe {
             }
             m.put(p.getContingency().getId(), byBranch);
         }
+        for (OperatorStrategyResult o : r.getOperatorStrategyResults()) {
+            Map<String, Double> byBranch = new HashMap<>();
+            for (BranchResult br : o.getNetworkResult().getBranchResults()) {
+                byBranch.put(br.getBranchId(), br.getP1());
+            }
+            m.put("strategy " + o.getOperatorStrategy().getId(), byBranch);
+        }
         Map<String, Double> base = new HashMap<>();
         for (BranchResult br : r.getPreContingencyResult().getNetworkResult().getBranchResults()) {
             base.put(br.getBranchId(), br.getP1());
         }
         m.put("<pre-contingency>", base);
         return m;
+    }
+
+    private static void printBranches(List<Arm> arms) {
+        String ids = System.getenv("OLF_DC_PRINT_BRANCHES");
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+        for (Arm arm : arms) {
+            for (PostContingencyResult p : arm.result().getPostContingencyResults()) {
+                System.out.printf("DC-BASELINE CONNECTIVITY %s %s: %d components, lost gen %.3f MW load %.3f MW, elements %s%n", arm.name(),
+                        p.getContingency().getId(), p.getConnectivityResult().getCreatedSynchronousComponentCount(),
+                        p.getConnectivityResult().getDisconnectedGenerationActivePower(), p.getConnectivityResult().getDisconnectedLoadActivePower(),
+                        p.getConnectivityResult().getDisconnectedElements());
+            }
+        }
+        List<Map<String, Map<String, Double>>> p1 = arms.stream().map(a -> monitoredP1(a.result())).toList();
+        for (String state : new TreeSet<>(p1.get(0).keySet())) {
+            for (String branch : ids.split(",")) {
+                StringBuilder line = new StringBuilder(String.format("DC-BASELINE P1 %-22s %-8s", state, branch));
+                for (int i = 0; i < arms.size(); i++) {
+                    Double v = p1.get(i).getOrDefault(state, Map.of()).get(branch);
+                    line.append(String.format(" %s=%s", arms.get(i).name(), v == null ? "-" : String.format("%.6f", v)));
+                }
+                System.out.println(line);
+            }
+        }
     }
 
     private static <T> Set<T> union(Set<T> a, Set<T> b) {

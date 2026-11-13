@@ -165,6 +165,11 @@ public final class GpuDcSolver implements AutoCloseable {
         return readGeneratorTargets(handle());
     }
 
+    /** The generators' initial target P (the assembly's generator order). */
+    public void setGeneratorInitialTargets(double[] initialTargetP) {
+        setGeneratorInitialTargets(handle(), initialTargetP);
+    }
+
     /** The matrix values from the branch powers, then the factorization (analysis on the first call). */
     public void fillValues() {
         fillValues(handle());
@@ -398,6 +403,31 @@ public final class GpuDcSolver implements AutoCloseable {
         setChunkTargets(handle(), targets, count);
     }
 
+    /**
+     * What each modified target column of a chunk changes from the base, as CSR lists over the
+     * {@code count} columns: the buses left out of the slack distribution (islanded), the per-bus load
+     * totals a lost load changes, the lost generators (target, initial target and participation to zero),
+     * the HVDC stations left without power (target to zero), and the target rows set to zero. Indices are
+     * the assembly's (bus number, generator order, equation column).
+     */
+    public record ChunkTargetChanges(int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus, double[] loadP,
+                                     int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,
+                                     int[] zeroRowPtr, int[] zeroRow) {
+    }
+
+    /**
+     * The chunk's modified target columns built on the device from the base tables and {@code changes}
+     * ({@code DcLoadFlowEngine.distributeSlack} over the remaining buses when {@code distributed}, then the
+     * target vector re-read, then the zeroed rows), solved into the base states as {@link #setChunkTargets}
+     * does. {@code outTargets}, when non-null, receives the built columns (the bitwise check against the host).
+     */
+    public void buildChunkTargets(ChunkTargetChanges changes, boolean distributed, int participationType, boolean useActiveLimits,
+                                  int referenceGenerator, double[] outTargets) {
+        buildChunkTargets(handle(), changes.count(), changes.excludedPtr(), changes.excludedBus(), changes.loadPtr(), changes.loadBus(),
+                changes.loadP(), changes.lostGeneratorPtr(), changes.lostGenerator(), changes.stationPtr(), changes.station(),
+                changes.zeroRowPtr(), changes.zeroRow(), distributed, participationType, useActiveLimits, referenceGenerator, outTargets);
+    }
+
     @Override
     public void close() {
         cleanable.clean();
@@ -425,6 +455,13 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native int[] woodburyChunk(long handle, int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates);
 
     private static native void setChunkTargets(long handle, double[] targets, int count);
+
+    private static native void buildChunkTargets(long handle, int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus,
+                                                 double[] loadP, int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,
+                                                 int[] zeroRowPtr, int[] zeroRow, boolean distributed, int participationType,
+                                                 boolean useActiveLimits, int referenceGenerator, double[] outTargets);
+
+    private static native void setGeneratorInitialTargets(long handle, double[] initialTargetP);
 
     private static native double[] connectivityCriterion(long handle, int[] ctgPtr, int[] ctgElem);
 

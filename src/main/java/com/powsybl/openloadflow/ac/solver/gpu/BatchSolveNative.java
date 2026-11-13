@@ -65,16 +65,19 @@ public final class BatchSolveNative {
      *
      * <p>The base state/targets are SHARED by every scenario (a single-branch N-1 starts from the same
      * converged base operating point): they are passed as single length-{@code n} rows and tiled across
-     * the batch on-device. The row-mode is PER-SCENARIO ({@code [nScenarios][n]}) so a contingency can
-     * freeze islanded buses or flip PV↔PQ (reactive limits) independently; it is uploaded as-is and
-     * mutated in place on-device by the outer-loop kernels. The disabled-element mask is also
-     * per-scenario. {@code nScenarios} is {@code disabledElementMask.length}.
+     * the batch on-device. The row modes are PER-SCENARIO, so a contingency can freeze islanded buses or flip
+     * PV↔PQ (reactive limits) independently: every installed scenario starts from {@code baseRowMode} and takes the
+     * entries where its own differ, then the outer-loop kernels mutate them in place on-device. The disabled-element
+     * mask is also per-scenario. {@code nScenarios} is {@code disabledElementMask.length}.
      *
      * @param handle              a batch context from {@link #createBatchContext}
      * @param x0Base              shared initial state, {@code [n]}: tiled to every scenario on-device
      * @param targetBase          shared targets, {@code [n]}: in STABLE row order, tiled per scenario
-     * @param rowMode             per-scenario row modes, {@code [nScenarios][n]}: 1 = equation, 0 = identity
-     *                            (islanded buses frozen, slack/PV identity rows)
+     * @param rowModeEntries      (scenario, row, mode) per row where a scenario's mode differs from
+     *                            {@code baseRowMode} (islanded buses frozen to identity, a lost generator's bus
+     *                            turned PQ, ...), scenario then row ascending, at most one per row; null or empty
+     *                            when every scenario is on the base row
+     * @param baseRowMode         the base row modes, {@code [n]}: tiled to every scenario on-device
      * @param disabledElementMask per-scenario disabled elements, {@code [nScenarios][nElements]}: bit-packed
      *                            (true if that element is outaged in this scenario; elements enumerated
      *                            as: first nClosedBranch closed branches, then nOpenBranch open branches, then nShunt shunts, then nHvdcAcEmulation HVDCs)
@@ -101,7 +104,7 @@ public final class BatchSolveNative {
     public static native void setBatchStatesToHost(long handle, boolean statesToHost);
 
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
-                                                       int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
+                                                       int[] rowModeEntries, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,
                                                        int[] distributedSlackOverrideBus, double[] distributedSlackOverrideFactorDelta,
                                                        double[] distributedSlackOverrideBaseTargetPDelta, double[] distributedSlackOverrideMaxDelta,

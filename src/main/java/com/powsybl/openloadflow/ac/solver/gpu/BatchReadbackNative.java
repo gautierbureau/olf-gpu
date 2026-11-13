@@ -43,8 +43,8 @@ public final class BatchReadbackNative {
     public static native int[] readBatchOuterLoopStats(long handle);
 
     /** The per-scenario ROW MODES the device ended with — the companion to {@link #readBatchTargets}.
-     *  A row's equation is (mode, target) TOGETHER, and the outer-loop kernels rewrite both; the host's
-     *  {@code rowModePerScenario} is only what setup asked for. Reading a target without its final mode
+     *  A row's equation is (mode, target) TOGETHER, and the outer-loop kernels rewrite both; the row modes the
+     *  host installed are only what setup asked for. Reading a target without its final mode
      *  can say "the target is right" about a row that is no longer the equation it was set up to be. */
     public static native int[] readBatchRowModes(long handle);
 

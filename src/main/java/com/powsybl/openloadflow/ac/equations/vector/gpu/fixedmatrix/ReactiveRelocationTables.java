@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntUnaryOperator;
 
 /**
  * docs/gpu-vs-olf.md section 2.3 (remote generator voltage control: the carrier; transformer voltage control): the
@@ -257,12 +258,18 @@ public record ReactiveRelocationTables(ReactiveRelocationCandidates candidates, 
      * (fixedmatrix/reactive_relocation.cuh): the host must pick the row the device reads.
      */
     public static int chooseCarrierRow(ReactiveRelocationCandidates candidates, int g, int[] modes) {
+        return chooseCarrierRow(candidates, g, r -> modes[r]);
+    }
+
+    /** {@link #chooseCarrierRow(ReactiveRelocationCandidates, int, int[])} under the row modes {@code modeOf} gives, such
+     *  as one scenario's: the base row's, except the rows it set. */
+    public static int chooseCarrierRow(ReactiveRelocationCandidates candidates, int g, IntUnaryOperator modeOf) {
         int[] reactiveRelocationGroupStart = candidates.groupStart();
         int[] reactiveRelocationCandidateRows = candidates.candidateRows();
         for (int c = reactiveRelocationGroupStart[g] + 1; c < reactiveRelocationGroupStart[g + 1]; c++) {
             int r = reactiveRelocationCandidateRows[c];
-            if (modes[r] != GpuRowMode.FIXED_VARIABLE && modes[r] != GpuRowMode.BUS_TARGET_Q
-                    && modes[r] != GpuRowMode.CROSS_FIXED_VARIABLE) {
+            int mode = modeOf.applyAsInt(r);
+            if (mode != GpuRowMode.FIXED_VARIABLE && mode != GpuRowMode.BUS_TARGET_Q && mode != GpuRowMode.CROSS_FIXED_VARIABLE) {
                 return r;
             }
         }

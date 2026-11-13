@@ -138,21 +138,17 @@ public final class GpuPhaseControlOuterLoop {
 
     /** Pre-solve (OLF initialize): enable every live CONTROLLER-mode phase control — the a1 row
      *  becomes the P-flow equation (row mode BRANCH_TARGET_P) for the first solve. */
-    public static void applyPhaseOn(int realCount, int n, List<Controller> controllers,
-                             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-                             ScenarioTargetOverrides overrides) {
+    public static void applyPhaseOn(int realCount, int n, List<Controller> controllers, ScenarioRowModes rowModes,
+                                    boolean[][] disabledMask, ScenarioTargetOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {
             for (Controller c : controllers) {
                 if (c.kind() != GpuPhaseControlMode.CONTROLLER || disabledMask[slot][c.elemIndex()]) {
                     continue;
                 }
-                int[] row = rowModePerScenario[slot] == baseRowMode
-                        ? baseRowMode.clone() : rowModePerScenario[slot];
                 for (int k = 0; k < c.deltaRows().length; k++) {
-                    row[c.deltaRows()[k]] = c.deltaModesOn()[k];
+                    rowModes.set(slot, c.deltaRows()[k], c.deltaModesOn()[k]);
                     overrides.add(slot * n + c.deltaRows()[k], c.deltaTargetsOn()[k]);
                 }
-                rowModePerScenario[slot] = row;
             }
         }
     }

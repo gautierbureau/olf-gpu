@@ -49,18 +49,17 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
      * from the same seeds) — applied to one shared copy and put back after, so a chunk never materializes
      * {@code chunkSize * n} doubles for it.
      *
-     * @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
+     * @param rowModes the per-scenario row modes (null = base layout everywhere): a converter bus whose
      *  parent coupler the scenario opens takes its P target on its OWN row (see GpuHvdcAcEmulationLimitsOuterLoop.Controller.bus1WriteRow).
      */
     public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> controllers,
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, ScenarioTargetOverrides overrides,
-                               double[] appliedDelta1, double[] appliedDelta2, int[][] rowModePerScenario) {
+                               double[] appliedDelta1, double[] appliedDelta2, ScenarioRowModes rowModes) {
         int[][] status = new int[chunkSize][controllers.size()];
         double[] warm = baseState.clone();
         int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
-            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             if (x0PerScenario != null) {
                 System.arraycopy(x0PerScenario, s * n, warm, 0, n);
             } else if (seedsOf != null) {
@@ -99,10 +98,10 @@ public final class GpuFreezingHvdcACEmulationOuterloop {
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
                 if (c.bus1PActive()) {
-                    overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
+                    overrides.merge(s * n + c.bus1WriteRow(rowModes, s), baseTargets[c.bus1WriteRow(rowModes, s)], c.baseD1(), d[0]);
                 }
                 if (c.bus2PActive()) {
-                    overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
+                    overrides.merge(s * n + c.bus2WriteRow(rowModes, s), baseTargets[c.bus2WriteRow(rowModes, s)], c.baseD2(), d[1]);
                 }
             }
             if (seedsOf != null) {

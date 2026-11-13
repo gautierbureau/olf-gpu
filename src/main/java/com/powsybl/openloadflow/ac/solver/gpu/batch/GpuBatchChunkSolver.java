@@ -425,7 +425,7 @@ final class GpuBatchChunkSolver {
                     // in-kernel phase expects the activation to already carry it.
                     if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
                         GpuPhaseControlOuterLoop.applyPhaseOn(realCount, n, phases.continuousPhase(),
-                                rs.rowModePerScenario, baseRowMode, rs.disabledMask, rs.overrides);
+                                rs.rowModes, rs.disabledMask, rs.overrides);
                     }
                     int[] targetOverrideIndex = rs.overrides.indexArray();
                     double[] targetOverrideValue = rs.overrides.valueArray();
@@ -497,7 +497,7 @@ final class GpuBatchChunkSolver {
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuFreezingHvdcACEmulationOuterloop.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
-                                    rs.disabledMask, baseTargets, rs.overrides, hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModePerScenario);
+                                    rs.disabledMask, baseTargets, rs.overrides, hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModes);
                             targetOverrideIndex = rs.overrides.indexArray();
                             targetOverrideValue = rs.overrides.valueArray();
                         } else {
@@ -635,7 +635,7 @@ final class GpuBatchChunkSolver {
                     int queued = nbg - chunkStart - chunkSize;
                     int pauseAtEnded = queued > 0 ? Math.min(queued, refillAt) : 0;
                     double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
-                            java.util.Arrays.copyOf(rs.rowModePerScenario, chunkSize), baseRowMode,
+                            rs.rowModes.entries(chunkSize), baseRowMode,
                             java.util.Arrays.copyOf(rs.disabledMask, chunkSize), targetOverrideIndex, targetOverrideValue,
                             rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
                             rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
@@ -1557,13 +1557,12 @@ final class GpuBatchChunkSolver {
                 double[] warm = java.util.Arrays.copyOfRange(x0Full, s * n, (s + 1) * n);
                 double d1 = -c.p1At(warm);
                 double d2 = -c.p2At(warm);
-                int[] rm = rs.rowModePerScenario[s];
                 rs.disabledMask[s][c.hvdcElementIndex()] = true;
                 if (c.bus1PActive()) {
-                    rs.overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d1);
+                    rs.overrides.merge(s * n + c.bus1WriteRow(rs.rowModes, s), baseTargets[c.bus1WriteRow(rs.rowModes, s)], c.baseD1(), d1);
                 }
                 if (c.bus2PActive()) {
-                    rs.overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d2);
+                    rs.overrides.merge(s * n + c.bus2WriteRow(rs.rowModes, s), baseTargets[c.bus2WriteRow(rs.rowModes, s)], c.baseD2(), d2);
                 }
                 hvdcActionApplied.add(new double[] {s, hvdcControllers.indexOf(c), d1 - c.baseD1(), d2 - c.baseD2()});
             }

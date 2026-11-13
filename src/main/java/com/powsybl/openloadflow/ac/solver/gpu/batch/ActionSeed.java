@@ -31,7 +31,6 @@ final class ActionSeed {
 
     /** Seed slot {@code s} (contingency index {@code ci}) with its recloses, tap overrides and shunt shifts. */
     static void seed(SlotSeeding ctx, int s, int ci) {
-        final int[] baseRowMode = ctx.baseRowMode();
         final List<BatchContingency> contingencies = ctx.contingencies();
         final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final GpuAcData gpuData = ctx.gpuData();
@@ -45,10 +44,8 @@ final class ActionSeed {
                 // coupling; targets stay 0 (switch: rho=1, phase shift 0)
                 int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
                 int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-                int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                row[dpRow] = GpuRowMode.EQUATION;
-                row[distrQRow] = GpuRowMode.EQUATION;
-                rs.rowModePerScenario[s] = row;
+                rs.rowModes.set(s, dpRow, GpuRowMode.EQUATION);
+                rs.rowModes.set(s, distrQRow, GpuRowMode.EQUATION);
             } else {
                 rs.disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
             }

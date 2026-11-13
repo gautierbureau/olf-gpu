@@ -67,9 +67,8 @@ final class CouplerSeed {
             // (dummies held at 0) — the inverse of a close
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-            int[] rowModesWithZeroImpedanceBranch = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            rowModesWithZeroImpedanceBranch[dpRow] = GpuRowMode.FIXED_VARIABLE;
-            rowModesWithZeroImpedanceBranch[distrQRow] = GpuRowMode.FIXED_VARIABLE;
+            rs.rowModes.set(s, dpRow, GpuRowMode.FIXED_VARIABLE);
+            rs.rowModes.set(s, distrQRow, GpuRowMode.FIXED_VARIABLE);
             rs.overrides.add(s * n + dpRow, 0.0);
             rs.overrides.add(s * n + distrQRow, 0.0);
             // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
@@ -140,10 +139,10 @@ final class CouplerSeed {
                     // The child is PQ in the base (reactive limit): its balance comes home at
                     // the frozen target Q, no identity (the qualification refused such a child
                     // until the entry channels below existed).
-                    rowModesWithZeroImpedanceBranch[childVRow] = GpuRowMode.BUS_TARGET_Q;
+                    rs.rowModes.set(s, childVRow, GpuRowMode.BUS_TARGET_Q);
                     rs.overrides.add(s * n + childVRow, child.getTargetQ());
                 } else if (applied) {
-                    rowModesWithZeroImpedanceBranch[childVRow] = GpuRowMode.FIXED_VARIABLE;
+                    rs.rowModes.set(s, childVRow, GpuRowMode.FIXED_VARIABLE);
                     rs.overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                 }
                 if (childPhiRow >= 0 && dpRow >= 0) {
@@ -195,7 +194,6 @@ final class CouplerSeed {
                             + " applied=" + applied);
                 }
             }
-            rs.rowModePerScenario[s] = rowModesWithZeroImpedanceBranch;
         }
         // OLF's spanning tree, replayed by GpuBatchPrecomputer. The device extracted
         // its structure on the BASE tree; where OLF has moved on by the time it reaches
@@ -226,12 +224,10 @@ final class CouplerSeed {
             rs.spanningTreeOverrideScenarioElementValueList.add(0);
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-            int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            row[dpRow] = GpuRowMode.FIXED_VARIABLE;              // identity rows, target 0
-            row[distrQRow] = GpuRowMode.FIXED_VARIABLE;
+            rs.rowModes.set(s, dpRow, GpuRowMode.FIXED_VARIABLE);         // identity rows, target 0
+            rs.rowModes.set(s, distrQRow, GpuRowMode.FIXED_VARIABLE);
             rs.overrides.add(s * n + dpRow, 0.0);
             rs.overrides.add(s * n + distrQRow, 0.0);
-            rs.rowModePerScenario[s] = row;
             // ...and if the RELOCATION put a child bus's power balance on those dummy rows,
             // its TARGETS have to travel with it, exactly as on the coupler-OPENING path
             // above. Holding the row with an identity is what makes the kernel's
@@ -300,10 +296,8 @@ final class CouplerSeed {
                 rs.spanningTreeOverrideScenarioElementValueList.add(1);
                 int bdp = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 4];
                 int bdq = gpuData.zeroImpedanceBranch().indices()[zb * 11 + 5];
-                int[] r2 = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                r2[bdp] = 1;             // back into the coupling
-                r2[bdq] = 1;
-                rs.rowModePerScenario[s] = r2;
+                rs.rowModes.set(s, bdp, GpuRowMode.EQUATION);             // back into the coupling
+                rs.rowModes.set(s, bdq, GpuRowMode.EQUATION);
             }
         }
         return slotGos;

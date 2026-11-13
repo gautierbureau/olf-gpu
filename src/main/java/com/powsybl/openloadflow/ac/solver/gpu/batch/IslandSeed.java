@@ -90,10 +90,9 @@ final class IslandSeed {
         }
         int[] frozen = frozenRowsByIndex[ci];
         if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
-            int[] row = baseRowMode.clone();
             double[] frozenTargets = frozenTargetsByIndex[ci];
             for (int k = 0; k < frozen.length; k++) {
-                row[frozen[k]] = GpuRowMode.FIXED_VARIABLE;      // identity row — bus decoupled from the main component
+                rs.rowModes.set(s, frozen[k], GpuRowMode.FIXED_VARIABLE);   // identity row — bus decoupled from the main component
                 // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
                 // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
                 rs.overrides.add(s * n + frozen[k], frozenTargets[k]);
@@ -131,7 +130,7 @@ final class IslandSeed {
             int[] reactiveRelocationCandidateRows = gpuData.reactiveRelocation().candidateRows();
             for (int g = 0; reactiveRelocationGroupStart != null && g + 1 < reactiveRelocationGroupStart.length; g++) {
                 int baseCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, baseRowMode);
-                int newCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, row);
+                int newCarrier = ReactiveRelocationTables.chooseCarrierRow(gpuData.reactiveRelocation(), g, r -> rs.rowModes.get(s, r));
                 // A PILOT-SELF group (rotation: the fallback row is itself a candidate) whose pilot is
                 // still PV in the base carries no pilot balance on its carrier: that row hosts its OWN
                 // DISTR_Q, and the base carrier's target is that member's DISTR_Q target, not a pilot
@@ -155,7 +154,8 @@ final class IslandSeed {
                     }
                 }
                 if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
-                        && row[baseCarrier] == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE && !pilotSelfStillPv) {
+                        && rs.rowModes.get(s, baseCarrier) == GpuRowMode.FIXED_VARIABLE && baseRowMode[baseCarrier] != GpuRowMode.FIXED_VARIABLE
+                        && !pilotSelfStillPv) {
                     rs.overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
                     pilotBalanceRows.add(newCarrier);
                     if (GpuTrace.SA_RESID.isOn()) {
@@ -165,7 +165,6 @@ final class IslandSeed {
                     }
                 }
             }
-            rs.rowModePerScenario[s] = row;
         }
     }
 }

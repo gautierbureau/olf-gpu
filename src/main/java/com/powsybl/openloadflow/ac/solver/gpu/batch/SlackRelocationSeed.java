@@ -23,7 +23,6 @@ final class SlackRelocationSeed {
 
     /** Seed slot {@code s} (contingency index {@code ci}) with the slack OLF re-picked, if any. */
     static void seed(SlotSeeding ctx, int s, int ci) {
-        final int[] baseRowMode = ctx.baseRowMode();
         final int chunkSize = ctx.chunkSize();
         final ChunkLists cl = ctx.cl();
         final int n = ctx.n();
@@ -34,9 +33,7 @@ final class SlackRelocationSeed {
         // The state starts from the base angles, as OLF's does - the first step shifts them all.
         int reference = slackRelocations.row(ci);
         if (reference >= 0) {
-            int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-            row[reference] = GpuRowMode.FIXED_VARIABLE;
-            rs.rowModePerScenario[s] = row;
+            rs.rowModes.set(s, reference, GpuRowMode.FIXED_VARIABLE);
             rs.overrides.add(s * n + reference, 0.0);
             if (cl.slackBusRows == null) {
                 cl.slackBusRows = new int[chunkSize];

@@ -22,8 +22,8 @@ static long long marshalNs = 0;
 static long long solveNs = 0;
 static long long packNs = 0;
 static long long calls = 0;
-static long long rowModeRows = 0;                            // the scenario rows that are not the base array
-static long long rowModeEntries = 0;                         // and their entries that differ from it
+static long long rowModeRows = 0;                            // the scenarios whose row modes differ from the base
+static long long rowModeEntries = 0;                         // and their entries
 
 extern "C" JNIEXPORT jlong JNICALL
 OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
@@ -97,7 +97,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
 extern "C" JNIEXPORT jobjectArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jx0Base, jdoubleArray jtargetBase,
-        jobjectArray jrowMode, jintArray jbaseRowMode, jobjectArray jdisabledMask,
+        jintArray jrowModeEntries, jintArray jbaseRowMode, jobjectArray jdisabledMask,
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jDistributedSlackOverrideBus, jdoubleArray jDistributedSlackOverrideFactorDelta, jdoubleArray jDistributedSlackOverrideBaseTargetPDelta,
         jdoubleArray jDistributedSlackOverrideMaxDelta, jdoubleArray jDistributedSlackOverrideMinDelta, jdoubleArray jDistributedSlackBusAnchorShift,
@@ -196,43 +196,36 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
             throw std::runtime_error("scenario count mismatch with the installed slots");
         }
 
-        if (env->GetArrayLength(jrowMode) != nS) {
-            throw std::runtime_error("rowMode scenario count mismatch with the installed slots");
-        }
         // x0/target are the BASE row (length n), identical for every scenario — read once and copied into each
-        // installed slot on the device. rowMode is PER-SCENARIO ([nS][n]), and so is the disabled mask.
+        // installed slot on the device. The row modes are PER-SCENARIO (the base row plus each scenario's entries), and
+        // so is the disabled mask.
         std::vector<double> x0(n);
         std::vector<double> target(n);
         env->GetDoubleArrayRegion(jx0Base, 0, n, x0.data());
         env->GetDoubleArrayRegion(jtargetBase, 0, n, target.data());
         std::vector<int> baseRowMode(n);                     // contingency-free base row mode (length n)
         env->GetIntArrayRegion(jbaseRowMode, 0, n, baseRowMode.data());
-        // The row modes travel as the entries where a scenario's row differs from the base. The Java side shares the base
-        // array for every scenario it does not modify and copies it for the others, which change a few rows: a lost
-        // generator's bus turned PQ, a coupler's identity rows. Copied whole, those rows were 3.5 GB per run of
-        // network.xiidm's full list, most of it spent in page faults on the fresh native buffer.
-        std::vector<int> rowModeOverrides;                   // (local slot, row, mode) per entry
-        std::vector<int> row(n);
-        for (int s = 0; s < nS; s++) {
-            auto mRow = (jintArray) env->GetObjectArrayElement(jrowMode, s);
-            if (env->IsSameObject(mRow, jbaseRowMode)) {
-                env->DeleteLocalRef(mRow);
-                continue;
-            }
-            if (env->GetArrayLength(mRow) != n) {
-                env->DeleteLocalRef(mRow);
-                throw std::runtime_error("rowMode row length mismatch with batch context");
-            }
-            env->GetIntArrayRegion(mRow, 0, n, row.data());
-            env->DeleteLocalRef(mRow);
-            for (int r = 0; r < n; r++) {
-                if (row[r] != baseRowMode[r]) {
-                    rowModeOverrides.insert(rowModeOverrides.end(), {s, r, row[r]});
-                }
-            }
-            rowModeRows++;
+        // The row modes travel as the entries where a scenario's row differs from the base: a lost generator's bus turned
+        // PQ, a coupler's identity rows, islanded buses. The Java side builds them from the rows each scenario sets
+        // (GpuBatchRowModes), scenario then row ascending and one per row: whole rows were 3.5 GB per run of
+        // network.xiidm's full list, copied on the Java side and read back here to find the few that differ.
+        const jsize nRowModeInts = jrowModeEntries == nullptr ? 0 : env->GetArrayLength(jrowModeEntries);
+        if (nRowModeInts % 3 != 0) {
+            throw std::runtime_error("rowMode entries are not (scenario, row, mode) triples");
         }
-        rowModeEntries += static_cast<long long>(rowModeOverrides.size() / 3);
+        std::vector<int> rowModeOverrides(static_cast<size_t>(nRowModeInts));   // (local slot, row, mode) per entry
+        if (nRowModeInts > 0) {
+            env->GetIntArrayRegion(jrowModeEntries, 0, nRowModeInts, rowModeOverrides.data());
+        }
+        for (jsize k = 0; k < nRowModeInts; k += 3) {
+            if (rowModeOverrides[k] < 0 || rowModeOverrides[k] >= nS || rowModeOverrides[k + 1] < 0 || rowModeOverrides[k + 1] >= n) {
+                throw std::runtime_error("rowMode entry outside the installed slots or the rows");
+            }
+            if (k == 0 || rowModeOverrides[k] != rowModeOverrides[k - 3]) {
+                rowModeRows++;                               // the scenarios with an entry (they come in scenario order)
+            }
+        }
+        rowModeEntries += static_cast<long long>(nRowModeInts / 3);
         // One region copy per scenario: a jboolean is an unsigned byte holding 0 or 1, the mask's own encoding.
         std::unique_ptr<char[]> disabledBuf(new char[static_cast<size_t>(nElem) * nS]);
         char* disabledData = disabledBuf.get();

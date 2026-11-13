@@ -96,6 +96,11 @@ final class GpuMonitoredBranchResults {
         }
     }
 
+    /** The monitored branches' numbers, in the network's order. */
+    int[] monitoredBranchNums() {
+        return monitored.stream().mapToInt(LfBranch::getNum).toArray();
+    }
+
     /** Whether {@link #branchResultsFromState} can answer this run's contingencies (no result extension asked). */
     boolean readableFromState(boolean createResultExtension) {
         return readableFromState && !createResultExtension;
@@ -158,7 +163,7 @@ final class GpuMonitoredBranchResults {
      */
     List<BranchResult> branchResultsFromState(Contingency contingency, Predicate<LfBranch> isBranchDisabled, PreContingencyNetworkResult preContingency,
                                               SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified, GpuDcStateReader reader,
-                                              double[] state, double dcPowerFactor) {
+                                              GpuDcStateValues state, double dcPowerFactor) {
         List<BranchResult> out = new ArrayList<>();
         if (monitored.isEmpty()) {
             return out;

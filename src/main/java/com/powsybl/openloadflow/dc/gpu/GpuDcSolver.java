@@ -384,8 +384,9 @@ public final class GpuDcSolver implements AutoCloseable {
     }
 
     /**
-     * One chunk of contingencies (CSR over element indices). Fills {@code outStates} with the
-     * {@code n x nCtg} post-contingency states (column-major) and returns
+     * One chunk of contingencies (CSR over element indices). Fills {@code outStates}, when non-null, with the
+     * {@code n x nCtg} post-contingency states (column-major; null keeps them on the device, read with
+     * {@link #gatherChunk} / {@link #readChunkStates}) and returns
      * {@code [counts(nCtg) | records(nCtg x capacity)]} — the limit-table candidates per
      * contingency; a count above {@code capacity} means "screen this one on the host".
      * {@code ctgBase[c]} is the column of {@link #setChunkTargets} the contingency starts from, or
@@ -393,6 +394,20 @@ public final class GpuDcSolver implements AutoCloseable {
      */
     public int[] woodburyChunk(int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates) {
         return woodburyChunk(handle(), ctgPtr, ctgElem, ctgBase, band, capacity, outStates);
+    }
+
+    /**
+     * Values of the last {@link #woodburyChunk} called without its states (null {@code outStates}): for each pair k,
+     * the closed side-1 flow of branch {@code index[k]} ({@code fromStates} false; side 2 is exactly its opposite) or
+     * the state row {@code index[k]} ({@code fromStates} true) of the chunk's contingency {@code contingency[k]}.
+     */
+    public void gatherChunk(int[] contingency, int[] index, boolean fromStates, double[] out) {
+        gatherChunk(handle(), contingency, index, fromStates, out);
+    }
+
+    /** The full states of these contingencies of the last {@link #woodburyChunk}, each at {@code out[c * n]}. */
+    public void readChunkStates(int[] contingencies, double[] out) {
+        readChunkStates(handle(), contingencies, out);
     }
 
     /**
@@ -473,6 +488,10 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native int[] woodburyChunk(long handle, int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates);
 
     private static native void setChunkTargets(long handle, double[] targets, int count);
+
+    private static native void gatherChunk(long handle, int[] contingency, int[] index, boolean fromStates, double[] out);
+
+    private static native void readChunkStates(long handle, int[] contingencies, double[] out);
 
     private static native void buildChunkTargets(long handle, int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus,
                                                  double[] loadP, int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,

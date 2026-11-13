@@ -88,50 +88,61 @@ final class GpuDcStateReader {
     }
 
     /** {@code bus.getAngle()} once {@code DcLoadFlowEngine.updateNetwork} wrote {@code state}: its angle variable's value. */
-    double busAngle(double[] state, LfBus bus) {
+    double busAngle(GpuDcStateValues values, LfBus bus) {
         int row = busPhRow[bus.getNum()];
-        return row >= 0 ? state[row] : bus.getAngle();
+        return row >= 0 ? values.state(row) : bus.getAngle();
+    }
+
+    /** The bus's angle state row, or -1 (the bus keeps its own angle). */
+    int busPhRow(LfBus bus) {
+        return busPhRow[bus.getNum()];
     }
 
     /** {@code branch.getP1().eval()} (side 1) or {@code getP2()} (side 2) with {@code state} loaded. */
-    double p(double[] state, LfBranch branch, int side) {
+    double p(GpuDcStateValues values, LfBranch branch, int side) {
         Evaluable p = side == GpuTwoSides.ONE ? branch.getP1() : branch.getP2();
         Evaluable closed = side == GpuTwoSides.ONE ? branch.getClosedP1() : branch.getClosedP2();
         if (p != closed || !(p instanceof EquationTerm)) {
             return p.eval();                                 // a constant: an open side OLF swapped in, or a switch's NaN
         }
         int b = branch.getNum();
+        if (!live[b] && values.hasFlow(b)) {
+            // the device's flow, the same operations on the same model; side 2 is exactly its opposite
+            // (power * deltaPhase == -(-power * deltaPhase) in IEEE arithmetic)
+            double p1 = values.flow1(b);
+            return side == GpuTwoSides.ONE ? p1 : -p1;
+        }
         if (ph1Row[b] < 0 || ph2Row[b] < 0) {
             return 0;
         }
-        double a1 = a1Row[b] >= 0 ? state[a1Row[b]] : (live[b] ? liveA1[b] : a1Const[b]);
+        double a1 = a1Row[b] >= 0 ? values.state(a1Row[b]) : (live[b] ? liveA1[b] : a1Const[b]);
         double pw = live[b] ? livePower[b] : power[b];
-        double deltaPhase = state[ph2Row[b]] - state[ph1Row[b]] + PiModel.A2 - a1;
+        double deltaPhase = values.state(ph2Row[b]) - values.state(ph1Row[b]) + PiModel.A2 - a1;
         return side == GpuTwoSides.ONE ? -pw * deltaPhase : pw * deltaPhase;
     }
 
     /** {@code branch.getI1().eval()} or {@code getI2()} with {@code state} loaded. */
-    double i(double[] state, LfBranch branch, int side, double dcPowerFactor) {
+    double i(GpuDcStateValues values, LfBranch branch, int side, double dcPowerFactor) {
         Evaluable i = side == GpuTwoSides.ONE ? branch.getI1() : branch.getI2();
         if (!(i instanceof ClosedBranchDcCurrent)) {
             return i.eval();
         }
-        return Math.abs(p(state, branch, side)) / dcPowerFactor;
+        return Math.abs(p(values, branch, side)) / dcPowerFactor;
     }
 
     /** {@code branch.computeApparentPower1()} or {@code 2} with {@code state} loaded. */
-    double s(double[] state, LfBranch branch, int side) {
-        double p = p(state, branch, side);
+    double s(GpuDcStateValues values, LfBranch branch, int side) {
+        double p = p(values, branch, side);
         double q = side == GpuTwoSides.ONE ? branch.getQ1().eval() : branch.getQ2().eval();
         return FastMath.sqrt(p * p + q * q);
     }
 
     /** The limit scanner's quantity of a branch side ({@link GpuLimitTable#QTY_I} / {@code QTY_P} / {@code QTY_S}). */
-    double branch(double[] state, LfBranch branch, int side, byte quantity, double dcPowerFactor) {
+    double branch(GpuDcStateValues values, LfBranch branch, int side, byte quantity, double dcPowerFactor) {
         return switch (quantity) {
-            case GpuLimitTable.QTY_I -> i(state, branch, side, dcPowerFactor);
-            case GpuLimitTable.QTY_P -> p(state, branch, side);
-            default -> s(state, branch, side);
+            case GpuLimitTable.QTY_I -> i(values, branch, side, dcPowerFactor);
+            case GpuLimitTable.QTY_P -> p(values, branch, side);
+            default -> s(values, branch, side);
         };
     }
 }

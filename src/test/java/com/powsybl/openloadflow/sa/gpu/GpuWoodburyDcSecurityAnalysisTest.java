@@ -378,6 +378,54 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertEquals(0, GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get(), "device target values differing from the host's");
     }
 
+    /**
+     * The monitored branches' results built from the branches found once per run are OLF's own update's, bit for bit
+     * and in the same order, on every contingency: branch-only monitors (the case the fast path covers), the
+     * modification threshold at 0 and at 1 MW, the result extension off and on, networks with islanding, busbar
+     * sections, VSC HVDC and a phase shifter. Then the results match the stock arm as everywhere else.
+     */
+    @Test
+    void monitoredBranchResultsAreOlfsBitForBit() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(true);
+        GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.set(0);
+        try {
+            List<java.util.function.Supplier<Network>> networks = List.of(
+                    IeeeCdfNetworkFactory::create14,
+                    IeeeCdfNetworkFactory::create118,
+                    com.powsybl.openloadflow.network.NodeBreakerNetworkFactory::create,
+                    com.powsybl.openloadflow.network.HvdcNetworkFactory::createTwoCcLinkedByAHvdcVscWithGenerators,
+                    com.powsybl.openloadflow.network.PhaseControlFactory::createWithOneT2wtTwoLines);
+            for (java.util.function.Supplier<Network> factory : networks) {
+                for (int variant = 0; variant < 3; variant++) {
+                    Network network = factory.get();
+                    addActivePowerLimits(network, 0.9);
+                    List<Contingency> contingencies = new ArrayList<>(allElements(network));
+                    network.getBusbarSectionStream().forEach(b -> contingencies.add(new Contingency(b.getId(),
+                            new com.powsybl.contingency.BusbarSectionContingency(b.getId()))));
+                    Set<String> branchIds = network.getBranchStream().map(Branch::getId).collect(Collectors.toCollection(LinkedHashSet::new));
+                    List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), branchIds, Set.of(), Set.of()));
+                    SecurityAnalysisParameters sap = dcFastParameters();
+                    if (variant == 1) {
+                        sap.getModifiedMonitoredElementsParameters().setPowerModificationThreshold(1);
+                    }
+                    if (variant == 2) {
+                        sap.getExtension(OpenSecurityAnalysisParameters.class).setCreateResultExtension(true);
+                    }
+                    SecurityAnalysisResult cpu = runStock(network, contingencies, monitors, sap);
+                    SecurityAnalysisResult gpu = runGpu(network, contingencies, monitors, sap);
+                    assertSameResults(cpu, gpu);
+                }
+            }
+        } finally {
+            GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(false);
+        }
+        assertTrue(GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get() > 500,
+                "the fast path must have built the results: " + GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get());
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.get(), "network results differing from OLF's update");
+    }
+
     private SecurityAnalysisResult runStockWithStrategies(Network network, List<Contingency> contingencies, List<StateMonitor> monitors,
                                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies, List<com.powsybl.action.Action> actions) {
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());

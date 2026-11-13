@@ -299,6 +299,13 @@ contingencies need a modified target column (2160 lose power, the others island 
 | 14d49714 (host-built columns) | 33.5–35.6 | 24.5–34.6 | x1.02–1.36 | 10.9–11.6 | 7.8–8.3 | 1.5–1.6 | statuses + 79 violations identical; flows 1.5e-4 MW |
 | device-built columns | 35.6–37.8 | 17.8–20.9 | x1.93 | 1.7–2.9 (kernel 1.7) | 9.7–13.8 (noisy) | 0.35–0.5 | same |
 | per-network gate | 32.9 | 16.1 | x2.04 | — | — | — | flows 1.5e-4 MW = 16 % of the derived tolerance (9.4e-4 MW), violations 1 % |
+| monitored branches found once | 33.6 | 8.1 | x4.14 | 1.5 | 1.15 (was 9–14) | 0.39 | same; all 9959 network results bit-identical to OLF's update |
+
+The host per-contingency loop was OLF's `PostContingencyNetworkResult.update`: `AbstractNetworkResult.addResults` walks
+every branch of the network (~12,000) per contingency to find the 100 monitored ones (JFR: 639 of the loop's 722
+samples), the stock arm pays it too. `GpuMonitoredBranchResults` finds them once per run. GPU-only cold run (9.5 s):
+device context 2.1 s (mostly CUDA start-up), host connectivity analysis 2.0 s (5288 potentially breaking -> graph),
+target columns 1.5 s, results 1.2 s, S 0.74 s, Woodbury chunks 0.3 s, the probe's base-accuracy diagnostic 0.23 s.
 
 Same day, rte6515_full (9042 branches, no stiff branch, gate 1e-8 MW): CPU 8t 17.9 s, GPU 8.7 s (x2.06), 98955
 violations identical, flows 2.5e-10 MW.

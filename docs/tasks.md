@@ -49,11 +49,17 @@ factors (`GpuLodfCalculator`).
   would need a multi-RHS solve on one lane's factors. Worth it for one linear solver and no cuDSS on the DC path, not for
   speed (the LU is ~0.5 s of a network.xiidm run) nor accuracy (the gap above is the double floor; our fast engine does
   not pivot, and this matrix is where pivoting matters - measure before choosing).
-- Next for speed (the AC design, `docs/device-final-results-plan.md`): (a) answer each contingency from its state
-  without the network write-back (`GpuStateView` + `GpuContingencyTopology`) and read back only the rows the
-  confirmation needs — the host per-contingency loop is now the largest part (10–14 s); (b) the operator strategies'
-  columns still use the host array model (`DcSlackDistributionModel`); (c) the column kernel is one thread per column
-  (1.7 s over 22 chunks) — a warp per column if it ever matters.
+- DONE 2026-11-13: the per-contingency network results. 9 of the host loop's 10 s were OLF's `addResults` walking every
+  branch per contingency to find the monitored ones; `GpuMonitoredBranchResults` finds them once per run and builds
+  their results with OLF's own `createBranchResult` (gate `monitoredBranchResultsAreOlfsBitForBit`; all 9959 of
+  network.xiidm bit-identical, probe `OLF_DC_CHECK_RESULTS=1`). Contingency-specific monitors, voltage levels, 3WT and
+  zero-impedance monitored branches keep OLF's update. network.xiidm: GPU 8.1 s vs CPU-8t 33.6 s (x4.14). The same walk
+  is in the stock arm: an upstream OLF improvement (index the monitored branches once per network).
+- Next for speed, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off
+  per JVM); (b) the host connectivity analysis, 2.0 s for 5288 potentially breaking contingencies (graph work, as on
+  AC); (c) the target columns, 1.5 s (one thread per column: a warp per column); (d) the results, 1.2 s, now the state
+  set into the equation system + result objects (the AC `GpuStateView` design would drop the state set); (e) S 0.74 s.
+  The operator strategies' columns still use the host array model (`DcSlackDistributionModel`).
 - Later: (1) LODF, ported onto upstream's `LodfEngine` (`origin/lodf-matrix`) when wanted; (2) re-measure the other DC
   numbers on this base (`docs/numbers.md` DC rows are from September); (3) fold the DC dependency into
   `olf-local-patches` (one OLF version again) once the seams settle.

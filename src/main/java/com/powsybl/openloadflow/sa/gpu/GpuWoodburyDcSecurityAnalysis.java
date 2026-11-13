@@ -114,6 +114,15 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     public static final java.util.concurrent.atomic.AtomicReference<GpuDcBaseAccuracy.Result> LAST_BASE_ACCURACY =
             new java.util.concurrent.atomic.AtomicReference<>();
 
+    /** Test hook: build the monitored branch results on BOTH paths (GpuMonitoredBranchResults and OLF's update), compare. */
+    public static final AtomicBoolean CHECK_NETWORK_RESULTS = new AtomicBoolean();
+
+    /** Network results differing between the two paths under that hook, accumulated (a test resets it). */
+    public static final AtomicInteger NETWORK_RESULT_MISMATCH_COUNT = new AtomicInteger();
+
+    /** Network results built by GpuMonitoredBranchResults, accumulated (a test resets it). */
+    public static final AtomicInteger FAST_NETWORK_RESULT_COUNT = new AtomicInteger();
+
     /** Test hook: build the modified target columns on BOTH sides and compare them bit for bit. */
     public static final AtomicBoolean CHECK_DEVICE_TARGETS = new AtomicBoolean();
 
@@ -435,6 +444,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         Map<LfGenerator, Integer> generatorIndex = deviceTargets ? syncInjectionTables(solver, assembly, lfNetwork) : Map.of();
         int deviceTargetCount = 0;
         int targetMismatches = 0;
+        GpuMonitoredBranchResults monitoredBranchResults = GpuMonitoredBranchResults.build(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
         boolean needBusResults = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                 || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty());
         long tSetup = System.nanoTime();
@@ -549,21 +559,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     scanner.detectFromCandidates(lfNetwork, postContingencyLimitViolationManager, candidates, isBranchDisabled);
                 }
 
-                // network result: the stock class over the loaded state. The stock path's apply() flags the
-                // islanded buses disabled and the bus results skip them; flag them for the duration of the
-                // result build when bus results are wanted at all.
-                Set<LfBus> islanded = candidate.connectivity().getDisabledBuses();
-                boolean flagBuses = needBusResults && !islanded.isEmpty();
-                if (flagBuses) {
-                    islanded.forEach(bus -> bus.setDisabled(true));
-                }
-                var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, monitorIndexes, createResultExtension,
-                        preContingencyNetworkResult, contingency, LoadFlowModel.DC, dcPowerFactor,
+                NetworkResult networkResult = networkResult(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled,
+                        needBusResults, monitorIndexes, createResultExtension, preContingencyNetworkResult, dcPowerFactor,
                         securityAnalysisParameters.getModifiedMonitoredElementsParameters());
-                postContingencyNetworkResult.update(isBranchDisabled);
-                if (flagBuses) {
-                    islanded.forEach(bus -> bus.setDisabled(false));
-                }
 
                 var connectivityResult = new ConnectivityResult(
                         lfContingency.getCreatedSynchronousComponentsCount(), 0,
@@ -572,10 +570,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         lfContingency.getDisconnectedElementIds());
                 LimitViolationsResult postContingencyViolations = new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations());
                 resultById.put(contingency.getId(), new PostContingencyResult(contingency, PostContingencyComputationStatus.CONVERGED,
-                        postContingencyViolations,
-                        new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
-                                postContingencyNetworkResult.getThreeWindingsTransformerResults()),
-                        connectivityResult, Double.NaN));
+                        postContingencyViolations, networkResult, connectivityResult, Double.NaN));
 
                 // the operator strategies of this contingency: the condition is read on the post-contingency
                 // violations (and state), exactly where the stock reads it
@@ -1114,6 +1109,46 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         }
         solver.setLimitTable(branchGroupStart, branchGroupEnd, groupQuantity, groupLimitStart, groupLimitEnd, limitThreshold, dcPowerFactor);
         return table;
+    }
+
+    /**
+     * The contingency's network result: the monitored branches found once per run (GpuMonitoredBranchResults) where
+     * that covers it, OLF's own {@code PostContingencyNetworkResult} over the loaded state otherwise. The stock path's
+     * apply() flags the islanded buses disabled and the bus results skip them: flagged for the duration of OLF's build
+     * when bus results are wanted at all.
+     */
+    private static NetworkResult networkResult(GpuMonitoredBranchResults monitoredBranchResults, LfNetwork lfNetwork, DeviceCandidate candidate,
+                                               Contingency contingency, Predicate<LfBranch> isBranchDisabled, boolean needBusResults,
+                                               AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
+                                               PreContingencyNetworkResult preContingencyNetworkResult, double dcPowerFactor,
+                                               SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified) {
+        boolean fast = monitoredBranchResults.appliesTo(contingency.getId());
+        List<BranchResult> fastBranchResults = fast
+                ? monitoredBranchResults.branchResults(contingency, isBranchDisabled, preContingencyNetworkResult, createResultExtension, modified)
+                : null;
+        if (fast) {
+            FAST_NETWORK_RESULT_COUNT.incrementAndGet();
+        }
+        if (fast && !CHECK_NETWORK_RESULTS.get()) {
+            return new NetworkResult(fastBranchResults, List.of(), List.of());
+        }
+        Set<LfBus> islanded = candidate.connectivity().getDisabledBuses();
+        boolean flagBuses = needBusResults && !islanded.isEmpty();
+        if (flagBuses) {
+            islanded.forEach(bus -> bus.setDisabled(true));
+        }
+        var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, monitorIndexes, createResultExtension,
+                preContingencyNetworkResult, contingency, LoadFlowModel.DC, dcPowerFactor, modified);
+        postContingencyNetworkResult.update(isBranchDisabled);
+        if (flagBuses) {
+            islanded.forEach(bus -> bus.setDisabled(false));
+        }
+        if (fast) {
+            NETWORK_RESULT_MISMATCH_COUNT.addAndGet(GpuMonitoredBranchResults.compare(fastBranchResults, postContingencyNetworkResult.getBranchResults())
+                    + postContingencyNetworkResult.getBusResults().size() + postContingencyNetworkResult.getThreeWindingsTransformerResults().size());
+        }
+        return new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
+                postContingencyNetworkResult.getThreeWindingsTransformerResults());
     }
 
     /**

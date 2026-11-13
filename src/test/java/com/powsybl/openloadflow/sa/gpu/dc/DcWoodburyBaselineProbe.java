@@ -311,13 +311,23 @@ class DcWoodburyBaselineProbe {
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_BASE_ACCURACY.set(null);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
+        // OLF_DC_CHECK_RESULTS=1: the monitored branch results of the fast path checked bit for bit against OLF's update
+        boolean checkResults = gpuProvider && "1".equals(System.getenv("OLF_DC_CHECK_RESULTS"));
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(checkResults);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.set(0);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.set(0);
         long t0 = System.nanoTime();
         SecurityAnalysisResult result = provider.run(network, network.getVariantManager().getWorkingVariantId(),
                         n -> contingencies, runParameters)
                 .join().getResult();
         long wallMs = (System.nanoTime() - t0) / 1_000_000;
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_NETWORK_RESULTS.set(false);
         if (gpuProvider) {
+            System.out.printf("DC-BASELINE network results from the monitored branches found once: %d%s%n",
+                    com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.FAST_NETWORK_RESULT_COUNT.get(),
+                    checkResults ? " | differing from OLF's update: "
+                            + com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.NETWORK_RESULT_MISMATCH_COUNT.get() : "");
             System.out.printf("DC-BASELINE device-built modified targets: %d%s%n",
                     com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get(),
                     checkTargets ? " | values differing from the host build: "

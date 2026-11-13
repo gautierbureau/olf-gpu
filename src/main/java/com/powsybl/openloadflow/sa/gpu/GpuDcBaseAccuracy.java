@@ -55,6 +55,7 @@ public final class GpuDcBaseAccuracy {
     }
 
     static Result report(DcLoadFlowContext context, GpuDcSolver solver, double[] deviceState) {
+        long t0 = System.nanoTime();
         SparseMatrix m = (SparseMatrix) context.getJacobianMatrix().getMatrix();
         double[] b = context.getTargetVector().getArray().clone();
         double[] deviceTarget = solver.readTarget();
@@ -139,6 +140,7 @@ public final class GpuDcBaseAccuracy {
             maxDiff = Math.max(maxDiff, Math.abs(deviceState[j] - lu[j]));
         }
         System.err.printf("DC_BASE_ACCURACY max |x device - x OLF LU| %.3e%n", maxDiff);
+        System.err.printf("DC_BASE_ACCURACY took %.0f ms%n", (System.nanoTime() - t0) / 1e6);
         return new Result(deviceError, luError, stiff, branchPower);
     }
 

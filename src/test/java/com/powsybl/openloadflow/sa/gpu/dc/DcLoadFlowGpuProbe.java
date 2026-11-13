@@ -84,7 +84,8 @@ class DcLoadFlowGpuProbe {
                     genDiff++;
                 }
             }
-            System.out.printf("DC-LF rte6515 %s | CPU %d ms (%s, %d components) | GPU %d ms (%s, %d on device) | max |dP| %.3e MW over %d terminals | max |dAngle| %.3e deg | generators differing %d%n",
+            System.out.printf("DC-LF rte6515 %s | CPU %d ms (%s, %d components) | GPU %d ms (%s, %d on device)"
+                    + " | max |dP| %.3e MW over %d terminals | max |dAngle| %.3e deg | generators differing %d%n",
                     pass == 0 ? "cold" : "warm", (t1 - t0) / 1_000_000, cpuResult.getComponentResults().getFirst().getStatus(),
                     cpuResult.getComponentResults().size(), (t2 - t1) / 1_000_000, gpuResult.getComponentResults().getFirst().getStatus(),
                     GpuLoadFlowProvider.LAST_GPU_COMPONENT_COUNT.get(), maxP, branches, maxAngle, genDiff);

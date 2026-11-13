@@ -23,10 +23,10 @@ import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
+import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityFactor;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
-import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

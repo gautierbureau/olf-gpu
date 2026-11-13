@@ -7,10 +7,10 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
 import com.powsybl.math.matrix.MatrixFactory;
-import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.SparseMatrix;
 
 import java.io.PrintStream;

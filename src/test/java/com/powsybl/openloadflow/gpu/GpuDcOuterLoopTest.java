@@ -206,7 +206,7 @@ class GpuDcOuterLoopTest {
     }
 
     /**
-     * The A/B of the kernels: the same runs with {@code olf.gpu.dc.hostOuterLoops=true} take OLF's
+     * The A/B of the kernels: the same runs with {@link GpuDcLoadFlowEngine#HOST_OUTER_LOOPS} set take OLF's
      * own loop checks and must land on the same result — the device decisions are the loops', not an
      * approximation of them.
      */
@@ -221,14 +221,14 @@ class GpuDcOuterLoopTest {
         GpuDcLoadFlowEngine.LAST_DEVICE_TAP_CHANGES.set(-1);
         LoadFlowResult deviceResult = run(device, parameters, true);
         assertTrue(GpuDcLoadFlowEngine.LAST_DEVICE_TAP_CHANGES.get() >= 1, "the kernels ran");
-        System.setProperty(GpuDcLoadFlowEngine.DISABLE_DEVICE_LOOPS_PROPERTY, "true");
+        GpuDcLoadFlowEngine.HOST_OUTER_LOOPS.set(true);
         LoadFlowResult hostResult;
         try {
             GpuDcLoadFlowEngine.LAST_DEVICE_TAP_CHANGES.set(-1);
             hostResult = run(host, parameters, true);
             assertEquals(-1, GpuDcLoadFlowEngine.LAST_DEVICE_TAP_CHANGES.get(), "the kernels did not run");
         } finally {
-            System.clearProperty(GpuDcLoadFlowEngine.DISABLE_DEVICE_LOOPS_PROPERTY);
+            GpuDcLoadFlowEngine.HOST_OUTER_LOOPS.set(false);
         }
         GpuDcLoadFlowProviderTest.assertSameResults("device loops vs host loops", hostResult, deviceResult);
         GpuDcLoadFlowProviderTest.assertSameNetworkState("device loops vs host loops", host, device);

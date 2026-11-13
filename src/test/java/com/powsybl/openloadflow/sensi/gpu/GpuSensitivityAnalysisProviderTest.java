@@ -213,8 +213,9 @@ class GpuSensitivityAnalysisProviderTest {
     }
 
     /**
-     * On the device, every load flow of the run - the base case and both contingencies - runs on the GPU and the
-     * sensitivities OLF computes on the Jacobian they leave are OLF's own on the CPU, function references included.
+     * On the device, every load flow of the run - the base case and both contingencies - runs on the GPU, ends with OLF's
+     * status (L1-2-1's fails, as on the CPU) and the sensitivities OLF computes on the Jacobian the converged ones leave
+     * are OLF's own on the CPU, function references included.
      * The condenser of bus 8 ends PQ at its limit in every state, so its target voltage moves nothing (0 on both): the
      * GPU solver handed the switch back to OLF's equation system, which the Jacobian is built from.
      */
@@ -228,22 +229,37 @@ class GpuSensitivityAnalysisProviderTest {
         };
         Network gpuNetwork = ieee14WithACondenserAtItsLimit();
         Network cpuNetwork = ieee14WithACondenserAtItsLimit();
-        Map<List<Integer>, SensitivityValue> gpu = byFactorAndContingency(run(NAME, gpuNetwork, factors(gpuNetwork), tight.get()));
-        Map<List<Integer>, SensitivityValue> cpu = byFactorAndContingency(run("OpenLoadFlow", cpuNetwork, factors(cpuNetwork),
-                tight.get()));
+        SensitivityAnalysisResult gpuResult = run(NAME, gpuNetwork, factors(gpuNetwork), tight.get());
+        SensitivityAnalysisResult cpuResult = run("OpenLoadFlow", cpuNetwork, factors(cpuNetwork), tight.get());
+        // L1-2-1's load flow fails in OLF (FAILURE, no values), L2-3-1's converges: the device must say the same
+        List<SensitivityAnalysisResult.Status> statuses = cpuResult.getStateStatuses().stream()
+                .map(SensitivityAnalysisResult.SensitivityStateStatus::getStatus).toList();
+        assertEquals(statuses, gpuResult.getStateStatuses().stream().map(SensitivityAnalysisResult.SensitivityStateStatus::getStatus).toList());
+        long solvedContingencies = statuses.stream().filter(status -> status == SensitivityAnalysisResult.Status.SUCCESS).count();
+        assertTrue(solvedContingencies > 0, "a contingency's sensitivities are compared");
+        Map<List<Integer>, SensitivityValue> gpu = byFactorAndContingency(gpuResult);
+        Map<List<Integer>, SensitivityValue> cpu = byFactorAndContingency(cpuResult);
         assertEquals(cpu.keySet(), gpu.keySet());
-        assertEquals(factors(cpuNetwork).size() * (1 + contingencies().size()), cpu.size(), "every factor in every state");
+        assertEquals(factors(cpuNetwork).size() * (1 + solvedContingencies), cpu.size(), "every factor in every state OLF solved");
         List<SensitivityFactor> factors = factors(cpuNetwork);
         for (Map.Entry<List<Integer>, SensitivityValue> entry : cpu.entrySet()) {
             SensitivityValue c = entry.getValue();
             SensitivityValue g = gpu.get(entry.getKey());
-            assertEquals(c.getValue(), g.getValue(), 1e-6 * (1 + Math.abs(c.getValue())), "sensitivity " + entry.getKey());
-            assertEquals(c.getFunctionReference(), g.getFunctionReference(), 1e-4 * (1 + Math.abs(c.getFunctionReference())),
-                    "function reference " + entry.getKey());
+            assertClose(c.getValue(), g.getValue(), 1e-6, "sensitivity " + entry.getKey());
+            assertClose(c.getFunctionReference(), g.getFunctionReference(), 1e-4, "function reference " + entry.getKey());
             if (factors.get(c.getFactorIndex()).getVariableId().equals("B8-G")) {
                 assertEquals(0.0, c.getValue(), 0.0, "the condenser of bus 8 is PQ: " + entry.getKey());
                 assertEquals(0.0, g.getValue(), 0.0, "the condenser of bus 8 is PQ on the device too: " + entry.getKey());
             }
+        }
+    }
+
+    /** {@code actual} within {@code tolerance} of {@code expected}, relative beyond 1; NaN where OLF gives NaN. */
+    private static void assertClose(double expected, double actual, double tolerance, String what) {
+        if (Double.isNaN(expected)) {
+            assertTrue(Double.isNaN(actual), what + ": NaN expected, was " + actual);
+        } else {
+            assertEquals(expected, actual, tolerance * (1 + Math.abs(expected)), what);
         }
     }
 }

@@ -231,11 +231,23 @@ class DcWoodburyBaselineProbe {
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setSecurityAnalysisParameters(sap)
                 .setMonitors(monitors);
+        // OLF_DC_CHECK_TARGETS=1: the device-built modified targets checked bit for bit against the host's
+        boolean checkTargets = gpuProvider && "1".equals(System.getenv("OLF_DC_CHECK_TARGETS"));
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(checkTargets);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
         long t0 = System.nanoTime();
         SecurityAnalysisResult result = provider.run(network, network.getVariantManager().getWorkingVariantId(),
                         n -> contingencies, runParameters)
                 .join().getResult();
         long wallMs = (System.nanoTime() - t0) / 1_000_000;
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
+        if (gpuProvider) {
+            System.out.printf("DC-BASELINE device-built modified targets: %d%s%n",
+                    com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get(),
+                    checkTargets ? " | values differing from the host build: "
+                            + com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get() : "");
+        }
         return new Arm(name, result, wallMs);
     }
 

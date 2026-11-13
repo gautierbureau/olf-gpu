@@ -327,6 +327,57 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertAllOnDevice(cpu);
     }
 
+    /**
+     * The modified target columns built on the device are the host's bit for bit, on every network and
+     * parameter set that builds them: lost generators and loads, islanding outages, busbar sections, VSC
+     * stations left without power, two slack buses, every generation balance type, the slack distributed
+     * or not, and IEEE 118's 150-odd generator and load outages (columns past the first thread block). The
+     * host reference is the exact replay of the stock column. Then the results match the stock as everywhere else.
+     */
+    @Test
+    void deviceTargetsAreTheHostOnesBitForBit() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(true);
+        GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
+        try {
+            List<java.util.function.Supplier<Network>> networks = List.of(
+                    IeeeCdfNetworkFactory::create14,
+                    IeeeCdfNetworkFactory::create118,               // more than 64 columns in a chunk: every thread block
+                    com.powsybl.openloadflow.network.NodeBreakerNetworkFactory::create,
+                    com.powsybl.openloadflow.network.HvdcNetworkFactory::createTwoCcLinkedByAHvdcVscWithGenerators,
+                    com.powsybl.openloadflow.network.PhaseControlFactory::createWithOneT2wtTwoLines);
+            for (java.util.function.Supplier<Network> factory : networks) {
+                for (LoadFlowParameters.BalanceType balanceType : List.of(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX,
+                        LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P,
+                        LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_REMAINING_MARGIN)) {
+                    for (int variant = 0; variant < 3; variant++) {
+                        Network network = factory.get();
+                        addActivePowerLimits(network, 0.9);
+                        List<Contingency> contingencies = new ArrayList<>(allElements(network));
+                        network.getBusbarSectionStream().forEach(b -> contingencies.add(new Contingency(b.getId(),
+                                new com.powsybl.contingency.BusbarSectionContingency(b.getId()))));
+                        network.getHvdcLineStream().forEach(h -> contingencies.add(new Contingency(h.getId(),
+                                new com.powsybl.contingency.HvdcLineContingency(h.getId()))));
+                        SecurityAnalysisParameters sap = dcFastParameters();
+                        sap.getLoadFlowParameters().setBalanceType(balanceType).setDistributedSlack(variant != 1);
+                        if (variant == 2) {
+                            com.powsybl.openloadflow.OpenLoadFlowParameters.create(sap.getLoadFlowParameters()).setMaxSlackBusCount(2);
+                        }
+                        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network), sap);
+                        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network), sap);
+                        assertSameResults(cpu, gpu);
+                    }
+                }
+            }
+        } finally {
+            GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
+        }
+        assertTrue(GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get() > 100,
+                "the device must have built the columns: " + GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get());
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get(), "device target values differing from the host's");
+    }
+
     private SecurityAnalysisResult runStockWithStrategies(Network network, List<Contingency> contingencies, List<StateMonitor> monitors,
                                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies, List<com.powsybl.action.Action> actions) {
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());

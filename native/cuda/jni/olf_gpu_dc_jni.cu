@@ -187,6 +187,8 @@ struct DcContext {
     int nGen = 0;
     Buf genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, genPart;
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
+    Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
+    Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
     // --- DC sensitivity (GpuDcSensitivityContext): the factor and flow states live here and never
@@ -550,14 +552,10 @@ __global__ void scMismatches(int nSc, const int* scBusPtr, const int* scBusList,
 /** DcTargetVector.init, one thread per equation column: the base by kind (bus targetP with the
  *  multi-slack share, the phase shifter's a1, A2 - a1, or 0) minus the sequential sum of the active
  *  terms' rhs (-p (A2 - a1fixed) / +p (A2 - a1fixed) for the branch terms, ±p0 for HVDC). */
-__global__ void fillTarget(int n, const int* tKind, const int* tElem, const int* rhsPtr, const int* rhsKind, const int* rhsElem,
-                           const double* rhsCoef, const double* genP, const double* loadP, const int* busFlags, const int* busSc,
-                           const int* scSlackCount, const double* scMismatch, const double* a1Const, const int* a1Row,
-                           const double* power, double* t) {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= n) {
-        return;
-    }
+__device__ inline double targetValue(int c, const int* tKind, const int* tElem, const int* rhsPtr, const int* rhsKind, const int* rhsElem,
+                                     const double* rhsCoef, const double* genP, const double* loadP, const int* busFlags, const int* busSc,
+                                     const int* scSlackCount, const double* scMismatch, const double* a1Const, const int* a1Row,
+                                     const double* power) {
     double base;
     switch (tKind[c]) {
         case TARGET_BUS_P: {
@@ -588,7 +586,19 @@ __global__ void fillTarget(int n, const int* tKind, const int* tElem, const int*
             rhs = __dadd_rn(rhs, rhsCoef[r]);
         }
     }
-    t[c] = __dadd_rn(base, -rhs);
+    return __dadd_rn(base, -rhs);
+}
+
+__global__ void fillTarget(int n, const int* tKind, const int* tElem, const int* rhsPtr, const int* rhsKind, const int* rhsElem,
+                           const double* rhsCoef, const double* genP, const double* loadP, const int* busFlags, const int* busSc,
+                           const int* scSlackCount, const double* scMismatch, const double* a1Const, const int* a1Row,
+                           const double* power, double* t) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n) {
+        return;
+    }
+    t[c] = targetValue(c, tKind, tElem, rhsPtr, rhsKind, rhsElem, rhsCoef, genP, loadP, busFlags, busSc, scSlackCount, scMismatch,
+                       a1Const, a1Row, power);
 }
 
 /** DcLoadFlowEngine.getActivePowerMismatch(buses): -sum over the enabled, non-excluded buses in
@@ -690,14 +700,11 @@ __device__ inline bool stepParticipating(int type, int participating, double dro
  * water-filling loop with the JDK's compensated norm, normalized factors, sign-preserving limits and
  * iterator removal. Writes out[0] = remaining mismatch, out[1] = iterations.
  */
-__global__ void distributeSlack(int nBuses, const int* busFlags, const int* excluded, const int* busGenStart,
-                                const double* genInit, double* genTarget, const double* genMinT, const double* genMaxT,
-                                const double* genMinP, const double* genMaxP, const double* genDroop, const double* genPf,
-                                const int* genPart, int refGen, int type, int useActiveLimits, double mismatch,
-                                int* elements, double* factors, double* out) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) {
-        return;
-    }
+__device__ void distributeSlackSequential(int nBuses, const int* busFlags, const int* excluded, const int* busGenStart,
+                                          const double* genInit, double* genTarget, const double* genMinT, const double* genMaxT,
+                                          const double* genMinP, const double* genMaxP, const double* genDroop, const double* genPf,
+                                          const int* genPart, int refGen, int type, int useActiveLimits, double mismatch,
+                                          int* elements, double* factors, double* out) {
     // Step.resetToInitialState: the reference generator first (the interface default), then the
     // generation step's own loop over every participating generator of a participating bus, in bus
     // order — two separately accumulated amounts, added at the end, then added to the mismatch
@@ -790,6 +797,164 @@ __global__ void distributeSlack(int nBuses, const int* busFlags, const int* excl
     }
     out[0] = remaining;
     out[1] = (double) iteration;
+}
+
+__global__ void distributeSlack(int nBuses, const int* busFlags, const int* excluded, const int* busGenStart,
+                                const double* genInit, double* genTarget, const double* genMinT, const double* genMaxT,
+                                const double* genMinP, const double* genMaxP, const double* genDroop, const double* genPf,
+                                const int* genPart, int refGen, int type, int useActiveLimits, double mismatch,
+                                int* elements, double* factors, double* out) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+    distributeSlackSequential(nBuses, busFlags, excluded, busGenStart, genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop,
+                              genPf, genPart, refGen, type, useActiveLimits, mismatch, elements, factors, out);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The modified target columns of a Woodbury chunk, one per contingency that changes the injections
+// (WoodburyEngine.runDcLoadFlowWithModifiedTargetVector after the security analysis' lost-power
+// handling): each column takes its own copy of the base generator and load tables, applies its
+// contingency's changes, distributes the slack over the buses that remain and re-reads the target
+// vector, exactly as the stock does on the mutated network - with the same device functions the
+// DC load flow uses, so the arithmetic is OLF's operation for operation.
+// ---------------------------------------------------------------------------------------------
+
+/** Per-column workspace of a modified-target build, carved from one device buffer. */
+struct CtgTargetWork {
+    double* genTarget;   // nGen per column
+    double* genInit;     // nGen
+    double* factors;     // nGen
+    double* genP;        // nBuses
+    double* loadP;       // nBuses
+    double* scMismatch;  // nSc (>= 1)
+    int* genPart;        // nGen
+    int* elements;       // nGen
+    int* excluded;       // nBuses
+};
+
+/**
+ * One thread per column: the column's generator and load tables from the base, then its contingency's
+ * changes in processLostPowerChanges' order (lost loads: the bus load total given; lost generators:
+ * target, initial target and participation to zero; HVDC stations left without power: target to zero),
+ * then DcLoadFlowEngine.distributeSlack over the remaining buses when the slack is distributed, then the
+ * per-bus generation and the components' mismatches the target vector reads.
+ */
+__global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const int* busFlags, const int* busGenStart,
+                                  const double* baseLoadP, const double* baseInit, const double* baseTarget, const int* basePart,
+                                  const double* genMinT, const double* genMaxT, const double* genMinP, const double* genMaxP,
+                                  const double* genDroop, const double* genPf, const int* scBusPtr, const int* scBusList,
+                                  const int* exPtr, const int* exBus, const int* ldPtr, const int* ldBus, const double* ldVal,
+                                  const int* lgPtr, const int* lgGen, const int* hzPtr, const int* hzGen,
+                                  int distributed, int refGen, int type, int useActiveLimits,
+                                  double* wsDouble, int* wsInt, double* dsOut) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= cols) {
+        return;
+    }
+    int scWidth = nSc > 0 ? nSc : 1;
+    size_t dStride = (size_t) 3 * nGen + 2 * (size_t) nBuses + scWidth;
+    size_t iStride = (size_t) 2 * nGen + nBuses;
+    CtgTargetWork w;
+    double* d = wsDouble + (size_t) j * dStride;
+    int* i = wsInt + (size_t) j * iStride;
+    w.genTarget = d;
+    w.genInit = d + nGen;
+    w.factors = d + 2 * (size_t) nGen;
+    w.genP = d + 3 * (size_t) nGen;
+    w.loadP = w.genP + nBuses;
+    w.scMismatch = w.loadP + nBuses;
+    w.genPart = i;
+    w.elements = i + nGen;
+    w.excluded = i + 2 * (size_t) nGen;
+
+    for (int g = 0; g < nGen; g++) {
+        w.genTarget[g] = baseTarget[g];
+        w.genInit[g] = baseInit[g];
+        w.genPart[g] = basePart[g];
+    }
+    for (int b = 0; b < nBuses; b++) {
+        w.loadP[b] = baseLoadP[b];
+        w.excluded[b] = 0;
+    }
+    for (int k = exPtr[j]; k < exPtr[j + 1]; k++) {
+        w.excluded[exBus[k]] = 1;
+    }
+    for (int k = ldPtr[j]; k < ldPtr[j + 1]; k++) {
+        w.loadP[ldBus[k]] = ldVal[k];
+    }
+    for (int k = lgPtr[j]; k < lgPtr[j + 1]; k++) {
+        int g = lgGen[k];
+        w.genTarget[g] = 0.0;
+        w.genInit[g] = 0.0;
+        w.genPart[g] = 0;
+    }
+    for (int k = hzPtr[j]; k < hzPtr[j + 1]; k++) {
+        w.genTarget[hzGen[k]] = 0.0;
+    }
+    if (distributed) {
+        // DcLoadFlowEngine.getActivePowerMismatch(remainingBuses): the enabled remaining buses in bus order
+        double sum = 0.0;
+        for (int b = 0; b < nBuses; b++) {
+            double s = 0.0;
+            for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+                s = __dadd_rn(s, w.genTarget[g]);
+            }
+            if ((busFlags[b] & BUS_DISABLED) == 0 && !w.excluded[b]) {
+                sum = __dadd_rn(sum, __dadd_rn(s, -w.loadP[b]));
+            }
+        }
+        distributeSlackSequential(nBuses, busFlags, w.excluded, busGenStart, w.genInit, w.genTarget, genMinT, genMaxT, genMinP, genMaxP,
+                                  genDroop, genPf, w.genPart, refGen, type, useActiveLimits, -sum, w.elements, w.factors, dsOut + 2 * (size_t) j);
+    }
+    // the target vector's inputs, re-read from the changed tables (AbstractLfBus.getGenerationTargetP)
+    for (int b = 0; b < nBuses; b++) {
+        double s = 0.0;
+        for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+            s = __dadd_rn(s, w.genTarget[g]);
+        }
+        w.genP[b] = s;
+    }
+    for (int sc = 0; sc < nSc; sc++) {
+        double sum = 0.0;
+        for (int k = scBusPtr[sc]; k < scBusPtr[sc + 1]; k++) {
+            int b = scBusList[k];
+            if ((busFlags[b] & BUS_DISABLED) == 0) {
+                sum = __dadd_rn(sum, __dadd_rn(w.genP[b], -w.loadP[b]));
+            }
+        }
+        w.scMismatch[sc] = -sum;
+    }
+}
+
+/** DcTargetVector.init of every column from its own tables, then the rows the stock zeroes. */
+__global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, const int* tKind, const int* tElem, const int* rhsPtr,
+                               const int* rhsKind, const int* rhsElem, const double* rhsCoef, const int* busFlags, const int* busSc,
+                               const int* scSlackCount, const double* a1Const, const int* a1Row, const double* power,
+                               const double* wsDouble, double* out) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) n * cols) {
+        return;
+    }
+    int j = (int) (t / n);
+    int c = (int) (t % n);
+    int scWidth = nSc > 0 ? nSc : 1;
+    size_t dStride = (size_t) 3 * nGen + 2 * (size_t) nBuses + scWidth;
+    const double* genP = wsDouble + (size_t) j * dStride + 3 * (size_t) nGen;
+    const double* loadP = genP + nBuses;
+    const double* scMismatch = loadP + nBuses;
+    out[(size_t) j * n + c] = targetValue(c, tKind, tElem, rhsPtr, rhsKind, rhsElem, rhsCoef, genP, loadP, busFlags, busSc, scSlackCount,
+                                          scMismatch, a1Const, a1Row, power);
+}
+
+__global__ void ctgZeroRows(int n, int cols, const int* zrPtr, const int* zrCol, double* out) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= cols) {
+        return;
+    }
+    for (int k = zrPtr[j]; k < zrPtr[j + 1]; k++) {
+        out[(size_t) j * n + zrCol[k]] = 0.0;
+    }
 }
 
 
@@ -1534,6 +1699,114 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setChunkTargets(JNIEnv* env, jc
     }
 }
 
+namespace {
+/** A CSR list of the chunk: ptr (cols + 1) and its entries, into device buffers. */
+void uploadCsr(JNIEnv* env, Buf& ptrBuf, Buf& valBuf, jintArray jPtr, jintArray jVal, int cols, const char* name) {
+    IntArray ptr(env, jPtr);
+    IntArray val(env, jVal);
+    if (ptr.len != cols + 1 || ptr.p[cols] != val.len) {
+        throw std::runtime_error(std::string(name) + ": malformed list");
+    }
+    ptrBuf.uploadInto(ptr.p, (size_t) ptr.len * sizeof(int));
+    valBuf.uploadInto(val.p, (size_t) std::max<jsize>(val.len, 1) * sizeof(int));
+}
+}  // namespace
+
+/**
+ * The chunk's modified target columns built ON THE DEVICE (ctgTargetsPrepare + ctgFillTargets +
+ * ctgZeroRows), then solved into the Woodbury bases exactly as setChunkTargets solves host-built ones.
+ * jOutTargets, when non-null, receives the built targets (n x nBases, column-major): the bitwise check
+ * against the host build.
+ */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, jclass, jlong handle, jint nBases,
+                                                                   jintArray jExPtr, jintArray jExBus, jintArray jLdPtr, jintArray jLdBus,
+                                                                   jdoubleArray jLdVal, jintArray jLgPtr, jintArray jLgGen,
+                                                                   jintArray jHzPtr, jintArray jHzGen, jintArray jZrPtr, jintArray jZrCol,
+                                                                   jboolean distributed, jint participationType, jboolean useActiveLimits,
+                                                                   jint referenceGenerator, jdoubleArray jOutTargets) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        ctx->nBases = nBases;
+        if (nBases == 0) {
+            return;
+        }
+        requireBusesAndGenerators(ctx);
+        if (ctx->power.p == nullptr) {
+            throw std::runtime_error("branches not set (setBranches)");
+        }
+        if (distributed && participationType < 0) {
+            throw std::runtime_error("no device model for this balance type");
+        }
+        int n = ctx->n;
+        int cols = nBases;
+        uploadCsr(env, ctx->ctExPtr, ctx->ctExBus, jExPtr, jExBus, cols, "excluded buses");
+        uploadCsr(env, ctx->ctLdPtr, ctx->ctLdBus, jLdPtr, jLdBus, cols, "bus loads");
+        {
+            DoubleArray ldVal(env, jLdVal);
+            ctx->ctLdVal.uploadInto(ldVal.p, (size_t) std::max<jsize>(ldVal.len, 1) * sizeof(double));
+        }
+        uploadCsr(env, ctx->ctLgPtr, ctx->ctLgGen, jLgPtr, jLgGen, cols, "lost generators");
+        uploadCsr(env, ctx->ctHzPtr, ctx->ctHzGen, jHzPtr, jHzGen, cols, "HVDC stations");
+        uploadCsr(env, ctx->ctZrPtr, ctx->ctZrCol, jZrPtr, jZrCol, cols, "zeroed rows");
+        int scWidth = ctx->nSc > 0 ? ctx->nSc : 1;
+        size_t dStride = (size_t) 3 * ctx->nGen + 2 * (size_t) ctx->nBuses + scWidth;
+        size_t iStride = (size_t) 2 * ctx->nGen + ctx->nBuses;
+        ctx->ctWsDouble.ensure(dStride * cols * sizeof(double));
+        ctx->ctWsInt.ensure(std::max<size_t>(iStride * cols, 1) * sizeof(int));
+        ctx->ctDsOut.ensure((size_t) 2 * cols * sizeof(double));
+        ctx->ctTargets.ensure((size_t) n * cols * sizeof(double));
+        double t0 = 0;
+        if (dcTiming()) {
+            DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            t0 = dcNowMs();
+        }
+        ctgTargetsPrepare<<<grid(cols), BLOCK, 0, ctx->stream>>>(cols, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
+                ctx->busGenStart.as<int>(), ctx->busLoadP.as<double>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(),
+                ctx->genPart.as<int>(), ctx->genMinT.as<double>(), ctx->genMaxT.as<double>(), ctx->genMinP.as<double>(),
+                ctx->genMaxP.as<double>(), ctx->genDroop.as<double>(), ctx->genPf.as<double>(),
+                ctx->nSc > 0 ? ctx->scBusPtr.as<int>() : nullptr, ctx->nSc > 0 ? ctx->scBusList.as<int>() : nullptr,
+                ctx->ctExPtr.as<int>(), ctx->ctExBus.as<int>(), ctx->ctLdPtr.as<int>(), ctx->ctLdBus.as<int>(), ctx->ctLdVal.as<double>(),
+                ctx->ctLgPtr.as<int>(), ctx->ctLgGen.as<int>(), ctx->ctHzPtr.as<int>(), ctx->ctHzGen.as<int>(),
+                distributed ? 1 : 0, referenceGenerator, participationType, useActiveLimits ? 1 : 0,
+                ctx->ctWsDouble.as<double>(), ctx->ctWsInt.as<int>(), ctx->ctDsOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        ctgFillTargets<<<grid((long) n * cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->nBuses, ctx->nGen, ctx->nSc,
+                ctx->targetKind.as<int>(), ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(), ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(),
+                ctx->rhsCoef.as<double>(), ctx->busFlags.as<int>(), ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(),
+                ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->ctWsDouble.as<double>(),
+                ctx->ctTargets.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctTargets.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        if (dcTiming()) {
+            DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            std::fprintf(stderr, "DC_TIMING modified targets cols=%d %.2f ms\n", cols, dcNowMs() - t0);
+        }
+        if (jOutTargets != nullptr) {
+            if (env->GetArrayLength(jOutTargets) < (jsize) ((size_t) n * cols)) {
+                throw std::runtime_error("outTargets too small");
+            }
+            std::vector<double> host((size_t) n * cols);
+            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->ctTargets.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            env->SetDoubleArrayRegion(jOutTargets, 0, (jsize) host.size(), host.data());
+        }
+        ctx->bases.ensure((size_t) n * cols * sizeof(double));
+        for (int col0 = 0; col0 < cols; col0 += S_SOLVE_COLS) {
+            int c = std::min(S_SOLVE_COLS, cols - col0);
+            ctx->ensureRhs(c);
+            DC_CUDA_CHECK(cudaMemcpyAsync(ctx->b.p, ctx->ctTargets.as<double>() + (size_t) col0 * n, (size_t) n * c * sizeof(double),
+                                          cudaMemcpyDeviceToDevice, ctx->stream));
+            ctx->solveDense(c);
+            DC_CUDA_CHECK(cudaMemcpyAsync(ctx->bases.as<double>() + (size_t) col0 * n, ctx->x.p, (size_t) n * c * sizeof(double),
+                                          cudaMemcpyDeviceToDevice, ctx->stream));
+        }
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.buildChunkTargets: ") + e.what());
+    }
+}
+
 /**
  * One chunk of contingencies: alphas, states, flows, screen. Writes the n x nCtg post-contingency
  * states (column-major) into outStates and returns [counts(nCtg) | records(nCtg x capacity)]; a
@@ -1842,6 +2115,23 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setGeneratorTargets(JNIEnv* env
         }
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.setGeneratorTargets: ") + e.what());
+    }
+}
+
+/** The generators' INITIAL target P (NetworkState.save re-anchors them to the base dispatch before the contingencies). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setGeneratorInitialTargets(JNIEnv* env, jclass, jlong handle, jdoubleArray jInit) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray init(env, jInit);
+        if (init.len != ctx->nGen) {
+            throw std::runtime_error("initial target length must be the generator count");
+        }
+        if (ctx->nGen > 0) {
+            DC_CUDA_CHECK(cudaMemcpy(ctx->genInit.p, init.p, (size_t) ctx->nGen * sizeof(double), cudaMemcpyHostToDevice));
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setGeneratorInitialTargets: ") + e.what());
     }
 }
 

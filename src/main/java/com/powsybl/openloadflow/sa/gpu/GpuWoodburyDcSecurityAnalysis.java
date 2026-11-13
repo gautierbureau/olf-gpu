@@ -243,7 +243,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             Map<LfAction, List<ComputedElement>> actionElementsByLfAction =
                     ComputedElement.createActionElementsIndexByLfAction(lfActionById, equationSystem, creationParameters);
             List<ComputedElement> actionElements = actionElementsByLfAction.values().stream().flatMap(Collection::stream).toList();
-            StrategySetup strategySetup = new StrategySetup(operatorStrategiesByContingencyId, lfActionById, actionElementsByLfAction);
+            StrategySetup strategySetup = new StrategySetup(operatorStrategiesByContingencyId, lfActionById, actionElementsByLfAction,
+                    dcParameters.getNetworkParameters().isSimulateAutomationSystems() ? null : loadedOpen(lfNetwork, actions));
 
             // the device: branch model, S — before anything else needs S
             long tFactor = System.nanoTime();
@@ -358,9 +359,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** The stock's operator-strategy indexes and the action elements' S columns. */
+    /** {@code loadedOpen}: the branches loaded closed for an action to close them, then taken out of the connectivity
+     *  graph (Networks.restoreInitialTopology); null when unknown (automation systems add their own). */
     private record StrategySetup(Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
                                  Map<String, LfAction> lfActionById,
-                                 Map<LfAction, List<ComputedElement>> actionElementsByLfAction) {
+                                 Map<LfAction, List<ComputedElement>> actionElementsByLfAction,
+                                 Set<LfBranch> loadedOpen) {
         boolean any() {
             return !operatorStrategiesByContingencyId.isEmpty();
         }
@@ -665,6 +669,118 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * re-tapped transformer need its new model), and restored.
      */
     /**
+     * The branches the network may have been loaded with closed so that an action can close them, then removed from the
+     * connectivity graph (Actions.addAllSwitchesToOperate / addAllBranchesToClose, Networks.restoreInitialTopology): every
+     * branch a declared action closes. The network's state cannot tell (the loading variant has them closed); taking a
+     * closed one too only removes an edge from the search, which can fail a proof, never make one.
+     */
+    private static Set<LfBranch> loadedOpen(LfNetwork lfNetwork, List<Action> actions) {
+        Set<LfBranch> loadedOpen = new HashSet<>();
+        for (Action action : actions) {
+            String id = null;
+            if (action instanceof com.powsybl.action.SwitchAction switchAction && !switchAction.isOpen()) {
+                id = switchAction.getSwitchId();
+            } else if (action instanceof com.powsybl.action.TerminalsConnectionAction connection && !connection.isOpen()) {
+                id = connection.getElementId();
+            }
+            LfBranch lfBranch = id != null ? lfNetwork.getBranchById(id) : null;
+            if (lfBranch != null) {
+                loadedOpen.add(lfBranch);
+            }
+        }
+        return loadedOpen;
+    }
+
+    /** The search budget of {@link #provablyConnected}, in buses visited per removed edge: beyond, OLF's graph check decides. */
+    private static final int CONNECTED_SEARCH_LIMIT = 4096;
+
+    /**
+     * Whether the contingency and the strategy's actions provably leave every bus of the main component in it: in the
+     * connectivity graph after them (OLF's: every branch connected at both sides but the closable ones loaded open,
+     * without the contingency's branches and those the actions open, with those they close), the two ends of every
+     * removed edge still meet (a bounded search from both ends), and every closed branch joins buses live in the base
+     * case (no dead part re-energized). Exact when true; false only means unproven.
+     */
+    private static boolean provablyConnected(LfNetwork lfNetwork, PropagatedContingency contingency, LfOperatorStrategy los, StrategySetup strategySetup) {
+        if (strategySetup.loadedOpen() == null) {
+            return false;
+        }
+        Set<LfBranch> removed = new HashSet<>();
+        Set<LfBranch> added = new HashSet<>();
+        for (String id : contingency.getBranchIdsToOpen().keySet()) {
+            LfBranch branch = lfNetwork.getBranchById(id);
+            if (branch != null && branch.getBus1() != null && branch.getBus2() != null) {
+                removed.add(branch);
+            }
+        }
+        for (LfAction action : los.getActions()) {
+            List<ComputedElement> elements = strategySetup.actionElementsByLfAction().get(action);
+            if (elements == null) {
+                continue;
+            }
+            for (ComputedElement element : elements) {
+                if (element instanceof ComputedSwitchBranchElement sw && sw.getLfBranch().getBus1() != null && sw.getLfBranch().getBus2() != null) {
+                    if (sw.isEnabled()) {
+                        if (sw.getLfBranch().getBus1().isDisabled() || sw.getLfBranch().getBus2().isDisabled()) {
+                            return false;
+                        }
+                        added.add(sw.getLfBranch());
+                        removed.remove(sw.getLfBranch());
+                    } else {
+                        removed.add(sw.getLfBranch());
+                        added.remove(sw.getLfBranch());
+                    }
+                }
+            }
+        }
+        Set<LfBranch> loadedOpen = strategySetup.loadedOpen();
+        java.util.function.Predicate<LfBranch> isEdge = b -> b.getBus1() != null && b.getBus2() != null && !removed.contains(b)
+                && (added.contains(b) || !loadedOpen.contains(b));
+        for (LfBranch edge : removed) {
+            if (!meet(edge.getBus1(), edge.getBus2(), isEdge)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A bidirectional breadth-first search between two buses, alternating sides, within {@link #CONNECTED_SEARCH_LIMIT}. */
+    private static boolean meet(LfBus a, LfBus b, java.util.function.Predicate<LfBranch> isEdge) {
+        if (a == b) {
+            return true;
+        }
+        Map<LfBus, Boolean> side = new HashMap<>();          // true: reached from a
+        ArrayDeque<LfBus> fromA = new ArrayDeque<>(List.of(a));
+        ArrayDeque<LfBus> fromB = new ArrayDeque<>(List.of(b));
+        side.put(a, true);
+        side.put(b, false);
+        int visited = 2;
+        while (!fromA.isEmpty() && !fromB.isEmpty() && visited < CONNECTED_SEARCH_LIMIT) {
+            boolean expandA = fromA.size() <= fromB.size();
+            ArrayDeque<LfBus> queue = expandA ? fromA : fromB;
+            int levelSize = queue.size();
+            for (int k = 0; k < levelSize; k++) {
+                LfBus bus = queue.poll();
+                for (LfBranch branch : bus.getBranches()) {
+                    if (!isEdge.test(branch)) {
+                        continue;
+                    }
+                    LfBus other = branch.getBus1() == bus ? branch.getBus2() : branch.getBus1();
+                    Boolean seen = side.get(other);
+                    if (seen == null) {
+                        side.put(other, expandA);
+                        queue.add(other);
+                        visited++;
+                    } else if (seen != expandA) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Each strategy's connectivity (the contingency's when its actions cannot change it, OLF's graph check otherwise,
      * counted in {@code graphChecks}), its LfContingency and its Woodbury elements.
      */
@@ -682,6 +798,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             if (!topological || maxSum[i] <= 1d - CONNECTIVITY_LOSS_THRESHOLD) {
                 connectivity = postContingency.withOperatorStrategy(los);
                 strategyContingency = sc.candidate().lfContingency();    // the same disabled elements: the contingency's
+            } else if (provablyConnected(lfNetwork, postContingency.getPropagatedContingency(), los, strategySetup)) {
+                // every removed edge's ends still meet: nothing leaves the main component, which OLF's graph check
+                // would conclude (it is the costly part on a network with every breaker retained)
+                connectivity = ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
+                        postContingency.getPropagatedContingency(), los, lfNetwork);
+                strategyContingency = sc.candidate().lfContingency();
             } else {
                 graphChecks[0]++;
                 Optional<ConnectivityBreakAnalysis.ConnectivityAnalysisResult> breaking = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(
@@ -874,17 +996,17 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 // and what applying disables on the network: the branches out of the main component, those the actions open
                 Set<LfBranch> disabledBranches = new HashSet<>();
                 sc.connectivity().getPropagatedContingency().getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
-                disabledBranches.addAll(sc.connectivity().getPartialDisabledBranches());
-                // PropagatedContingency.toLfContingency's disabled network: every branch of a bus out of the main component
-                for (LfBus bus : sc.connectivity().getDisabledBuses()) {
-                    disabledBranches.addAll(bus.getBranches());
-                }
                 for (LfAction action : lfActions) {
                     if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
                         disabledBranches.addAll(branchAction.getDisabledBranches());
                     }
                 }
-                Predicate<LfBranch> isBranchDisabled = disabledBranches::contains;
+                // and PropagatedContingency.toLfContingency's disabled network: every branch of a bus out of the main
+                // component (tested on the buses, not copied: with every breaker retained, those sets are large)
+                Set<LfBranch> partialDisabled = sc.connectivity().getPartialDisabledBranches();
+                Set<LfBus> lostBuses = sc.connectivity().getDisabledBuses();
+                Predicate<LfBranch> isBranchDisabled = lostBuses.isEmpty() && partialDisabled.isEmpty() ? disabledBranches::contains
+                        : b -> disabledBranches.contains(b) || partialDisabled.contains(b) || lostBuses.contains(b.getBus1()) || lostBuses.contains(b.getBus2());
 
                 var violationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
                 if (emitted > CAPACITY) {
@@ -1712,8 +1834,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             }
             lostGenerator.addAll(gens);
             station.addAll(stations);
+            int[] pColumns = busPColumns(equationSystem, lfNetwork);
             for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
-                int column = pColumnOrMinusOne(equationSystem, bus);
+                int column = pColumns[bus.getNum()];
                 if (column >= 0) {
                     zeroRow.add(column);
                 }
@@ -1859,6 +1982,19 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         private static int[] ints(List<Integer> list) {
             return list.stream().mapToInt(Integer::intValue).toArray();
         }
+    }
+
+    /** Each bus's active P equation column, or -1: computed once per equation system (its index does not change in a run). */
+    private static final Map<EquationSystem<?, ?>, int[]> BUS_P_COLUMNS = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static int[] busPColumns(EquationSystem<DcVariableType, DcEquationType> equationSystem, LfNetwork lfNetwork) {
+        return BUS_P_COLUMNS.computeIfAbsent(equationSystem, es -> {
+            int[] columns = new int[lfNetwork.getBuses().size()];
+            for (LfBus bus : lfNetwork.getBuses()) {
+                columns[bus.getNum()] = pColumnOrMinusOne(equationSystem, bus);
+            }
+            return columns;
+        });
     }
 
     private static int pColumnOrMinusOne(EquationSystem<DcVariableType, DcEquationType> equationSystem, LfBus bus) {

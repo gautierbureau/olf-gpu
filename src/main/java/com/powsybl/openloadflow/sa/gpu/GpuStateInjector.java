@@ -11,6 +11,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -51,12 +52,33 @@ final class GpuStateInjector {
      *
      * <p>Owned by the partition's RunState, never static: partitions run concurrently on their own
      * equation systems, and a shared cache would hand one partition another's permutation.
+     *
+     * <p>Kept up to date from the index's published delta rather than rebuilt: on network.xiidm's 14,266-contingency
+     * list the variable set changed for 9,464 of 12,726 injections, by 3.8 variables on average (a disabled bus's V
+     * and PHI), and each change paid a full rebuild - a two-pointer merge over all ~21k variables, a fresh row array,
+     * a fresh state array (about 2 GB of garbage a run), then a per-row gather. While the current list is the base
+     * minus a few rows ({@link #subsequence}), the absent base rows are all the mapping needs: the injection copies
+     * the segments between them. What the injection still costs is OLF's own index update for the same change.
      */
     static final class Remap {
         private List<Variable<AcVariableType>> vars;         // identity of the list the permutation was built from
-        private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base
-        private boolean identity;                            // no variable was removed: row == base row throughout
+        private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base (only when !subsequence)
         private double[] buf;                                // the state array handed to the equation system
+        /** The current list is exactly the base list without {@link #absentRows}: no variable the base lacks. */
+        private boolean subsequence;
+        /** The base rows absent from the current list, ascending, and their variables (first {@link #absentCount}). */
+        private int[] absentRows = new int[8];
+        @SuppressWarnings("unchecked")
+        private Variable<AcVariableType>[] absentVars = new Variable[8];
+        private int absentCount;
+        /** The index's variables-update generation the mapping matches, -1 before the first one. */
+        private long generation = -1;
+        /** State arrays by length: the list length only takes a few values (the base minus 2 per disabled bus), and the
+         *  equation system keeps the array it is handed only until the next injection sets another. */
+        private final Map<Integer, double[]> bufByLength = new java.util.HashMap<>();
+        /** How many mapping changes took the delta path and how many the full rebuild (read by the tests). */
+        int deltaUpdates;
+        int fullRebuilds;
         /** base row per (elementNum, variable type), -1 = absent — the run-constant base snapshot in
          *  dense form. Applying a contingency invalidates the equation system's variable index about
          *  half the time (measured: 943 rebuilds over 2000 branch outages on rte6515), so the rebuild
@@ -122,60 +144,151 @@ final class GpuStateInjector {
         // never solved, so rebuilding the equations-to-solve list here is wasted - the contingency's apply and the
         // restore invalidate it every time, and on network.xiidm that rebuild was ~2.3 s of the 8.3 s this call
         // spent inside OLF's index. The equation side stays lazy for the next solver that needs it.
-        List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFindOnly();
-        if (remap.vars != vars) {                            // identity: the variable set changed, rebuild
-            if (GpuTrace.PHASE_TIME.isOn()) {
-                GpuBatchedAcSecurityAnalysis.PHASE_NS.computeIfAbsent("    inject: remap rebuilds (count)",
-                        k -> new java.util.concurrent.atomic.LongAdder()).add(1_000_000);   // printed in "ms" = count
-            }
+        EquationSystemIndex<AcVariableType, AcEquationType> index = es.getIndex();
+        List<Variable<AcVariableType>> vars = index.getSortedVariablesToFindOnly();
+        if (remap.vars != vars) {                            // identity: the variable set changed
             if (remap.baseRowKeyed == null) {
                 remap.types = AcVariableType.values().length;
                 remap.baseRowKeyed = buildKeyedBaseRows(baseVariableRows, remap.types);
             }
-            int[] keyed = remap.baseRowKeyed;
-            int types = remap.types;
             if (remap.baseByRow == null) {
                 @SuppressWarnings("unchecked")
                 Variable<AcVariableType>[] byRow = new Variable[baseVariableRows.size()];
                 baseVariableRows.forEach((v, row) -> byRow[row] = v);
                 remap.baseByRow = byRow;
             }
-            int[] rows = mergeRows(vars, remap.baseByRow);
-            boolean identity;
-            if (rows != null) {
-                identity = rows.length == remap.baseByRow.length;   // a full-length subsequence is the base itself
-            } else {                                         // not a subsequence (a variable the base lacks): keyed walk
-                rows = new int[vars.size()];
-                for (Variable<AcVariableType> v : vars) {
-                    int key = v.getElementNum() * types + v.getType().ordinal();
-                    rows[v.getRow()] = key < keyed.length ? keyed[key] : -1;
-                }
-                identity = true;
-                for (int row = 0; row < rows.length && identity; row++) {
-                    identity = rows[row] == row;
-                }
+            long generation = index.getVariablesUpdateGeneration();
+            // the delta describes the change from the list the mapping was made on only when exactly one update ran
+            // since then, and an incremental one; anything else (a CPU replay's solve in between, a full rebuild)
+            // goes through the full merge
+            boolean delta = remap.subsequence && remap.generation >= 0 && generation == remap.generation + 1
+                    && index.isLastVariablesUpdateIncremental()
+                    && applyRemovedDelta(remap, index.getLastRemovedVariables(), vars.size());
+            if (delta) {
+                remap.deltaUpdates++;
+            } else {
+                rebuildFully(remap, vars);
+                remap.fullRebuilds++;
             }
-            remap.baseRowOf = rows;
-            remap.identity = identity;
-            remap.buf = new double[vars.size()];
+            if (GpuTrace.PHASE_TIME.isOn()) {
+                GpuBatchedAcSecurityAnalysis.PHASE_NS.computeIfAbsent(delta ? "    inject: remap delta updates (count)"
+                                : "    inject: remap full rebuilds (count)",
+                        k -> new java.util.concurrent.atomic.LongAdder()).add(1_000_000);   // printed in "ms" = count
+            }
+            remap.generation = generation;
+            remap.buf = remap.bufByLength.computeIfAbsent(vars.size(), double[]::new);
             remap.vars = vars;
         }
-        if (remap.identity) {                                // the common case: the outage islanded nothing,
-            System.arraycopy(deviceState, 0, remap.buf, 0, remap.buf.length);   // so the rows still line up
-            setValues(es, remap.buf, closedBranchNums);
-            return;
-        }
-        int[] baseRowOf = remap.baseRowOf;
         double[] mapped = remap.buf;
-        for (int row = 0; row < baseRowOf.length; row++) {
-            int baseRow = baseRowOf[row];
-            mapped[row] = baseRow >= 0 ? deviceState[baseRow] : 0;
+        if (remap.subsequence) {
+            // the current rows are the base rows without the absent ones, in the same order: copy the segments
+            // between them (one copy when nothing is absent, the outage islanded nothing)
+            int src = 0;
+            int dst = 0;
+            for (int k = 0; k < remap.absentCount; k++) {
+                int absentRow = remap.absentRows[k];
+                System.arraycopy(deviceState, src, mapped, dst, absentRow - src);
+                dst += absentRow - src;
+                src = absentRow + 1;
+            }
+            System.arraycopy(deviceState, src, mapped, dst, mapped.length - dst);
+        } else {
+            int[] baseRowOf = remap.baseRowOf;
+            for (int row = 0; row < baseRowOf.length; row++) {
+                int baseRow = baseRowOf[row];
+                mapped[row] = baseRow >= 0 ? deviceState[baseRow] : 0;
+            }
         }
         // VALUES ONLY: the injected state feeds result building (flows, currents, voltages) and never a
         // Jacobian — the next solve on this equation system starts with its own full state set. That
         // skips refreshing every branch's partial derivatives, which measured 993 ms of the 1119 ms
         // this notification cost over 2000 contingencies.
         setValues(es, mapped, closedBranchNums);
+    }
+
+    /** Brings the absent base rows up to date with one incremental index update, or returns false when the delta does
+     *  not describe the new list (the caller then rebuilds fully). A tracked variable that has a row again was re-added;
+     *  every variable the update removed is reported, and its base row joins the absent set. The tracked set is then
+     *  exact for the base variables, so the list is the base without it iff its size is the base's minus the set's - a
+     *  variable the base lacks (a strategy closing a coupler) makes the sizes differ. */
+    private static boolean applyRemovedDelta(Remap remap, List<Variable<AcVariableType>> removed, int listSize) {
+        int count = 0;
+        for (int k = 0; k < remap.absentCount; k++) {
+            if (remap.absentVars[k].getRow() < 0) {          // still absent: keep, in order
+                remap.absentVars[count] = remap.absentVars[k];
+                remap.absentRows[count++] = remap.absentRows[k];
+            }
+        }
+        for (Variable<AcVariableType> v : removed) {
+            int key = v.getElementNum() * remap.types + v.getType().ordinal();
+            int baseRow = key < remap.baseRowKeyed.length ? remap.baseRowKeyed[key] : -1;
+            if (baseRow < 0 || remap.baseByRow[baseRow] != v) {
+                remap.absentCount = 0;
+                return false;                                // not a base variable: the bookkeeping cannot follow
+            }
+            int pos = count;                                 // insertion into the ascending absent rows
+            while (pos > 0 && remap.absentRows[pos - 1] > baseRow) {
+                pos--;
+            }
+            if (pos > 0 && remap.absentRows[pos - 1] == baseRow) {
+                continue;                                    // already absent
+            }
+            if (count == remap.absentRows.length) {
+                remap.absentRows = java.util.Arrays.copyOf(remap.absentRows, 2 * count);
+                remap.absentVars = java.util.Arrays.copyOf(remap.absentVars, 2 * count);
+            }
+            System.arraycopy(remap.absentRows, pos, remap.absentRows, pos + 1, count - pos);
+            System.arraycopy(remap.absentVars, pos, remap.absentVars, pos + 1, count - pos);
+            remap.absentRows[pos] = baseRow;
+            remap.absentVars[pos] = v;
+            count++;
+        }
+        remap.absentCount = count;
+        if (listSize != remap.baseByRow.length - count) {
+            remap.absentCount = 0;
+            return false;
+        }
+        return true;
+    }
+
+    /** The full mapping: a two-pointer merge into the base list, which also yields the absent base rows when the
+     *  current list is a subsequence of it, else a keyed walk (a variable the base lacks). */
+    private static void rebuildFully(Remap remap, List<Variable<AcVariableType>> vars) {
+        int[] rows = mergeRows(vars, remap.baseByRow);
+        remap.absentCount = 0;
+        if (rows != null) {
+            remap.subsequence = true;
+            remap.baseRowOf = null;
+            int next = 0;                                    // base rows the merge skipped are the absent ones
+            for (int row : rows) {
+                for (; next < row; next++) {
+                    addAbsent(remap, next);
+                }
+                next = row + 1;
+            }
+            for (; next < remap.baseByRow.length; next++) {
+                addAbsent(remap, next);
+            }
+            return;
+        }
+        int[] keyed = remap.baseRowKeyed;
+        int types = remap.types;
+        rows = new int[vars.size()];
+        for (Variable<AcVariableType> v : vars) {
+            int key = v.getElementNum() * types + v.getType().ordinal();
+            rows[v.getRow()] = key < keyed.length ? keyed[key] : -1;
+        }
+        remap.subsequence = false;
+        remap.baseRowOf = rows;
+    }
+
+    private static void addAbsent(Remap remap, int baseRow) {
+        if (remap.absentCount == remap.absentRows.length) {
+            remap.absentRows = java.util.Arrays.copyOf(remap.absentRows, 2 * remap.absentCount);
+            remap.absentVars = java.util.Arrays.copyOf(remap.absentVars, 2 * remap.absentCount);
+        }
+        remap.absentRows[remap.absentCount] = baseRow;
+        remap.absentVars[remap.absentCount++] = remap.baseByRow[baseRow];
     }
 
     private static void setValues(EquationSystem<AcVariableType, AcEquationType> es, double[] values, int[] closedBranchNums) {

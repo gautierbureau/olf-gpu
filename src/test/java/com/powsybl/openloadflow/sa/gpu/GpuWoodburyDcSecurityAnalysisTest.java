@@ -646,7 +646,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
     /**
      * Operator strategies answered from their device state, as the AC path starts a strategy from it: the actions applied
      * on the network (topology, taps), every value read from the state (the action branches on their current model),
-     * bit for bit OLF's with the state loaded; and voltage-angle limits checked on the state's angles. The strategy tests
+     * bit for bit OLF's with the state loaded; the strategies' target columns built on the device, bit for bit the host
+     * replay's; and voltage-angle limits checked on the state's angles. The strategy tests
      * rerun with branch monitors only, then a network with violated voltage-angle limits.
      */
     @Test
@@ -655,6 +656,9 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(true);
         GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.set(0);
         GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(true);
+        GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
         branchOnlyStrategyMonitors = true;
         try {
             phaseTapActionsMatchStock();
@@ -680,8 +684,12 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         } finally {
             branchOnlyStrategyMonitors = false;
             GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(false);
+            GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(false);
         }
         assertEquals(0, GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.get(), "values differing between the state reader and OLF's model");
+        // the strategies' target columns built on the device (contingency changes + the actions' row edits) are the replay's
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get(), "device target values differing from the replay's");
+        assertTrue(GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.get() > 0, "the device built target columns");
         assertTrue(GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get() > 40,
                 "answered from their state: " + GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get());
     }

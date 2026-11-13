@@ -418,12 +418,18 @@ public final class GpuDcSolver implements AutoCloseable {
      * What each modified target column of a chunk changes from the base, as CSR lists over the
      * {@code count} columns: the buses left out of the slack distribution (islanded), the per-bus load
      * totals a lost load changes, the lost generators (target, initial target and participation to zero),
-     * the HVDC stations left without power (target to zero), and the target rows set to zero. Indices are
+     * the HVDC stations left without power (target to zero), the target rows set to zero, then an operator strategy's row
+     * edits in order (set or add). Indices are
      * the assembly's (bus number, generator order, equation column).
      */
     public record ChunkTargetChanges(int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus, double[] loadP,
                                      int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,
-                                     int[] zeroRowPtr, int[] zeroRow) {
+                                     int[] zeroRowPtr, int[] zeroRow, int[] editPtr, int[] editRow, int[] editKind, double[] editValue) {
+
+        /** An edit of {@link #editKind}: the row set to the value. */
+        public static final int SET = 0;
+        /** An edit of {@link #editKind}: the value added to the row. */
+        public static final int ADD = 1;
     }
 
     /**
@@ -436,7 +442,8 @@ public final class GpuDcSolver implements AutoCloseable {
                                   int referenceGenerator, double[] outTargets) {
         buildChunkTargets(handle(), changes.count(), changes.excludedPtr(), changes.excludedBus(), changes.loadPtr(), changes.loadBus(),
                 changes.loadP(), changes.lostGeneratorPtr(), changes.lostGenerator(), changes.stationPtr(), changes.station(),
-                changes.zeroRowPtr(), changes.zeroRow(), distributed, participationType, useActiveLimits, referenceGenerator, outTargets);
+                changes.zeroRowPtr(), changes.zeroRow(), changes.editPtr(), changes.editRow(), changes.editKind(), changes.editValue(),
+                distributed, participationType, useActiveLimits, referenceGenerator, outTargets);
     }
 
     @Override
@@ -469,7 +476,8 @@ public final class GpuDcSolver implements AutoCloseable {
 
     private static native void buildChunkTargets(long handle, int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus,
                                                  double[] loadP, int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,
-                                                 int[] zeroRowPtr, int[] zeroRow, boolean distributed, int participationType,
+                                                 int[] zeroRowPtr, int[] zeroRow, int[] editPtr, int[] editRow, int[] editKind,
+                                                 double[] editValue, boolean distributed, int participationType,
                                                  boolean useActiveLimits, int referenceGenerator, double[] outTargets);
 
     private static native void setGeneratorInitialTargets(long handle, double[] initialTargetP);

@@ -92,8 +92,13 @@ factors (`GpuLodfCalculator`).
   action branches' power and shift from their current pi model, as DcBranchVector.updateBranchModel does). A
   contingency whose strategies have a threshold condition (OLF reads the network's flows) still loads its state.
   Gate strategiesAndAngleLimitsAnsweredFromTheirState (tap, switch, generator and load actions, violated angle
-  limits; reader vs model bit for bit). Remaining on the host for strategies: their target columns (replay) and the
-  actions' application + full NetworkState.restore.
+  limits; reader vs model bit for bit). The strategies' target columns are built on the device too: the contingency's
+  changes, then the actions as ordered row edits (tap: alpha set to the new a1; generator / load: P row += delta;
+  branch action: alpha set to 0), the stock's actions part in its order, bit for bit the replay's (same gate, hook
+  CHECK_DEVICE_TARGETS). An alpha edit on an inactive equation (column -1) is skipped where the replay would write
+  the previous column's last row. Remaining on the host for strategies: applying the actions to the network for the
+  topology and taps, and the full NetworkState.restore after each (the AC GpuContingencyTopology design would replace
+  both).
 - Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (now ~0.3 s), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
   connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
 - Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off

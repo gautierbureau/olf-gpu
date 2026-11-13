@@ -146,6 +146,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     public static final AtomicInteger TARGET_MISMATCH_COUNT = new AtomicInteger();
     public static final AtomicLong LAST_TARGET_MAX_DIFF_BITS = new AtomicLong();
 
+    /** How the modified target columns are built: on the device (with the injection tables' generator indices), or by
+     *  the host replay; and whether the check hook compares the device columns with the replay's. */
+    private record DeviceTargets(boolean onDevice, boolean check, int participationType, Map<LfGenerator, Integer> generatorIndex,
+                                 int referenceGenerator, boolean distributed, boolean useActiveLimits) {
+    }
+
     private record DeviceCandidate(ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity,
                                    List<ComputedContingencyElement> elements, LfContingency lfContingency) {
     }
@@ -624,7 +630,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     arrayModelApplies, scanner, table, needAngles, preContingencyNetworkResult, preContingencyLimitViolationManager,
                     monitorIndexes, createResultExtension, securityAnalysisParameters, limitReductions, dcPowerFactor, violationsParameters,
                     strategyResultsByContingency,
-                    monitoredBranchResults, stateFree, checkStateReader);
+                    monitoredBranchResults, stateFree, checkStateReader,
+                    new DeviceTargets(deviceTargets, checkTargets, participationType, generatorIndex, assembly.referenceGeneratorIndex(),
+                            context.getParameters().isDistributedSlack(), context.getParameters().getNetworkParameters().isUseActiveLimits()));
         }
         // leave the base state loaded, as the stock path's restore would
         equationSystem.getStateVector().set(preContingencyStates);
@@ -657,7 +665,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                                SecurityAnalysisParameters securityAnalysisParameters, List<LimitReduction> limitReductions, double dcPowerFactor,
                                SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
                                Map<String, List<OperatorStrategyResult>> strategyResultsByContingency,
-                               GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader) {
+                               GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader,
+                               DeviceTargets deviceTargets) {
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         int n = equationSystem.getIndex().getColumnCount();
         DcLoadFlowParameters parameters = context.getParameters();
@@ -736,19 +745,43 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             int[] ptr = new int[count + 1];
             int[] base = new int[count];
             List<Integer> elemList = new ArrayList<>();
+            // the strategies' columns: built on the device (the contingency's changes, then the actions as row edits),
+            // or replayed on the host when the device cannot place them; the check hook builds both
+            ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges() : null;
+            for (int i = 0; i < count && changes != null; i++) {
+                StrategyScenario sc = resolved.get(from + i);
+                PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
+                boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
+                if (!changes.add(new DeviceCandidate(sc.connectivity(), List.of(), sc.candidate().lfContingency()), lostPower, lfNetwork,
+                        equationSystem, deviceTargets.generatorIndex(), sc.lfOperatorStrategy().getActions())) {
+                    changes = null;
+                }
+            }
             for (int i = 0; i < count; i++) {
                 StrategyScenario sc = resolved.get(from + i);
                 for (ComputedElement element : sc.elements()) {
                     elemList.add(deviceColumn(element));
                 }
                 ptr[i + 1] = elemList.size();
-                PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
-                boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
-                buildModifiedTargetByReplay(new DeviceCandidate(sc.connectivity(), List.of(), sc.candidate().lfContingency()), lostPower,
-                        sc.lfOperatorStrategy().getActions(), lfNetwork, context, targets, i * n);
                 base[i] = i;
+                if (changes == null || deviceTargets.check()) {
+                    PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
+                    boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
+                    buildModifiedTargetByReplay(new DeviceCandidate(sc.connectivity(), List.of(), sc.candidate().lfContingency()), lostPower,
+                            sc.lfOperatorStrategy().getActions(), lfNetwork, context, targets, i * n);
+                }
             }
-            solver.setChunkTargets(targets, count);
+            if (changes != null) {
+                double[] built = deviceTargets.check() ? new double[n * count] : null;
+                solver.buildChunkTargets(changes.build(), deviceTargets.distributed(), deviceTargets.participationType(),
+                        deviceTargets.useActiveLimits(), deviceTargets.referenceGenerator(), built);
+                DEVICE_TARGET_COUNT.addAndGet(count);
+                if (built != null) {
+                    TARGET_MISMATCH_COUNT.addAndGet(compareTargets(built, targets, n * count, n, 0));
+                }
+            } else {
+                solver.setChunkTargets(targets, count);
+            }
             int[] records = solver.woodburyChunk(ptr, elemList.stream().mapToInt(Integer::intValue).toArray(), base, GpuViolationScreen.BAND, CAPACITY, states);
 
             for (int i = 0; i < count; i++) {
@@ -1342,10 +1375,22 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         private final List<Integer> station = new ArrayList<>();
         private final List<Integer> zeroRowPtr = new ArrayList<>(List.of(0));
         private final List<Integer> zeroRow = new ArrayList<>();
+        private final List<Integer> editPtr = new ArrayList<>(List.of(0));
+        private final List<Integer> editRow = new ArrayList<>();
+        private final List<Integer> editKind = new ArrayList<>();
+        private final List<Double> editValue = new ArrayList<>();
 
         /** One column; false (nothing added) when an element is not in the device tables. */
         boolean add(DeviceCandidate candidate, boolean lostPower, LfNetwork lfNetwork,
                     EquationSystem<DcVariableType, DcEquationType> equationSystem, Map<LfGenerator, Integer> generatorIndex) {
+            return add(candidate, lostPower, lfNetwork, equationSystem, generatorIndex, List.of());
+        }
+
+        /** One column, then an operator strategy's actions as row edits, in the order and with the values of
+         *  {@code WoodburyEngine.runDcLoadFlowWithModifiedTargetVector}'s actions part (read on the base network). */
+        boolean add(DeviceCandidate candidate, boolean lostPower, LfNetwork lfNetwork,
+                    EquationSystem<DcVariableType, DcEquationType> equationSystem, Map<LfGenerator, Integer> generatorIndex,
+                    List<LfAction> lfActions) {
             List<Integer> gens = new ArrayList<>();
             List<Integer> stations = new ArrayList<>();
             Map<LfBus, Map<LfLoad, Double>> changedLoads = new LinkedHashMap<>();
@@ -1408,19 +1453,71 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         .filter(Equation::isActive)
                         .ifPresent(eq -> zeroRow.add(eq.getColumn()));
             }
+            addActionEdits(lfActions, equationSystem);
             count++;
             excludedPtr.add(excludedBus.size());
             loadPtr.add(loadBus.size());
             lostGeneratorPtr.add(lostGenerator.size());
             stationPtr.add(station.size());
             zeroRowPtr.add(zeroRow.size());
+            editPtr.add(editRow.size());
             return true;
+        }
+
+        private void addActionEdits(List<LfAction> lfActions, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+            if (lfActions.isEmpty()) {
+                return;
+            }
+            for (LfAction action : lfActions) {
+                if (action instanceof AbstractLfTapChangerAction<?> tapAction && tapAction.getChange() != null) {
+                    LfBranch branch = tapAction.getChange().getBranch();
+                    double a1 = tapAction.getChange().getNewPiModel().getA1();
+                    equationSystem.getEquation(branch.getNum(), DcEquationType.BRANCH_TARGET_ALPHA1)
+                            .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.SET, a1));
+                }
+            }
+            for (LfAction action : lfActions) {
+                if (action instanceof LfGeneratorAction genAction && !genAction.getGenerator().isDisabled()) {
+                    LfBus bus = genAction.getGenerator().getBus();
+                    double deltaTargetP = genAction.getNewTargetP() - genAction.getGenerator().getTargetP();
+                    equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
+                            .filter(Equation::isActive)
+                            .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
+                }
+            }
+            for (LfAction action : lfActions) {
+                if (action instanceof LfLoadAction loadAction && loadAction.isValid() && !loadAction.getLfLoad().isOriginalLoadDisabled(loadAction.getLoadId())) {
+                    LfBus bus = loadAction.getLfLoad().getBus();
+                    double deltaTargetP = -loadAction.getPowerShift().getActive();
+                    equationSystem.getEquation(bus.getNum(), DcEquationType.BUS_TARGET_P)
+                            .filter(Equation::isActive)
+                            .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.ADD, deltaTargetP));
+                }
+            }
+            for (LfAction action : lfActions) {
+                if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
+                    for (LfBranch branch : branchAction.getDisabledBranches()) {
+                        equationSystem.getEquation(branch.getNum(), DcEquationType.BRANCH_TARGET_ALPHA1)
+                                .ifPresent(eq -> edit(eq.getColumn(), GpuDcSolver.ChunkTargetChanges.SET, 0.0));
+                    }
+                }
+            }
+        }
+
+        /** A row edit; an inactive equation has no column (-1): nothing to edit. */
+        private void edit(int column, int kind, double value) {
+            if (column >= 0) {
+                editRow.add(column);
+                editKind.add(kind);
+                editValue.add(value);
+            }
         }
 
         GpuDcSolver.ChunkTargetChanges build() {
             return new GpuDcSolver.ChunkTargetChanges(count, ints(excludedPtr), ints(excludedBus), ints(loadPtr), ints(loadBus),
                     loadP.stream().mapToDouble(Double::doubleValue).toArray(), ints(lostGeneratorPtr), ints(lostGenerator),
-                    ints(stationPtr), ints(station), ints(zeroRowPtr), ints(zeroRow));
+                    ints(stationPtr), ints(station), ints(zeroRowPtr), ints(zeroRow), ints(editPtr), ints(editRow), ints(editKind),
+                    editValue.stream().mapToDouble(Double::doubleValue).toArray());
         }
 
         private static int[] ints(List<Integer> list) {

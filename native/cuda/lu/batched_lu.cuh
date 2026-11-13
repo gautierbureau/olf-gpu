@@ -82,6 +82,13 @@ void selectLanes(BatchedLu& lu, const std::vector<char>& scenarios, cudaStream_t
 // keeps its x.
 void solveSelectedLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream);
 
+// cols right-hand sides of the system the last factorization's lane position holds (column-major, n x cols each):
+// x[k * n ..] = A^-1 b[k * n ..]. On the fast engine's factors, every column at once (solveScalarLaneColumns); on the
+// pivoting engine's when it factorized that lane, a column at a time (one scenario per factorization only). work:
+// n x cols; identityLanes: 0 .. cols - 1 on the device.
+void solveLaneColumns(BatchedLu& lu, int position, int cols, const double* b, double* x, double* work,
+                      const int* identityLanes, cudaStream_t stream);
+
 // The last factorization's lane map on the device.
 const int* deviceLaneMap(BatchedLu& lu);
 

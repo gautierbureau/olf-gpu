@@ -530,6 +530,25 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
 
+    /** The security analysis on cuDSS too (GpuLoadFlowParameters.linearSolver = CUDSS): the default is our batched LU. */
+    @Test
+    void cudssLinearSolverMatchesStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create118();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allElements(network);
+        SecurityAnalysisParameters sap = dcFastParameters();
+        com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters.create(sap.getLoadFlowParameters())
+                .setLinearSolver(com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver.CUDSS);
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network), sap);
+        long before = com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative.factorizationCounts()[0];
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network), sap);
+        assertEquals(0, com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative.factorizationCounts()[0] - before,
+                "cuDSS solved it: our batched LU did not factorize");
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+    }
+
     @Test
     void ieee14WithoutMonitorsMatchStock() {
         assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");

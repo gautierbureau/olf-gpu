@@ -12,6 +12,8 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcAreaInterchangeControlOuterLoop;
 import com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.dc.DcIncrementalPhaseControlOuterLoop;
@@ -79,8 +81,17 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
     private GpuDcOuterLoops loops;
     private boolean deviceLoops;
 
+    private final GpuLinearSolver linearSolver;
+
+    /** On the GPU parameters' default linear solver (our batched LU). */
     public GpuDcLoadFlowEngine(DcLoadFlowContext context) {
+        this(context, GpuLoadFlowParameters.LINEAR_SOLVER_DEFAULT_VALUE);
+    }
+
+    /** On this linear solver: our batched LU, or cuDSS ({@code GpuLoadFlowParameters.linearSolver}). */
+    public GpuDcLoadFlowEngine(DcLoadFlowContext context, GpuLinearSolver linearSolver) {
         this.context = Objects.requireNonNull(context);
+        this.linearSolver = Objects.requireNonNull(linearSolver);
     }
 
     public DcLoadFlowContext getContext() {
@@ -129,7 +140,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
         GpuDcAssembly a = GpuDcAssembly.capture(network, context.getEquationSystem(), context.getParameters().getEquationSystemCreationParameters());
         long t1 = System.nanoTime();
         if (solver == null) {
-            solver = GpuDcSolver.createAssembled(a);
+            solver = GpuDcSolver.createAssembled(a, linearSolver);
             if (GpuTrace.PHASE_TIME.isOn()) {
                 System.err.printf("DC_ASSEMBLY n=%d nnz=%d capture=%.1f ms upload+fill+analysis+factorization=%.1f ms%n",
                         a.size(), a.nonZeroCount(), (t1 - t0) / 1e6, (System.nanoTime() - t1) / 1e6);
@@ -148,7 +159,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             LOGGER.debug("DC structure changed, device context rebuilt");
             solver.close();
             solver = null;
-            solver = GpuDcSolver.createAssembled(a);
+            solver = GpuDcSolver.createAssembled(a, linearSolver);
             loops = null;
         }
         assembly = a;

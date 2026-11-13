@@ -14,6 +14,7 @@ import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationTerm;
@@ -173,7 +174,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             // the device assembles the DC system itself (GpuDcAssembly) and factorizes it: the base solve runs on
             // it too — the slack distribution over every bus, the target vector, the solve — so no host matrix,
             // no KLU, and the generators written back so the host sees the distributed dispatch
-            GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context);
+            GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context,
+                    GpuLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters()).getLinearSolver());
             try {
                 engine.prepare();
             } catch (UnsupportedOperationException e) {

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.sensi;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationTerm;
 import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
@@ -137,7 +138,7 @@ public class GpuDcSensitivityAnalysis extends DcSensitivityAnalysis {
         deviceContext = loadFlowContext;
         assembly = GpuDcAssembly.capture(loadFlowContext.getNetwork(), loadFlowContext.getEquationSystem(),
                 loadFlowContext.getParameters().getEquationSystemCreationParameters());
-        solver = GpuDcSolver.createAssembled(assembly);
+        solver = GpuDcSolver.createAssembled(assembly, GpuLoadFlowParameters.get(parameters.getLoadFlowParameters()).getLinearSolver());
         LAST_DEVICE_FACTOR_COUNT.set(0);
     }
 

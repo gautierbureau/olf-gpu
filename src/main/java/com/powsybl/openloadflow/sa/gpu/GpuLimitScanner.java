@@ -61,7 +61,7 @@ final class GpuLimitScanner {
 
     /** The DC path's reader of branch values from {@link #dcState} (null: from OLF's model), and the DC power factor. */
     private GpuDcStateReader dcReader;
-    private double[] dcState;
+    private GpuDcStateValues dcState;
     private double dcPowerFactor;
     private double[] state;
     /** Which branches, sides and buses the current scan reads as out of service: the network's flags, or the
@@ -288,7 +288,7 @@ final class GpuLimitScanner {
      *  OLF's model: the contingency's state need not be loaded into the equation system. */
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               java.util.function.Predicate<LfBranch> isBranchDisabled, int[] uncoveredBranches,
-                              GpuDcStateReader reader, double[] state, double dcPowerFactor) {
+                              GpuDcStateReader reader, GpuDcStateValues state, double dcPowerFactor) {
         this.view = null;                                    // the topology is the predicate's
         this.state = null;
         this.topology = GpuContingencyTopology.NETWORK;

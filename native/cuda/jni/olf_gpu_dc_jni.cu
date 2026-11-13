@@ -179,6 +179,8 @@ struct DcContext {
     // contingencies that need one (islands, lost power, lost PST) — setChunkTargets
     Buf bases;
     int nBases = 0;
+    int chunkCtg = 0;                                              // contingencies of the last woodburyChunk (states, flows)
+    Buf gatherCtg, gatherIdx, gatherOut;                           // gatherChunk's pairs and values
 
     // --- device assembly (createAssembled, GpuDcAssembly): the structure the device fills itself
     bool assembled = false;
@@ -522,9 +524,11 @@ __global__ void dcFlows(int nCtg, int n, int nBranches, const int* ph1Row, const
     const double* x = states + (size_t) c * n;
     double p = 0.0;
     if (ph1Row[b] >= 0 && ph2Row[b] >= 0) {
+        // DcNetworkVector.updateClosedBranches, operation for operation (no contraction): the host reads these flows
+        // as OLF's (GpuDcStateReader), side 2 being exactly -p
         double a1 = a1Row[b] >= 0 ? x[a1Row[b]] : a1Const[b];
-        double deltaPhase = x[ph2Row[b]] - x[ph1Row[b]] + A2 - a1;
-        p = -power[b] * deltaPhase;
+        double deltaPhase = __dadd_rn(__dadd_rn(__dadd_rn(x[ph2Row[b]], -x[ph1Row[b]]), A2), -a1);
+        p = __dmul_rn(-power[b], deltaPhase);
     }
     flows[b + (size_t) c * nBranches] = p;
 }
@@ -2044,13 +2048,16 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
                 throw std::runtime_error("contingency " + std::to_string(c) + " has more than " + std::to_string(MAX_K) + " elements");
             }
         }
-        // states out
-        if (env->GetArrayLength(jOutStates) < (jsize) ((size_t) n * nCtg)) {
-            throw std::runtime_error("outStates too small");
+        // states out, unless the caller reads the chunk sparsely (gatherChunk / readChunkStates): they stay on the device
+        ctx->chunkCtg = nCtg;
+        if (jOutStates != nullptr) {
+            if (env->GetArrayLength(jOutStates) < (jsize) ((size_t) n * nCtg)) {
+                throw std::runtime_error("outStates too small");
+            }
+            std::vector<double> statesHost((size_t) n * nCtg);
+            DC_CUDA_CHECK(cudaMemcpy(statesHost.data(), ctx->states.p, statesHost.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            env->SetDoubleArrayRegion(jOutStates, 0, (jsize) statesHost.size(), statesHost.data());
         }
-        std::vector<double> statesHost((size_t) n * nCtg);
-        DC_CUDA_CHECK(cudaMemcpy(statesHost.data(), ctx->states.p, statesHost.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        env->SetDoubleArrayRegion(jOutStates, 0, (jsize) statesHost.size(), statesHost.data());
         // records out
         std::vector<int> out((size_t) nCtg + (size_t) nCtg * capacity, 0);
         DC_CUDA_CHECK(cudaMemcpy(out.data(), ctx->counts.p, (size_t) nCtg * sizeof(int), cudaMemcpyDeviceToHost));
@@ -2063,6 +2070,76 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.woodburyChunk: ") + e.what());
         return nullptr;
+    }
+}
+
+namespace {
+/** out[k] = values[idx[k] + ctg[k] * stride]: the last chunk's flows (stride nBranches) or states (stride n). */
+__global__ void gatherPairs(int count, const int* ctg, const int* idx, const double* values, int stride, double* out) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < count) {
+        out[k] = values[idx[k] + (size_t) ctg[k] * stride];
+    }
+}
+}  // namespace
+
+/**
+ * Values of the last woodburyChunk read without its states: for each pair k, the closed side-1 flow of branch idx[k]
+ * (fromStates false) or the state row idx[k] (fromStates true) of contingency ctg[k] of the chunk.
+ */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_gatherChunk(JNIEnv* env, jclass, jlong handle, jintArray jCtg, jintArray jIdx,
+                                                             jboolean fromStates, jdoubleArray jOut) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray ctg(env, jCtg);
+        IntArray idx(env, jIdx);
+        int count = ctg.len;
+        if (idx.len != count || env->GetArrayLength(jOut) < count) {
+            throw std::runtime_error("pair arrays inconsistent");
+        }
+        if (count == 0) {
+            return;
+        }
+        int stride = fromStates ? ctx->n : ctx->nBranches;
+        for (int k = 0; k < count; k++) {
+            if (ctg.p[k] < 0 || ctg.p[k] >= ctx->chunkCtg || idx.p[k] < 0 || idx.p[k] >= stride) {
+                throw std::runtime_error("pair " + std::to_string(k) + " outside the last chunk");
+            }
+        }
+        ctx->gatherCtg.uploadInto(ctg.p, (size_t) count * sizeof(int));
+        ctx->gatherIdx.uploadInto(idx.p, (size_t) count * sizeof(int));
+        ctx->gatherOut.ensure((size_t) count * sizeof(double));
+        gatherPairs<<<grid(count), BLOCK, 0, ctx->stream>>>(count, ctx->gatherCtg.as<int>(), ctx->gatherIdx.as<int>(),
+                fromStates ? ctx->states.as<double>() : ctx->flows.as<double>(), stride, ctx->gatherOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        std::vector<double> host(count);
+        DC_CUDA_CHECK(cudaMemcpyAsync(host.data(), ctx->gatherOut.p, (size_t) count * sizeof(double), cudaMemcpyDeviceToHost, ctx->stream));
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        env->SetDoubleArrayRegion(jOut, 0, count, host.data());
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.gatherChunk: ") + e.what());
+    }
+}
+
+/** The full states of the given contingencies of the last woodburyChunk, each at out[c * n] (the others untouched). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readChunkStates(JNIEnv* env, jclass, jlong handle, jintArray jWhich, jdoubleArray jOut) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray which(env, jWhich);
+        int n = ctx->n;
+        std::vector<double> host(n);
+        for (int k = 0; k < which.len; k++) {
+            int c = which.p[k];
+            if (c < 0 || c >= ctx->chunkCtg || env->GetArrayLength(jOut) < (jsize) ((size_t) (c + 1) * n)) {
+                throw std::runtime_error("contingency " + std::to_string(c) + " outside the last chunk or the output");
+            }
+            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->states.as<double>() + (size_t) c * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+            env->SetDoubleArrayRegion(jOut, (jsize) ((size_t) c * n), n, host.data());
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.readChunkStates: ") + e.what());
     }
 }
 

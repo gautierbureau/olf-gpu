@@ -28,9 +28,18 @@ factors (`GpuLodfCalculator`).
 - DONE 2026-11-13: the modified target columns (lost power, islanding, lost phase shifter) are built on the device,
   bit for bit the stock replay's (gate `GpuWoodburyDcSecurityAnalysisTest.deviceTargetsAreTheHostOnesBitForBit`; all
   5297 columns of network.xiidm's branch N-1). network.xiidm: GPU 17.8–20.9 s vs CPU-8t ~36 s (was 24.5–34.6 s).
-- OPEN, accuracy: on network.xiidm the GPU flows differ from KLU's by 1.5e-4 MW (every contingency, also before the
-  device columns), 25x the cuDSS-drop-in-vs-KLU gap (5.8e-6 MW). Candidates: the DC context's cuDSS configuration
-  (AMD + matching, no refinement). Measure residuals per arm before choosing.
+- DIAGNOSED 2026-11-13, accuracy: on network.xiidm the GPU flows differ from KLU's by 1.5e-4 MW on every
+  contingency. Not a device defect: the DC matrix is ill-conditioned by OLF's own model. The SA keeps 380 switches
+  (retained by the contingency list) and models each as a line with x = 1e-8 pu, so |J| entries run from 0.16 to
+  1.3e9. Measured on the base state against OLF's own J and target (`GpuDcBaseAccuracy`, probe `OLF_DC_BASE_DIAG=1`):
+  the device target equals OLF's to 3e-17; every candidate state (device, KLU, a reference refined with exact
+  BigDecimal residuals) sits at the residual floor |J||x|eps ~ 2e-7 pu, and they differ by ~1e-8 rad - KLU 6.2e-9 from
+  the refined state, the device 1.35e-8. The angles are not determined better than that in double precision, which
+  is the 1.5e-4 MW on a 521 MW line. cuDSS refinement (1-3 steps) brings the device residual to KLU's (5.4e-6 vs
+  4.0e-6 MW) but leaves the state ~9e-9 rad from KLU's; matching off gives NaN (empty structural diagonal); the default
+  ordering changes nothing; pivot threshold 1 is worse. On the 50-contingency network (7416 buses, |J| <= 2e8) the
+  same gap is 5.9e-6 MW. Decision for the user: the gate tolerance for networks with retained switches, and/or the
+  upstream OLF question of modelling a retained switch in DC as zero impedance instead of x = 1e-8.
 - Next for speed (the AC design, `docs/device-final-results-plan.md`): (a) answer each contingency from its state
   without the network write-back (`GpuStateView` + `GpuContingencyTopology`) and read back only the rows the
   confirmation needs — the host per-contingency loop is now the largest part (10–14 s); (b) the operator strategies'

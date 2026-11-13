@@ -107,6 +107,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     /** Candidate records per contingency the device buffer holds; overflow = host screen. */
     static final int CAPACITY = 1024;
 
+    /** Test hook: print how accurate the device base state is against OLF's own system (GpuDcBaseAccuracy). */
+    public static final AtomicBoolean BASE_ACCURACY_DIAGNOSTIC = new AtomicBoolean();
+
     /** Test hook: build the modified target columns on BOTH sides and compare them bit for bit. */
     public static final AtomicBoolean CHECK_DEVICE_TARGETS = new AtomicBoolean();
 
@@ -173,6 +176,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             } catch (RuntimeException e) {
                 solver.close();
                 throw e;
+            }
+            if (BASE_ACCURACY_DIAGNOSTIC.get()) {
+                GpuDcBaseAccuracy.report(context, solver, preContingencyStates);
             }
             if (context.getParameters().isSetVToNan()) {
                 for (LfBus bus : lfNetwork.getBuses()) {

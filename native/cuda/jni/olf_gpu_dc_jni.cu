@@ -24,6 +24,8 @@
 //   screen   : the flat limit table (GpuLimitTable) compared with a RELAXED threshold, every
 //              exceeded limit of a group emitted — the kernel SCREENS, the host DECIDES
 //              (GpuLimitScanner.detectFromCandidates), exactly the AC contract.
+#include "../common/trace.cuh"
+
 #include <cuda_runtime.h>
 #include <cudss.h>
 #include <jni.h>
@@ -49,13 +51,10 @@
  * solve. Analysis happens once per context and handle creation once per context, so this costs
  * nothing on the hot path and cannot be forgotten by a new caller.
  */
-/**
- * {@code OLF_GPU_DC_TIMING=1}: print how long each cuDSS phase takes, to stderr. The analysis is the
- * phase worth watching - it is paid once per context and it dominates a short run.
- */
+/** {@code OLF_GPU_PHASE_TIME}: print how long each cuDSS phase takes, to stderr. The analysis is the
+ *  phase worth watching - it is paid once per context and it dominates a short run. */
 bool dcTiming() {
-    static const bool on = std::getenv("OLF_GPU_DC_TIMING") != nullptr;
-    return on;
+    return traceOn(Trace::PHASE_TIME);
 }
 
 /** Wall-clock milliseconds since an arbitrary origin. */
@@ -190,7 +189,6 @@ struct DcContext {
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
-    Buf lodfSelf, lodfMonitored, lodfOut;                          // LODF/PTDF blocks (GpuLodfCalculator)
     // --- DC sensitivity (GpuDcSensitivityContext): the factor and flow states live here and never
     // go back to the host; only the sensitivity VALUES do
     int sensiCols = 0;                                             // factor groups
@@ -961,7 +959,7 @@ __global__ void hvdcDecision(int nHvdc, const double* x, const int* ph1, const i
 
 
 // ---------------------------------------------------------------------------------------------
-// LODF / PTDF factors from the element states (LodfCalculator on the device)
+// PTDF factors from the element states
 // ---------------------------------------------------------------------------------------------
 
 /** ClosedBranchSide1DcFlowEquationTerm.calculateSensi of a branch on a column of the states:
@@ -975,47 +973,6 @@ __device__ inline double branchSensi(const double* states, int n, int col, int b
         return nan("");
     }
     return __dmul_rn(power[b], phaseSensi(states, n, col, ph1Row[b], ph2Row[b], a1Row[b]));
-}
-
-/** The self-PTDF of every outaged branch of the block: LodfCalculator.streamLodfColumn's selfPtdf. */
-__global__ void lodfSelfPtdf(int n, int col0, int cols, const int* elemBranch, const int* ph1Row, const int* ph2Row,
-                             const int* a1Row, const double* power, const double* states, double* selfPtdf) {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= cols) {
-        return;
-    }
-    selfPtdf[j] = branchSensi(states, n, col0 + j, elemBranch[col0 + j], ph1Row, ph2Row, a1Row, power);
-}
-
-/**
- * LodfCalculator.computeLodfValue for a block of outage columns: one thread per (monitored branch,
- * outaged branch). NaN when the outage breaks connectivity (|selfPtdf| > 1 - 1e-6, the criterion
- * ConnectivityBreakAnalysis uses too) or the monitored branch has no closed DC flow, then -1 for a
- * branch monitored under its own outage, else ptdf / (1 - selfPtdf). Column-major, like the
- * DenseMatrix LodfCalculator fills.
- */
-__global__ void lodfBlock(int n, int nMonitored, int col0, int cols, const int* monitored, const int* elemBranch,
-                          const int* ph1Row, const int* ph2Row, const int* a1Row, const double* power,
-                          const double* states, const double* selfPtdf, double* out) {
-    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= (long) nMonitored * cols) {
-        return;
-    }
-    int j = (int) (t / nMonitored);
-    int row = (int) (t % nMonitored);
-    double self = selfPtdf[j];
-    int monitoredBranch = monitored[row];
-    bool breaksConnectivity = fabs(self) > 1.0 - 1e-6;          // LodfCalculator.CONNECTIVITY_LOSS_THRESHOLD
-    double value;
-    if (breaksConnectivity || ph1Row[monitoredBranch] < 0 || ph2Row[monitoredBranch] < 0) {
-        value = nan("");
-    } else if (monitoredBranch == elemBranch[col0 + j]) {
-        value = -1.0;
-    } else {
-        double ptdf = branchSensi(states, n, col0 + j, monitoredBranch, ph1Row, ph2Row, a1Row, power);
-        value = __ddiv_rn(ptdf, __dadd_rn(1.0, -self));
-    }
-    out[row + (size_t) j * nMonitored] = value;
 }
 
 /** The sensitivity of every function branch to every column of the states, with no LODF
@@ -1234,11 +1191,8 @@ void initCudss(DcContext* ctx) {
     }
     // Iterative refinement: OFF by default. KLU (the reference) refines nothing, the LU is backward
     // stable, and each refinement step costs a solve + a SpMV on every column — measured 2.1 s for
-    // the 9042-column S with 2 steps. OLF_GPU_DC_IR=<n> overrides (A/B against the parity gate).
+    // the 9042-column S with 2 steps.
     int ir = 0;
-    if (const char* e = std::getenv("OLF_GPU_DC_IR"); e != nullptr && *e != '\0') {
-        ir = std::atoi(e);
-    }
     DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
 #if CUDSS_VERSION >= 800
     cudssMatchingAlg_t matching = CUDSS_MATCHING_ALG_AUTO;   // empty structural diagonal, see header
@@ -1425,7 +1379,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setElementAttributes(JNIEnv* en
     }
 }
 
-/** One S column back to the host (tests: the LODF/PTDF oracle). */
+/** One S column back to the host (tests: the PTDF oracle). */
 JNIEXPORT jdoubleArray JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readElementStates(JNIEnv* env, jclass, jlong handle, jint elem) {
     DcContext* ctx = ctxOf(handle);
@@ -2325,66 +2279,6 @@ void checkFactorBlock(DcContext* ctx, jint col0, jint cols, jsize monitoredLen, 
 }
 }  // namespace
 
-/** One block of LODF columns: out[row + j * nMonitored] is the factor of monitored[row] for the
- *  outage held in the element column col0 + j. */
-JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_lodfBlock(JNIEnv* env, jclass, jlong handle, jintArray jMonitored,
-                                                           jint col0, jint cols, jdoubleArray jOut) {
-    DcContext* ctx = ctxOf(handle);
-    try {
-        IntArray monitored(env, jMonitored);
-        jsize outLen = env->GetArrayLength(jOut);
-        checkFactorBlock(ctx, col0, cols, monitored.len, outLen);
-        int nMonitored = monitored.len;
-        ctx->lodfMonitored.upload(monitored.p, (size_t) std::max(nMonitored, 1) * sizeof(int));
-        ctx->lodfSelf.ensure((size_t) cols * sizeof(double));
-        ctx->lodfOut.ensure((size_t) nMonitored * cols * sizeof(double));
-        lodfSelfPtdf<<<grid(cols), BLOCK, 0, ctx->stream>>>(ctx->n, col0, cols, ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(),
-                ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfSelf.as<double>());
-        DC_CUDA_CHECK(cudaGetLastError());
-        lodfBlock<<<grid((long) nMonitored * cols), BLOCK, 0, ctx->stream>>>(ctx->n, nMonitored, col0, cols,
-                ctx->lodfMonitored.as<int>(), ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
-                ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfSelf.as<double>(), ctx->lodfOut.as<double>());
-        DC_CUDA_CHECK(cudaGetLastError());
-        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<double> host((size_t) nMonitored * cols);
-        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->lodfOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        env->SetDoubleArrayRegion(jOut, 0, (jsize) host.size(), host.data());
-    } catch (const std::exception& e) {
-        throwJava(env, std::string("GpuDcSolver.lodfBlock: ") + e.what());
-    }
-}
-
-/** One block of raw sensitivity columns (no LODF post-processing): the PTDF of every function
- *  branch to every column of the element states. */
-JNIEXPORT void JNICALL
-Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiBlock(JNIEnv* env, jclass, jlong handle, jintArray jFunctions,
-                                                            jint col0, jint cols, jdoubleArray jOut) {
-    DcContext* ctx = ctxOf(handle);
-    try {
-        IntArray functions(env, jFunctions);
-        jsize outLen = env->GetArrayLength(jOut);
-        checkFactorBlock(ctx, col0, cols, functions.len, outLen);
-        int nFunctions = functions.len;
-        ctx->lodfMonitored.upload(functions.p, (size_t) std::max(nFunctions, 1) * sizeof(int));
-        ctx->lodfOut.ensure((size_t) nFunctions * cols * sizeof(double));
-        sensiBlock<<<grid((long) nFunctions * cols), BLOCK, 0, ctx->stream>>>(ctx->n, nFunctions, col0, cols,
-                ctx->lodfMonitored.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(),
-                ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfOut.as<double>());
-        DC_CUDA_CHECK(cudaGetLastError());
-        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<double> host((size_t) nFunctions * cols);
-        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->lodfOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        env->SetDoubleArrayRegion(jOut, 0, (jsize) host.size(), host.data());
-    } catch (const std::exception& e) {
-        throwJava(env, std::string("GpuDcSolver.sensiBlock: ") + e.what());
-    }
-}
-
-
-
-/** The factor-group right-hand sides (sparse, OLF's own fillRhs recorded) solved into the base or
- *  the alternate factor states. The states stay on the device. */
 /**
  * Assembles the whole PTDF onto the device and LEAVES IT THERE: one row per function branch, one
  * column per factor column already solved into facBase by sensiSetFactorColumns, column-major.

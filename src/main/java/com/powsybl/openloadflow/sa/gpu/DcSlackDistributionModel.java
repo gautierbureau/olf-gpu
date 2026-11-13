@@ -219,7 +219,7 @@ final class DcSlackDistributionModel {
                 break;
             }
             double done = 0;
-            for (int k = 0; k < count; ) {
+            for (int k = 0; k < count;) {
                 int i = elements[k];
                 double f = factors[k] / norm;                 // normalizeParticipationFactors
                 double minTargetP = useActiveLimits ? genMinTargetP[i] : -Double.MAX_VALUE;

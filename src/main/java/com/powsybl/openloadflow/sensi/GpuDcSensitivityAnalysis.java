@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.powsybl.commons.report.ReportNode;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
@@ -22,16 +23,16 @@ import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
 import com.powsybl.openloadflow.dc.gpu.GpuDcAssembly;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
-import com.powsybl.openloadflow.network.action.LfAction;
 import com.powsybl.openloadflow.network.DisabledNetwork;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.impl.LfLegBranch;
 import com.powsybl.openloadflow.network.TapPositionChange;
+import com.powsybl.openloadflow.network.action.LfAction;
+import com.powsybl.openloadflow.network.action.LfOperatorStrategy;
+import com.powsybl.openloadflow.network.impl.LfLegBranch;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.util.ParticipatingElement;
-import com.powsybl.openloadflow.network.action.LfOperatorStrategy;
-import com.powsybl.commons.report.ReportNode;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityResultWriter;
@@ -415,7 +416,7 @@ public class GpuDcSensitivityAnalysis extends DcSensitivityAnalysis {
         }
         writeNanos += System.nanoTime() - tWrite;
         stateCount++;
-        if (System.getenv("OLF_GPU_PHASE_TIME") != null && stateCount % 100 == 0) {
+        if (GpuTrace.PHASE_TIME.isOn() && stateCount % 100 == 0) {
             System.err.printf("DC_SENSI_PHASE states=%d factors/state=%d device=%d ms predefined=%d ms unscale+filter+write=%d ms%n",
                     stateCount, count, deviceNanos / 1_000_000, predefinedNanos / 1_000_000, writeNanos / 1_000_000);
         }

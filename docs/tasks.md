@@ -99,6 +99,13 @@ factors (`GpuLodfCalculator`).
   the previous column's last row. Remaining on the host for strategies: applying the actions to the network for the
   topology and taps, and the full NetworkState.restore after each (the AC GpuContingencyTopology design would replace
   both).
+- DONE 2026-11-13, the states stay on the device: a run answered from its states no longer copies them back
+  (620 MB on network.xiidm); the device gathers the closed flows of the monitored branches and of the screen's
+  candidate branches (dcFlows: OLF's operations, explicit _rn intrinsics; side 2 is exactly -p1) and the state rows
+  of the voltage-angle limits' buses; a contingency that needs its whole state (overflow, own monitor, threshold
+  condition) gets it alone (readChunkStates). GpuDcStateValues: the whole state or the gathered values. Check hook:
+  the reader on the gathered values vs OLF's model (all 9959 of network.xiidm: 0). network.xiidm warm, GPU free:
+  4.1 -> 3.4-3.7 s; device chunks 0.31 -> 0.16-0.20 s; host loop -> 0.17 s.
 - Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (now ~0.3 s), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
   connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
 - Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off

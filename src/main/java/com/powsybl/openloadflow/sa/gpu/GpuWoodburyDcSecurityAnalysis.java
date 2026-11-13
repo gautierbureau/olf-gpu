@@ -110,6 +110,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     /** Test hook: print how accurate the device base state is against OLF's own system (GpuDcBaseAccuracy). */
     public static final AtomicBoolean BASE_ACCURACY_DIAGNOSTIC = new AtomicBoolean();
 
+    /** The last base accuracy measured under that hook (the main component's), or null. */
+    public static final java.util.concurrent.atomic.AtomicReference<GpuDcBaseAccuracy.Result> LAST_BASE_ACCURACY =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
     /** Test hook: build the modified target columns on BOTH sides and compare them bit for bit. */
     public static final AtomicBoolean CHECK_DEVICE_TARGETS = new AtomicBoolean();
 
@@ -178,7 +182,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 throw e;
             }
             if (BASE_ACCURACY_DIAGNOSTIC.get()) {
-                GpuDcBaseAccuracy.report(context, solver, preContingencyStates);
+                LAST_BASE_ACCURACY.set(GpuDcBaseAccuracy.report(context, solver, preContingencyStates));
             }
             if (context.getParameters().isSetVToNan()) {
                 for (LfBus bus : lfNetwork.getBuses()) {

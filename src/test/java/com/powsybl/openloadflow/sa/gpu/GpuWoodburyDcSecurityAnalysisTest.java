@@ -465,8 +465,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pstRelChange")),
                 new com.powsybl.contingency.strategy.OperatorStrategy("strategyOnViolation", ContingencyContext.specificContingency("L2"),
                         new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("pstAbsChange")));
-        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
-        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
         assertSameResults(cpu, gpu);
         assertAllOnDevice(cpu);
         assertFalse(cpu.getOperatorStrategyResults().isEmpty(), "the strategies must have produced results");
@@ -485,8 +485,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
                 new com.powsybl.contingency.strategy.OperatorStrategy("strategyTapChange", ContingencyContext.specificContingency("L1"),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pst1Change", "pst2Change")));
-        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
-        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
         assertSameResults(cpu, gpu);
         assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
@@ -508,8 +508,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
             strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("close-" + c.getId(), ContingencyContext.specificContingency(c.getId()),
                     new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
         }
-        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
-        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
         assertSameResults(cpu, gpu);
         assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
@@ -529,8 +529,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("gen2Down", "load9Down")),
                 new com.powsybl.contingency.strategy.OperatorStrategy("loadOnly", ContingencyContext.specificContingency("L2-3-1"),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("load9Down")));
-        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
-        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
         assertSameResults(cpu, gpu);
         assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
@@ -629,6 +629,61 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertTrue(GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get() > 500,
                 "contingencies answered from their state: " + GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get());
         assertEquals(0, GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.get(), "values differing between the state reader and OLF's model");
+    }
+
+    /** The operator strategy tests' monitors: every branch and voltage level, or (strategiesAnsweredFromTheirState)
+     *  every branch only, so the strategies are answered from their device state. */
+    private boolean branchOnlyStrategyMonitors;
+
+    private List<StateMonitor> strategyMonitors(Network network) {
+        if (!branchOnlyStrategyMonitors) {
+            return monitorAll(network);
+        }
+        Set<String> branchIds = network.getBranchStream().map(Branch::getId).collect(Collectors.toCollection(LinkedHashSet::new));
+        return List.of(new StateMonitor(ContingencyContext.all(), branchIds, Set.of(), Set.of()));
+    }
+
+    /**
+     * Operator strategies answered from their device state, as the AC path starts a strategy from it: the actions applied
+     * on the network (topology, taps), every value read from the state (the action branches on their current model),
+     * bit for bit OLF's with the state loaded; and voltage-angle limits checked on the state's angles. The strategy tests
+     * rerun with branch monitors only, then a network with violated voltage-angle limits.
+     */
+    @Test
+    void strategiesAndAngleLimitsAnsweredFromTheirState() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(true);
+        GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.set(0);
+        GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.set(0);
+        branchOnlyStrategyMonitors = true;
+        try {
+            phaseTapActionsMatchStock();
+            twoPhaseTapActionsMatchStock();
+            switchActionsMatchStock();
+            generatorAndLoadActionsMatchStock();
+
+            Network network = IeeeCdfNetworkFactory.create14();
+            addActivePowerLimits(network, 0.9);
+            network.newVoltageAngleLimit().setId("VAL-1-14").from(network.getGenerator("B1-G").getTerminal())
+                    .to(network.getLoad("B14-L").getTerminal()).setHighLimit(0.05).setLowLimit(-0.05).add();
+            network.newVoltageAngleLimit().setId("VAL-2-9").from(network.getGenerator("B2-G").getTerminal())
+                    .to(network.getLoad("B9-L").getTerminal()).setHighLimit(0.02).add();
+            List<Contingency> contingencies = allBranches(network);
+            List<StateMonitor> monitors = strategyMonitors(network);
+            SecurityAnalysisResult cpu = runStock(network, contingencies, monitors, dcFastParameters());
+            SecurityAnalysisResult gpu = runGpu(network, contingencies, monitors, dcFastParameters());
+            assertSameResults(cpu, gpu);
+            assertTrue(cpu.getPostContingencyResults().stream().anyMatch(r -> r.getLimitViolationsResult().getLimitViolations().stream()
+                    .anyMatch(v -> v.getLimitType() == com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE_ANGLE
+                            || v.getLimitType() == com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE_ANGLE)),
+                    "the voltage-angle limits must be violated somewhere");
+        } finally {
+            branchOnlyStrategyMonitors = false;
+            GpuWoodburyDcSecurityAnalysis.CHECK_STATE_READER.set(false);
+        }
+        assertEquals(0, GpuWoodburyDcSecurityAnalysis.STATE_READER_MISMATCH_COUNT.get(), "values differing between the state reader and OLF's model");
+        assertTrue(GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get() > 40,
+                "answered from their state: " + GpuWoodburyDcSecurityAnalysis.STATE_FREE_CONTINGENCY_COUNT.get());
     }
 
     @Test

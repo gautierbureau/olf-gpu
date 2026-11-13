@@ -250,7 +250,8 @@ class GpuDcLoadFlowProviderTest {
         assertEquals(cpuCause.getMessage(), gpuCause.getMessage());
     }
 
-    private static Throwable rootCause(Throwable t) {
+    private static Throwable rootCause(Throwable throwable) {
+        Throwable t = throwable;
         while (t.getCause() != null && t.getCause() != t) {
             t = t.getCause();
         }

@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.dc.gpu;
 
 import com.powsybl.commons.report.ReportNode;
+import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.Equation;
@@ -21,7 +22,6 @@ import com.powsybl.openloadflow.network.PiModelArray;
 import com.powsybl.openloadflow.network.TransformerPhaseControl;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.Reports;
-import com.powsybl.iidm.network.TwoSides;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

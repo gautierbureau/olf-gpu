@@ -13,7 +13,6 @@ import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Branch;
-import com.powsybl.iidm.network.LimitType;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;

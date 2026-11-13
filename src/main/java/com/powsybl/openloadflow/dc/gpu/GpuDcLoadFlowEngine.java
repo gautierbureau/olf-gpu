@@ -34,6 +34,7 @@ import com.powsybl.openloadflow.network.util.ActivePowerDistribution;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.Reports;
+import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -129,7 +130,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
         long t1 = System.nanoTime();
         if (solver == null) {
             solver = GpuDcSolver.createAssembled(a);
-            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            if (GpuTrace.PHASE_TIME.isOn()) {
                 System.err.printf("DC_ASSEMBLY n=%d nnz=%d capture=%.1f ms upload+fill+analysis+factorization=%.1f ms%n",
                         a.size(), a.nonZeroCount(), (t1 - t0) / 1e6, (System.nanoTime() - t1) / 1e6);
             }
@@ -164,7 +165,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
     private boolean prepareLoops(List<DcOuterLoop> outerLoops) {
         boolean phase = outerLoops.stream().anyMatch(DcIncrementalPhaseControlOuterLoop.class::isInstance);
         boolean hvdc = outerLoops.stream().anyMatch(DcHvdcAcEmulationLimitsOuterLoop.class::isInstance);
-        if (!phase && !hvdc || Boolean.getBoolean(DISABLE_DEVICE_LOOPS_PROPERTY)) {
+        if (!phase && !hvdc || HOST_OUTER_LOOPS.get()) {
             loops = null;
             return false;
         }
@@ -181,8 +182,9 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
         }
     }
 
-    /** {@code -Dolf.gpu.dc.hostOuterLoops=true} runs OLF's own loop checks (the A/B of the kernels). */
-    public static final String DISABLE_DEVICE_LOOPS_PROPERTY = "olf.gpu.dc.hostOuterLoops";
+    /** Test hook, the A/B of the kernels: true runs OLF's own loop checks instead of the device ones. Not a
+     *  configuration: the device loops are the product, this only proves they decide as OLF's do. */
+    public static final java.util.concurrent.atomic.AtomicBoolean HOST_OUTER_LOOPS = new java.util.concurrent.atomic.AtomicBoolean();
 
     /**
      * The device check of a loop that decides from the state, or {@code null} when this loop has no

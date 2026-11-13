@@ -103,6 +103,15 @@ final class GpuDcStateReader {
         return busPhRow[bus.getNum()];
     }
 
+    /** The state rows a branch's closed flow reads (its angles, its shift when a variable), added to {@code rows}. */
+    void addFlowRows(int b, gnu.trove.list.array.TIntArrayList rows) {
+        for (int row : new int[] {ph1Row[b], ph2Row[b], a1Row[b]}) {
+            if (row >= 0) {
+                rows.add(row);
+            }
+        }
+    }
+
     /** {@code branch.getP1().eval()} (side 1) or {@code getP2()} (side 2) with {@code state} loaded. */
     double p(GpuDcStateValues values, LfBranch branch, int side) {
         Evaluable p = side == GpuTwoSides.ONE ? branch.getP1() : branch.getP2();

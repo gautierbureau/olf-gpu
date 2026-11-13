@@ -692,7 +692,14 @@ public final class GpuDcAssembly {
                 while (i < entries.size()) {
                     int row = entries.get(i).derivative().getVariable().getRow();
                     if (row == -1) {
-                        throw new IllegalStateException("array term derivative on a variable without a row");
+                        // a variable out of the system (a bus dead in the base case, behind a branch an action may close):
+                        // OLF's derivative vector carries the entry with a 0 value when its term is inactive, and drops it
+                        DerivativeEntry en = entries.get(i);
+                        if (termArrays.get(en.termArrayNum()).isTermActive(en.termNum())) {
+                            throw new IllegalStateException("active array term derivative on a variable without a row");
+                        }
+                        i++;
+                        continue;
                     }
                     colIdx.add(row);
                     while (i < entries.size() && entries.get(i).derivative().getVariable().getRow() == row) {

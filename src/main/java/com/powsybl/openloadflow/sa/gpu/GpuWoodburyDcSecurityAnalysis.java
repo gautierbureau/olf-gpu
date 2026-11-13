@@ -773,6 +773,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         // --- chunks: every strategy scenario has a modified target (the stock re-solves whenever an action is present)
         double[] states = new double[n * DEVICE_CHUNK];
         double[] targets = new double[n * DEVICE_CHUNK];
+        ChunkReads strategyReads = chunkReads(lfNetwork, n, monitoredBranchResults);
         NetworkState networkState = NetworkState.save(lfNetwork);
         for (int from = 0; from < resolved.size(); from += DEVICE_CHUNK) {
             int to = Math.min(from + DEVICE_CHUNK, resolved.size());
@@ -822,7 +823,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             }
             long tc2 = System.nanoTime();
             tTargets += tc2 - tc1;
-            int[] records = solver.woodburyChunk(ptr, elemList.stream().mapToInt(Integer::intValue).toArray(), base, GpuViolationScreen.BAND, CAPACITY, states);
+            // the states stay on the device where every strategy reads from them (the check hook copies them all)
+            boolean gather = stateFree && !checkStateReader;
+            int[] records = solver.woodburyChunk(ptr, elemList.stream().mapToInt(Integer::intValue).toArray(), base, GpuViolationScreen.BAND, CAPACITY,
+                    gather ? null : states);
+            StrategyChunkReads chunkReads = readStrategyChunk(solver, strategyReads, resolved.subList(from, to), records, states, gather, stateFree,
+                    monitoredBranchResults, strategySetup, table);
             long tc3 = System.nanoTime();
             tSolve += tc3 - tc2;
 
@@ -835,22 +841,19 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
                 lfNetwork.setReportNode(osSimReportNode);
 
-                double[] state = Arrays.copyOfRange(states, i * n, (i + 1) * n);
                 int emitted = records[i];
                 // answered from the device state, as the AC path starts a strategy from it: OLF's network not changed (no
                 // contingency nor actions applied, nothing to restore); else, and for the check hook's reference, the stock
                 // way: applied first (flows evaluated on the final topology and tap positions), the network restored after
-                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
+                boolean fromState = chunkReads.fromStateOf()[i];
+                double[] state = !fromState || !gather ? Arrays.copyOfRange(states, i * n, (i + 1) * n) : null;
+                GpuDcStateValues values = fromState && gather ? strategyReads.gathered().select(i) : GpuDcStateValues.of(state);
                 boolean applied = !fromState || checkStateReader;
                 if (applied) {
                     lfContingency.apply(parameters.getBalanceType());
                     LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
                 }
-                // the action branches' models moved on the host (tap, switch): the screen's flows for them are not
-                // the host's, so they are scanned in full, and read on their current model
-                int[] uncovered = lfActions.stream()
-                        .map(strategySetup.actionElementsByLfAction()::get).filter(Objects::nonNull).flatMap(Collection::stream)
-                        .mapToInt(e -> e.getLfBranch().getNum()).distinct().toArray();
+                int[] uncovered = chunkReads.uncoveredOf()[i];
                 if (applied) {
                     equationSystem.getStateVector().set(state);
                     if (needAngles) {
@@ -890,10 +893,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
                     Arrays.sort(candidates);
                     scanner.detectFromCandidates(lfNetwork, violationManager, candidates, isBranchDisabled, uncovered,
-                            fromState ? stateReader : null, GpuDcStateValues.of(state), dcPowerFactor);
+                            fromState ? stateReader : null, values, dcPowerFactor);
                 }
                 NetworkResult networkResult = fromState
-                        ? strategyResultFromState(monitoredBranchResults, lfNetwork, contingency, isBranchDisabled, GpuDcStateValues.of(state), checkStateReader,
+                        ? strategyResultFromState(monitoredBranchResults, lfNetwork, contingency, isBranchDisabled, values, checkStateReader,
                                 monitorIndexes, preContingencyNetworkResult, dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters())
                         : olfNetworkResult(lfNetwork, contingency, isBranchDisabled, monitorIndexes, createResultExtension, preContingencyNetworkResult,
                                 dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters());
@@ -1339,8 +1342,54 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         if (!statesCopied && !load.isEmpty()) {
             solver.readChunkStates(load.stream().mapToInt(Integer::intValue).toArray(), states);
         }
-        gatherChunkValues(solver, reads.gathered(), records, count, fromStateOf, reads.monitoredBranchNums(), reads.angleRows(), table);
+        gatherChunkValues(solver, reads.gathered(), records, count, fromStateOf, reads.monitoredBranchNums(), reads.angleRows(), table, null);
         return fromStateOf;
+    }
+
+    /** A strategy chunk's reads: which strategies are answered from their state, and their action branches. */
+    private record StrategyChunkReads(boolean[] fromStateOf, int[][] uncoveredOf) {
+    }
+
+    /**
+     * The strategies of a chunk answered from their state (stateFree, not overflowed, no monitor of their own) and, when
+     * the states stay on the device ({@code gather}), their values gathered there: the monitored and candidate branches'
+     * flows, the angle limits' rows, and the rows of the branches the actions changed (read on their new model). The
+     * others' whole states are copied into {@code states}.
+     */
+    private StrategyChunkReads readStrategyChunk(GpuDcSolver solver, ChunkReads reads, List<StrategyScenario> chunk, int[] records, double[] states,
+                                                 boolean gather, boolean stateFree, GpuMonitoredBranchResults monitoredBranchResults,
+                                                 StrategySetup strategySetup, GpuLimitTable table) {
+        int count = chunk.size();
+        boolean[] fromStateOf = new boolean[count];
+        int[][] uncoveredOf = new int[count][];
+        int[][] extraRows = new int[count][];
+        List<Integer> load = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            StrategyScenario sc = chunk.get(i);
+            // the action branches' models move (tap, switch): the screen's flows for them are not the host's, so they are
+            // scanned in full, and read on their new model
+            uncoveredOf[i] = sc.lfOperatorStrategy().getActions().stream()
+                    .map(strategySetup.actionElementsByLfAction()::get).filter(Objects::nonNull).flatMap(Collection::stream)
+                    .mapToInt(e -> e.getLfBranch().getNum()).distinct().toArray();
+            String contingencyId = sc.connectivity().getPropagatedContingency().getContingency().getId();
+            fromStateOf[i] = stateFree && records[i] <= CAPACITY && monitoredBranchResults.appliesTo(contingencyId);
+            if (!fromStateOf[i]) {
+                load.add(i);
+            } else if (gather) {
+                gnu.trove.list.array.TIntArrayList rows = new gnu.trove.list.array.TIntArrayList();
+                for (int b : uncoveredOf[i]) {
+                    stateReader.addFlowRows(b, rows);
+                }
+                extraRows[i] = rows.toArray();
+            }
+        }
+        if (gather) {
+            if (!load.isEmpty()) {
+                solver.readChunkStates(load.stream().mapToInt(Integer::intValue).toArray(), states);
+            }
+            gatherChunkValues(solver, reads.gathered(), records, count, fromStateOf, reads.monitoredBranchNums(), reads.angleRows(), table, extraRows);
+        }
+        return new StrategyChunkReads(fromStateOf, uncoveredOf);
     }
 
     /** What a run reads of its contingencies' states: the gathered values, the monitored branches, the angle limits' rows. */
@@ -1360,7 +1409,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * buses. The states themselves stay there.
      */
     private static void gatherChunkValues(GpuDcSolver solver, GpuDcStateValues.Gathered gathered, int[] records, int count, boolean[] fromStateOf,
-                                          int[] monitoredBranchNums, int[] angleRows, GpuLimitTable table) {
+                                          int[] monitoredBranchNums, int[] angleRows, GpuLimitTable table, int[][] extraRows) {
         int[] flowPtr = new int[count + 1];
         int[] rowPtr = new int[count + 1];
         gnu.trove.list.array.TIntArrayList flowCtg = new gnu.trove.list.array.TIntArrayList();
@@ -1390,6 +1439,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 for (int row : angleRows) {
                     rowCtg.add(c);
                     rowIndex.add(row);
+                }
+                if (extraRows != null && extraRows[c] != null) {
+                    for (int row : extraRows[c]) {
+                        rowCtg.add(c);
+                        rowIndex.add(row);
+                    }
                 }
             }
             flowPtr[c + 1] = flowBranch.size();

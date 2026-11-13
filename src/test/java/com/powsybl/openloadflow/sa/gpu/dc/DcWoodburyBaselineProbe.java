@@ -58,8 +58,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class DcWoodburyBaselineProbe {
 
-    private static final Path CASE_FILE = Path.of("rte6515_full.xiidm.gz");
-    private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
+    /** {@code OLF_DC_CASE_FILE}: the network (default rte6515_full.xiidm.gz, e.g. network.xiidm). */
+    private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_DC_CASE_FILE", "rte6515_full.xiidm.gz"));
+    /** {@code OLF_DC_PARAMS_FILE}: the load flow parameters (default the RTE ones at the repo root), switched to DC. */
+    private static final Path PARAMS_FILE = Path.of(System.getenv().getOrDefault("OLF_DC_PARAMS_FILE", "rte-loadflow-default-parameters.json"));
 
     private record Arm(String name, SecurityAnalysisResult result, long wallMs) {
     }
@@ -75,18 +77,23 @@ class DcWoodburyBaselineProbe {
         assumeTrue(Files.exists(PARAMS_FILE), PARAMS_FILE + " not found in module dir");
 
         Network network = Network.read(CASE_FILE);
-        List<Contingency> contingencies = mainComponentBranchContingencies(network);
+        // OLF_DC_CTG_FILE: a contingency list (JSON array of {id, elements}, or an object with "contingencies")
+        // instead of every main-synchronous-component branch
+        String ctgFile = System.getenv("OLF_DC_CTG_FILE");
+        List<Contingency> contingencies = ctgFile != null && !ctgFile.isEmpty()
+                ? readContingencies(Path.of(ctgFile))
+                : mainComponentBranchContingencies(network);
         int maxCtg = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_MAX_CTG", "0"));
         if (maxCtg > 0 && contingencies.size() > maxCtg) {
             contingencies = contingencies.subList(0, maxCtg);
         }
         int monitored = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_MONITORED", "100"));
-        List<String> monitoredBranches = contingencies.stream().limit(monitored).map(Contingency::getId).toList();
+        List<String> monitoredBranches = mainComponentBranchContingencies(network).stream().limit(monitored).map(Contingency::getId).toList();
         // the performance comparison: GPU single-thread vs the CPU with 8 threads (user rule, 2026-09-15)
         int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_THREADS", "8"));
 
-        System.out.printf("DC-BASELINE rte6515_full | %d N-1 contingencies | %d monitored branches | CPU threadCount %d, GPU 1%n",
-                contingencies.size(), monitoredBranches.size(), threads);
+        System.out.printf("DC-BASELINE %s | %d contingencies (%s) | %d monitored branches | CPU threadCount %d, GPU 1%n",
+                CASE_FILE.getFileName(), contingencies.size(), ctgFile != null && !ctgFile.isEmpty() ? ctgFile : "main-component branch N-1", monitoredBranches.size(), threads);
 
         if ("1".equals(System.getenv("OLF_DC_SKIP_KLU")) && "1".equals(System.getenv("OLF_DC_GPU"))) {
             // profiling run: the GPU arm alone
@@ -166,6 +173,8 @@ class DcWoodburyBaselineProbe {
         Map<String, Map<String, Double>> pCudss = monitoredP1(cudss.result());
         double maxP1Diff = 0;
         long compared = 0;
+        Map<String, Double> worstByCtg = new HashMap<>();
+        String worst = "";
         for (var e : pKlu.entrySet()) {
             Map<String, Double> other = pCudss.get(e.getKey());
             if (other == null) {
@@ -174,12 +183,23 @@ class DcWoodburyBaselineProbe {
             for (var b : e.getValue().entrySet()) {
                 Double o = other.get(b.getKey());
                 if (o != null && Double.isFinite(o) && Double.isFinite(b.getValue())) {
-                    maxP1Diff = Math.max(maxP1Diff, Math.abs(o - b.getValue()));
+                    double d = Math.abs(o - b.getValue());
+                    if (d > maxP1Diff) {
+                        worst = String.format("ctg=%s branch=%s KLU=%.9f other=%.9f", e.getKey(), b.getKey(), b.getValue(), o);
+                    }
+                    maxP1Diff = Math.max(maxP1Diff, d);
+                    worstByCtg.merge(e.getKey(), d, Math::max);
                     compared++;
                 }
             }
         }
-        System.out.printf("DC-BASELINE monitored P1: %d values compared, max |diff| %.3e MW%n", compared, maxP1Diff);
+        System.out.printf("DC-BASELINE monitored P1: %d values compared, max |diff| %.3e MW (%s)%n", compared, maxP1Diff, worst);
+        long above1e8 = worstByCtg.values().stream().filter(d -> d > 1e-8).count();
+        long above1e6 = worstByCtg.values().stream().filter(d -> d > 1e-6).count();
+        System.out.printf("DC-BASELINE monitored P1: contingencies with a diff > 1e-8 MW: %d, > 1e-6 MW: %d, of %d%n",
+                above1e8, above1e6, worstByCtg.size());
+        worstByCtg.entrySet().stream().sorted(Map.Entry.<String, Double>comparingByValue().reversed()).limit(10)
+                .forEach(e -> System.out.printf("DC-BASELINE   worst ctg %s %.3e MW%n", e.getKey(), e.getValue()));
 
         // Two different LU codes on the same ~4e4-conditioned DC matrix (max|v|/min|v|) differ by
         // cond * eps ~ 4e-12 relative: measured 1.2e-9 MW = 1.2e-11 pu on 9042 contingencies. The
@@ -217,6 +237,19 @@ class DcWoodburyBaselineProbe {
                 .join().getResult();
         long wallMs = (System.nanoTime() - t0) / 1_000_000;
         return new Arm(name, result, wallMs);
+    }
+
+    private static List<Contingency> readContingencies(Path file) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper om = com.powsybl.commons.json.JsonUtil.createObjectMapper()
+                    .registerModule(new com.powsybl.contingency.json.ContingencyJsonModule());
+            com.fasterxml.jackson.databind.JsonNode root = om.readTree(file.toFile());
+            com.fasterxml.jackson.databind.JsonNode array = root.isArray() ? root : root.get("contingencies");
+            return new ArrayList<>(om.readerFor(new com.fasterxml.jackson.core.type.TypeReference<List<Contingency>>() { })
+                    .readValue(array));
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
     /** All branches connected on both sides inside the main synchronous component, in network order. */
@@ -272,6 +305,11 @@ class DcWoodburyBaselineProbe {
             }
             m.put(p.getContingency().getId(), byBranch);
         }
+        Map<String, Double> base = new HashMap<>();
+        for (BranchResult br : r.getPreContingencyResult().getNetworkResult().getBranchResults()) {
+            base.put(br.getBranchId(), br.getP1());
+        }
+        m.put("<pre-contingency>", base);
         return m;
     }
 

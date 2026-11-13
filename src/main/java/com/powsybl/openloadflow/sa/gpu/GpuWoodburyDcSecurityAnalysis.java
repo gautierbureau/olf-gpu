@@ -678,6 +678,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         DcLoadFlowParameters parameters = context.getParameters();
 
         // --- connectivity re-check per scenario (ConnectivityBreakAnalysis.processPostContingencyAndPostOperatorStrategyConnectivityAnalysisResult)
+        long t0 = System.nanoTime();
+        long tChanges = 0;
+        long tTargets = 0;
+        long tSolve = 0;
+        long tHost = 0;
+        int graphChecks = 0;
         int[] ctgPtr = new int[scenarios.size() + 1];
         List<Integer> criterionElems = new ArrayList<>();
         for (int i = 0; i < scenarios.size(); i++) {
@@ -712,6 +718,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             if (!topological || maxSum[i] <= 1d - CONNECTIVITY_LOSS_THRESHOLD) {
                 connectivity = postContingency.withOperatorStrategy(los);
             } else {
+                graphChecks++;
                 connectivity = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, postContingency.getPropagatedContingency(),
                                 elementByBranch, los, strategySetup.actionElementsByLfAction(), false)
                         .orElseGet(() -> ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
@@ -741,6 +748,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             resolved.add(new StrategyScenario(sc.candidate(), sc.operatorStrategy(), los, connectivity, elements, sc.contingencyReportNode()));
         }
 
+        long tConnectivity = System.nanoTime() - t0;
         // --- chunks: every strategy scenario has a modified target (the stock re-solves whenever an action is present)
         double[] states = new double[n * DEVICE_CHUNK];
         double[] targets = new double[n * DEVICE_CHUNK];
@@ -753,6 +761,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             List<Integer> elemList = new ArrayList<>();
             // the strategies' columns: built on the device (the contingency's changes, then the actions as row edits),
             // or replayed on the host when the device cannot place them; the check hook builds both
+            long tc0 = System.nanoTime();
             ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges(deviceTargets.distributed(), parameters.getNetworkParameters()) : null;
             for (int i = 0; i < count && changes != null; i++) {
                 StrategyScenario sc = resolved.get(from + i);
@@ -777,6 +786,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             sc.lfOperatorStrategy().getActions(), lfNetwork, context, targets, i * n);
                 }
             }
+            long tc1 = System.nanoTime();
+            tChanges += tc1 - tc0;
             if (changes != null) {
                 double[] built = deviceTargets.check() ? new double[n * count] : null;
                 solver.buildChunkTargets(changes.build(), deviceTargets.distributed(), deviceTargets.participationType(),
@@ -788,7 +799,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             } else {
                 solver.setChunkTargets(targets, count);
             }
+            long tc2 = System.nanoTime();
+            tTargets += tc2 - tc1;
             int[] records = solver.woodburyChunk(ptr, elemList.stream().mapToInt(Integer::intValue).toArray(), base, GpuViolationScreen.BAND, CAPACITY, states);
+            long tc3 = System.nanoTime();
+            tSolve += tc3 - tc2;
 
             for (int i = 0; i < count; i++) {
                 StrategyScenario sc = resolved.get(from + i);
@@ -866,6 +881,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     networkState.restore();
                 }
             }
+            tHost += System.nanoTime() - tc3;
+        }
+        if (GpuTrace.PHASE_TIME.isOn()) {
+            System.err.printf("DC_WOODBURY_STRATEGIES %d strategies: connectivity=%.0f ms (%d graph checks) changes=%.0f ms targets=%.0f ms "
+                            + "solve+screen+states=%.0f ms host=%.0f ms total=%.0f ms%n", scenarios.size(), tConnectivity / 1e6, graphChecks,
+                    tChanges / 1e6, tTargets / 1e6, tSolve / 1e6, tHost / 1e6, (System.nanoTime() - t0) / 1e6);
         }
     }
 
@@ -1578,7 +1599,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 }
             }
             for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
-                excludedBus.add(bus.getNum());
+                // a bus without injection (a bay's node a breaker isolates) adds an exact 0 to the mismatch and has no
+                // generator to distribute on: excluding it changes nothing, and keeps the column shareable with others
+                if (!bus.getGenerators().isEmpty() || bus.getLoadTargetP() != 0 || changedLoads.containsKey(bus)) {
+                    excludedBus.add(bus.getNum());
+                }
             }
             Set<LfBus> disabledBuses = candidate.connectivity().getDisabledBuses();
             List<LfGeneratorAction> generatorActions = applicableGeneratorActions(lfActions, disabledBuses);

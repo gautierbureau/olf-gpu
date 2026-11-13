@@ -799,31 +799,49 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
                 lfNetwork.setReportNode(osSimReportNode);
 
-                // apply first (the stock, on this OLF: flows are evaluated on the final topology and tap positions)
-                lfContingency.apply(parameters.getBalanceType());
-                LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
                 double[] state = Arrays.copyOfRange(states, i * n, (i + 1) * n);
                 int emitted = records[i];
+                // answered from the device state, as the AC path starts a strategy from it: OLF's network not changed (no
+                // contingency nor actions applied, nothing to restore); else, and for the check hook's reference, the stock
+                // way: applied first (flows evaluated on the final topology and tap positions), the network restored after
+                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
+                boolean applied = !fromState || checkStateReader;
+                if (applied) {
+                    lfContingency.apply(parameters.getBalanceType());
+                    LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
+                }
                 // the action branches' models moved on the host (tap, switch): the screen's flows for them are not
                 // the host's, so they are scanned in full, and read on their current model
                 int[] uncovered = lfActions.stream()
                         .map(strategySetup.actionElementsByLfAction()::get).filter(Objects::nonNull).flatMap(Collection::stream)
                         .mapToInt(e -> e.getLfBranch().getNum()).distinct().toArray();
-                // answered from the device state, as the AC path starts a strategy from it: not loaded into OLF's model
-                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
-                if (!fromState || checkStateReader) {
+                if (applied) {
                     equationSystem.getStateVector().set(state);
                     if (needAngles) {
                         updateNetwork(lfNetwork, equationSystem, state);
                     }
                 }
-                if (fromState) {
-                    stateReader.useLiveModel(lfNetwork, uncovered);
+                if (fromState && applied) {
+                    stateReader.useLiveModel(lfNetwork, uncovered);  // the actions applied: their models are the network's
+                } else if (fromState) {
+                    // a tap action's new model as applying would set it (a relative change from the base position)
+                    Map<LfBranch, PiModel> newModels = tapActionModels(lfActions);
+                    stateReader.useLiveModel(uncovered, b -> {
+                        LfBranch branch = lfNetwork.getBranch(b);
+                        return newModels.getOrDefault(branch, branch.getPiModel());
+                    });
                 }
-                // the stock predicate: the contingency's branches and the partially disabled ones of THIS connectivity result
+                // the stock predicate: the contingency's branches and the partially disabled ones of THIS connectivity result,
+                // and what applying disables on the network: the branches out of the main component, those the actions open
                 Set<LfBranch> disabledBranches = new HashSet<>();
                 sc.connectivity().getPropagatedContingency().getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
                 disabledBranches.addAll(sc.connectivity().getPartialDisabledBranches());
+                sc.connectivity().toLfContingency().ifPresent(c -> disabledBranches.addAll(c.getDisabledNetwork().getBranchesStatus().keySet()));
+                for (LfAction action : lfActions) {
+                    if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
+                        disabledBranches.addAll(branchAction.getDisabledBranches());
+                    }
+                }
                 Predicate<LfBranch> isBranchDisabled = disabledBranches::contains;
 
                 var violationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
@@ -844,9 +862,22 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 strategyResultsByContingency.computeIfAbsent(contingency.getId(), k -> new ArrayList<>()).add(new OperatorStrategyResult(operatorStrategy,
                         List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED,
                                 new LimitViolationsResult(violationManager.getLimitViolations()), networkResult, Double.NaN))));
-                networkState.restore();
+                if (applied) {
+                    networkState.restore();
+                }
             }
         }
+    }
+
+    /** The new model of the branches the tap actions change ({@code AbstractLfTapChangerAction.apply}'s). */
+    private static Map<LfBranch, PiModel> tapActionModels(List<LfAction> lfActions) {
+        Map<LfBranch, PiModel> models = new HashMap<>();
+        for (LfAction action : lfActions) {
+            if (action instanceof AbstractLfTapChangerAction<?> tapAction && tapAction.getChange() != null) {
+                models.put(tapAction.getChange().getBranch(), tapAction.getChange().getNewPiModel());
+            }
+        }
+        return models;
     }
 
     /** The branch model, in LfNetwork order (== GpuLimitTable order == branch num). */

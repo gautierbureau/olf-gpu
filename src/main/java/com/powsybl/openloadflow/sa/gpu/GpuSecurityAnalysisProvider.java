@@ -16,6 +16,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.gpu.GpuLoadFlowProvider;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
+import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -160,8 +161,12 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
                 LOGGER.info("Version: {} (GPU Woodbury DC security analysis)", new PowsyblOpenLoadFlowVersion());
                 int dcRequestedThreads = forceSinglePartition(runParameters.getSecurityAnalysisParameters());   // one device, one partition
                 GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);                              // accumulates over the components
+                // operator strategies close branches too: a connectivity that supports edge additions, the DTree's
+                // (incremental and decremental, upstream's default since #1522) rather than the naive one, which
+                // recomputes every component on each change
                 GraphConnectivityFactory<LfBus, LfBranch> dcConnectivityFactory = runParameters.getOperatorStrategies().isEmpty()
-                        ? connectivityFactory : new NaiveGraphConnectivityFactory<>(LfBus::getNum);
+                        || connectivityFactory.supportsIncremental()
+                        ? connectivityFactory : new DTreeGraphConnectivityFactory<>();
                 GpuWoodburyDcSecurityAnalysis dcAnalysis = new GpuWoodburyDcSecurityAnalysis(network, matrixFactory,
                         dcConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
                 return dcAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,

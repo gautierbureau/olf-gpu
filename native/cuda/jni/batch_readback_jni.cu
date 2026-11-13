@@ -24,8 +24,8 @@ OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchTargets)(
 }
 
 // The per-scenario ROW MODES as the device ENDED with them, the companion to readBatchTargets.
-// A row's equation is (mode, target) together, and the outer-loop kernels rewrite BOTH: the host's
-// rowModePerScenario is only what SETUP asked for, so reading a target without its final mode can
+// A row's equation is (mode, target) together, and the outer-loop kernels rewrite BOTH: the row modes the
+// host installed are only what SETUP asked for, so reading a target without its final mode can
 // say "the target is right" about a row that is no longer the equation it was set up to be. That is
 // the whole failure shape of the device-target-writer class, where a wrong row converges cleanly and
 // nothing flags it.

@@ -673,7 +673,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         + "; the solve goes to the CPU");
             }
             double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
-                    x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
+                    x0, target, new int[0], activation.rowMode(),
                     elementMask,
                     ovIdx, ovVal,
                     new int[0], new double[0], new double[0], new double[0], new double[0], null,

@@ -124,7 +124,7 @@ final class PackedNewtonRaphson {
                 0, new double[0], new double[0], 0, 0);
         try {
             DriverNative.setBatchOuterLoops(handle, false, false);           // pure Newton-Raphson: no outer loop
-            return BatchSolveNative.solveBatchContext(handle, x0, target, new int[][] {rowMode}, rowMode, new boolean[1][0],
+            return BatchSolveNative.solveBatchContext(handle, x0, target, new int[0], rowMode, new boolean[1][0],
                     new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                     maxIter, tol, 0.0, 0.0, 0.0, stateVectorScalingMode, maxDv, maxDphi, varType, null, null, null, null, null, null, 0,
                     com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,
@@ -183,8 +183,9 @@ final class PackedNewtonRaphson {
                 ReactiveLimitsNative.setBatchReactiveLimitStrongestPvKeys(handle, new double[reactiveLimitVoltageRow.length], pRow, new double[reactiveLimitVoltageRow.length], idRank);
                 // no loop list behind this entry point either: the caller asks for the two loops by handing their tables
                 DriverNative.setBatchOuterLoops(handle, true, true);
-                // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
-                return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
+                // one-shot: no per-scenario gen-override flips, so the first scenario's row mode is the base row mode
+                return BatchSolveNative.solveBatchContext(handle, x0Base, targetBase, rowModeEntries(rowMode, rowMode[0]), rowMode[0],
+                        disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, 0,
                         com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE,   // OLF's cap: 0 means never switch back
@@ -195,5 +196,21 @@ final class PackedNewtonRaphson {
         } finally {
             StructureNative.destroyStructure(structure);
         }
+    }
+
+    /** The (scenario, row, mode) entries where the scenarios' rows differ from {@code base}, scenario then row ascending:
+     *  what the solve takes in place of whole rows. */
+    private static int[] rowModeEntries(int[][] rowModes, int[] base) {
+        gnu.trove.list.array.TIntArrayList entries = new gnu.trove.list.array.TIntArrayList();
+        for (int s = 0; s < rowModes.length; s++) {
+            for (int r = 0; r < base.length; r++) {
+                if (rowModes[s][r] != base[r]) {
+                    entries.add(s);
+                    entries.add(r);
+                    entries.add(rowModes[s][r]);
+                }
+            }
+        }
+        return entries.toArray();
     }
 }

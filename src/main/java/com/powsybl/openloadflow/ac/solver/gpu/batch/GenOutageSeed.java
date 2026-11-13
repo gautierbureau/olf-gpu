@@ -34,7 +34,6 @@ final class GenOutageSeed {
         final int chunkSize = ctx.chunkSize();
         final int n = ctx.n();
         final GpuAcData gpuData = ctx.gpuData();
-        final int[] baseRowMode = ctx.baseRowMode();
         final ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = ctx.reactiveCapabilityCurves();
         final java.util.Map<Integer, int[]> curveEntriesByPRow = ctx.curveEntriesByPRow();
         final RunScratch rs = ctx.rs();
@@ -62,16 +61,11 @@ final class GenOutageSeed {
                     // The pilot's voltage identity goes NOW, with the member's
                     // BUS_TARGET_Q row, so the two halves of the dead control land in
                     // the same fill.
-                    int[] row = rs.rowModePerScenario[s] == baseRowMode
-                            ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                    row[go.deadPilotVRow()] = GpuRowMode.EQUATION;
-                    rs.rowModePerScenario[s] = row;
+                    rs.rowModes.set(s, go.deadPilotVRow(), GpuRowMode.EQUATION);
                     rs.overrides.add(s * n + go.deadPilotVRow(), go.deadPilotQTarget());
                 }
                 if (go.toPq()) {
-                    int[] row = rs.rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rs.rowModePerScenario[s];
-                    row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the reactive-power equation (PV→PQ)
-                    rs.rowModePerScenario[s] = row;
+                    rs.rowModes.set(s, go.vRow(), go.pqRowModeOrDefault());   // BUS_V row becomes the reactive-power equation (PV→PQ)
                 }
                 if (go.reMergesReactiveLimitEntry()) {
                     cl.reactiveLimitLocalOverrideScenarioEntryList.add(s);
@@ -176,8 +170,7 @@ final class GenOutageSeed {
                 if (go.seedsDistrQTargets()) {
                     for (int t = 0; t < go.distrQTargetRows().length; t++) {
                         int distrQTargetRow = go.distrQTargetRows()[t];
-                        int distrQRowMode = rs.rowModePerScenario[s] != null
-                                ? rs.rowModePerScenario[s][distrQTargetRow] : baseRowMode[distrQTargetRow];
+                        int distrQRowMode = rs.rowModes.get(s, distrQTargetRow);
                         // Seed only where the row still HOSTS a DISTR_Q equation this
                         // scenario. BUS_TARGET_Q means it hosts its own reactive balance (a PV -> PQ
                         // switch, or a control the contingency killed and whose BUS_TARGET_Q

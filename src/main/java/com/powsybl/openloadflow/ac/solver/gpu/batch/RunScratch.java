@@ -22,8 +22,8 @@ import java.util.List;
  * <p>The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
  * same converged base operating point): passed as single length-n rows and tiled on-device. The
  * disabled mask is per-scenario (each chunk clears the one flag each slot set, sets the new one).
- * The ROW MODE is per-scenario too: a non-fragmenting outage shares the base row (same PV/slack
- * layout); a fragmenting one gets a cloned base row with its islanded buses frozen to identity.
+ * The ROW MODES are per-scenario too: the base row's (same PV/slack layout), except the rows a slot sets, such as a
+ * fragmenting outage's islanded buses frozen to identity (see {@link GpuBatchRowModes}).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -35,7 +35,7 @@ final class RunScratch {
     // the closed ones in the element order) branch elements with an end there
     final java.util.Map<Integer, List<Integer>> elementsAtVCol;
     final int ncbElems;
-    final int[][] rowModePerScenario;   // per-scenario row mode (re-assigned every chunk)
+    final GpuBatchRowModes rowModes;    // per-scenario row modes (reset with each slot)
     // Per-scenario target overrides (generator contingencies): flat (dTargetIndex = slot*n + row, value)
     // lists rebuilt per chunk. Empty when no generator outage is in the chunk.
     // The per-chunk override list AND its row index in one object: a row may carry only one
@@ -62,7 +62,6 @@ final class RunScratch {
     final double[] distributedSlackOverrideBaseTargetPDelta;
     final double[] distributedSlackOverrideMaxDelta;
     final double[] distributedSlackOverrideMinDelta;
-    private final int[] baseRowMode;
     private final int[] baseOpenClosedBranchElements;
 
     RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode,
@@ -85,7 +84,7 @@ final class RunScratch {
                 }
             }
         }
-        this.rowModePerScenario = new int[chunkSize][];
+        this.rowModes = new GpuBatchRowModes(chunkSize, baseRowMode);
         this.overrides = new GpuBatchOverrides();
         this.zeroImpedanceElementByBranchNumChunk = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
         this.nBaseClosedZeroImpedanceBranches = gpuData.zeroImpedanceBranch().indices().length / 11 - gpuData.baseOpenBranches().zeroImpedanceElements().length;
@@ -108,7 +107,6 @@ final class RunScratch {
         this.distributedSlackOverrideBaseTargetPDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.distributedSlackOverrideMaxDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.distributedSlackOverrideMinDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
-        this.baseRowMode = baseRowMode;
         this.baseOpenClosedBranchElements = gpuData.baseOpenBranches().closedBranchElements();
     }
 
@@ -153,6 +151,6 @@ final class RunScratch {
         for (int e : baseOpenClosedBranchElements) {
             disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
         }
-        rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
+        rowModes.reset(s);                       // default: base layout (padding + non-fragmenting)
     }
 }

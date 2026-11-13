@@ -85,15 +85,18 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
             return bus1PRow >= 0;
         }
 
-        /** The row the side-1 P target is written to THIS scenario: the relocated row, or the bus's own PHI row
+        /** The row the side-1 P target is written to in {@code scenario}: the relocated row, or the bus's own PHI row
          *  once the scenario has opened the parent coupler (that dummy row is then a FIXED_VARIABLE identity and the
-         *  balance is back home — the stock placement the kernels follow through relocatedChildOwnRow). */
-        public int bus1WriteRow(int[] rowMode) {
-            return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == GpuRowMode.FIXED_VARIABLE ? bus1PhiCol : bus1PRow;
+         *  balance is back home — the stock placement the kernels follow through relocatedChildOwnRow). Null
+         *  {@code rowModes}: the relocated row. */
+        public int bus1WriteRow(ScenarioRowModes rowModes, int scenario) {
+            return bus1PRow >= 0 && rowModes != null && bus1PRow != bus1PhiCol
+                    && rowModes.get(scenario, bus1PRow) == GpuRowMode.FIXED_VARIABLE ? bus1PhiCol : bus1PRow;
         }
 
-        public int bus2WriteRow(int[] rowMode) {
-            return bus2PRow >= 0 && rowMode != null && bus2PRow != bus2PhiCol && rowMode[bus2PRow] == GpuRowMode.FIXED_VARIABLE ? bus2PhiCol : bus2PRow;
+        public int bus2WriteRow(ScenarioRowModes rowModes, int scenario) {
+            return bus2PRow >= 0 && rowModes != null && bus2PRow != bus2PhiCol
+                    && rowModes.get(scenario, bus2PRow) == GpuRowMode.FIXED_VARIABLE ? bus2PhiCol : bus2PRow;
         }
 
         public boolean bus2PActive() {

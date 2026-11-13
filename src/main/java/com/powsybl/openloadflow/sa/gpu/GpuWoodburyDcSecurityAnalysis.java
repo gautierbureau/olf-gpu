@@ -291,7 +291,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
             try (solver) {
                 if (!device.isEmpty()) {
-                    onDevice = runOnDevice(solver, engine.getAssembly(), elementCount, lfNetwork, context, device, strategySetup, elementByBranch,
+                    onDevice = runOnDevice(solver, engine.getAssembly(), networkReportNode, elementCount, lfNetwork, context, device, strategySetup, elementByBranch,
                             preContingencyStates, preContingencyNetworkResult,
                             preContingencyLimitViolationManager, monitorIndexes, createResultExtension, securityAnalysisParameters,
                             limitReductions, dcPowerFactor, resultById, strategyResultsByContingency);
@@ -349,7 +349,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
     /** One (contingency, operator strategy) scenario of the strategy pass. */
     private record StrategyScenario(DeviceCandidate candidate, Indexed<OperatorStrategy> operatorStrategy, LfOperatorStrategy lfOperatorStrategy,
-                                    ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity, List<ComputedElement> elements) {
+                                    ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity, List<ComputedElement> elements,
+                                    ReportNode contingencyReportNode) {
     }
 
     /**
@@ -394,7 +395,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** The device pass over the qualified contingencies; returns the number solved on the device. */
-    private int runOnDevice(GpuDcSolver solver, GpuDcAssembly assembly, int elementCount, LfNetwork lfNetwork, DcLoadFlowContext context, List<DeviceCandidate> device,
+    private int runOnDevice(GpuDcSolver solver, GpuDcAssembly assembly, ReportNode networkReportNode, int elementCount, LfNetwork lfNetwork, DcLoadFlowContext context, List<DeviceCandidate> device,
                             StrategySetup strategySetup, Map<String, ComputedContingencyElement> elementByBranch,
                             double[] preContingencyStates, PreContingencyNetworkResult preContingencyNetworkResult,
                             LimitViolationManager preContingencyLimitViolationManager, AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
@@ -536,7 +537,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 PropagatedContingency propagated = candidate.connectivity().getPropagatedContingency();
                 LfContingency lfContingency = candidate.lfContingency();
                 Contingency contingency = propagated.getContingency();
-                ReportNode postContSimReportNode = Reports.createPostContingencySimulation(lfNetwork.getReportNode(), contingency.getId());
+                // a child of the network's report node, as the AC security analysis does: not of the previous
+                // contingency's, which nested every contingency in the one before (and re-checked every ancestor's values)
+                ReportNode postContSimReportNode = Reports.createPostContingencySimulation(networkReportNode, contingency.getId());
                 lfNetwork.setReportNode(postContSimReportNode);
                 logPostContingencyStart(lfNetwork, lfContingency);
 
@@ -582,7 +585,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         List<String> actionIds = checkCondition(operatorStrategy.value(), postContingencyViolations, lfNetwork);
                         List<LfAction> lfActions = actionIds.stream().map(strategySetup.lfActionById()::get).filter(Objects::nonNull).toList();
                         LfOperatorStrategy lfOperatorStrategy = new LfOperatorStrategy(operatorStrategy, lfActions);
-                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null));
+                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null, postContSimReportNode));
                     }
                 }
             }
@@ -665,7 +668,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 connectivity = postContingency.withOperatorStrategy(los);
             } else {
                 connectivity = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, postContingency.getPropagatedContingency(),
-                                elementByBranch, los, strategySetup.actionElementsByLfAction())
+                                elementByBranch, los, strategySetup.actionElementsByLfAction(), false)
                         .orElseGet(() -> ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
                                 postContingency.getPropagatedContingency(), los, lfNetwork));
             }
@@ -690,7 +693,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 throw new IllegalStateException("operator strategy " + los.getIndexedOperatorStrategy().value().getId()
                         + " has more than " + GpuDcSolver.MAX_ELEMENTS + " Woodbury elements");
             }
-            resolved.add(new StrategyScenario(sc.candidate(), sc.operatorStrategy(), los, connectivity, elements));
+            resolved.add(new StrategyScenario(sc.candidate(), sc.operatorStrategy(), los, connectivity, elements, sc.contingencyReportNode()));
         }
 
         // --- chunks: every strategy scenario has a modified target (the stock re-solves whenever an action is present)
@@ -724,7 +727,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 Contingency contingency = sc.connectivity().getPropagatedContingency().getContingency();
                 OperatorStrategy operatorStrategy = sc.operatorStrategy().value();
                 List<LfAction> lfActions = sc.lfOperatorStrategy().getActions();
-                ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(lfNetwork.getReportNode(), operatorStrategy.getId());
+                ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
                 lfNetwork.setReportNode(osSimReportNode);
 
                 // apply first (the stock, on this OLF: flows are evaluated on the final topology and tap positions)
@@ -919,7 +922,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         }
         lastPotentiallyBreaking = potentiallyBreaking.size();
         for (PropagatedContingency contingency : potentiallyBreaking) {
-            ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, contingency, elementByBranch, null, Collections.emptyMap())
+            // the security analysis never reads the slack's connected component: not materialized (a copy of every bus of
+            // the main component per breaking contingency, most of this loop's time on network.xiidm)
+            ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, contingency, elementByBranch, null, Collections.emptyMap(), false)
                     .ifPresentOrElse(breaking::add,
                         () -> nonBreaking.add(ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(contingency, null, lfNetwork)));
         }

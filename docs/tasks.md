@@ -62,7 +62,25 @@ factors (`GpuLodfCalculator`).
   network.xiidm bit-identical, probe `OLF_DC_CHECK_RESULTS=1`). Contingency-specific monitors, voltage levels, 3WT and
   zero-impedance monitored branches keep OLF's update. network.xiidm: GPU 8.1 s vs CPU-8t 33.6 s (x4.14). The same walk
   is in the stock arm: an upstream OLF improvement (index the monitored branches once per network).
-- Next for speed, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off
+- DONE 2026-11-13, profiling round (JFR + phase timing; network.xiidm GPU-only, driver warm: 6.3 -> 4.1 s; rte6515
+  4.05 -> 2.84 s):
+  (1) the connectivity analysis copied the slack's connected component (every main-component bus) per breaking
+      contingency and nobody in the SA reads it: OLF fork overload `withSlackConnectedComponent` (dcport 2nd commit),
+      1.9 -> 0.3 s. Upstream: #1458/#1522 (DTree, merged) and #1505 (open) make components views but still copy this
+      one (`copyIfNeeded` / `toOwnedSet`): the flag is complementary, worth an upstream PR on top of #1505.
+  (2) the per-contingency report nodes were chained, each a child of the previous contingency's (`lfNetwork.
+      getReportNode()` after `setReportNode`), and each new node re-checks every ancestor's values: quadratic, and a
+      malformed tree. Now children of the network's report node, as the AC SA builds them; operator strategies under
+      their own contingency's node. The STOCK fast DC SA (WoodburyDcSecurityAnalysis.processContingency) has the same
+      chaining on upstream main: an upstream bug to report.
+  (3) the column kernel's workspace interleaved by column (coalesced): 1.03 -> 0.86 s; the rest is the sequential,
+      order-exact distribution per column (a warp per column would need OLF's summation order preserved).
+  The 2 s seen in some cold runs is the NVIDIA driver initializing an idle GPU (first cudaStreamCreate; persistence
+  mode avoids it), not our code.
+- Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (state set into the equation system
+  ~0.3 s: the AC GpuStateView design), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
+  connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
+- Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off
   per JVM); (b) the host connectivity analysis, 2.0 s for 5288 potentially breaking contingencies (graph work, as on
   AC); (c) the target columns, 1.5 s (one thread per column: a warp per column); (d) the results, 1.2 s, now the state
   set into the equation system + result objects (the AC `GpuStateView` design would drop the state set); (e) S 0.74 s.

@@ -197,6 +197,7 @@ struct DcContext {
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
     Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
+    Buf ctGoPtr, ctGoGen, ctGoTarget, ctGoInit, ctGoPart;
     Buf ctEdPtr, ctEdRow, ctEdKind, ctEdVal;                       // operator strategies' row edits (set / add), in order
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
@@ -999,7 +1000,8 @@ __device__ inline CtgTargetWork ctgWork(int j, int cols, int nGen, int nBuses, d
 /**
  * One thread per column: the column's generator and load tables from the base, then its contingency's changes in
  * processLostPowerChanges' order (lost loads: the bus load total given; lost generators: target, initial target and
- * participation to zero; HVDC stations left without power: target to zero), then DcLoadFlowEngine.distributeSlack over
+ * participation to zero; HVDC stations left without power: target to zero), then an operator strategy's generator actions
+ * (target, initial target and participation as LfGeneratorAction.apply leaves them), then DcLoadFlowEngine.distributeSlack over
  * the remaining buses when the slack is distributed, then the per-bus generation and the components' mismatches the
  * target vector reads.
  */
@@ -1009,6 +1011,7 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
                                   const double* genDroop, const double* genPf, const int* scBusPtr, const int* scBusList,
                                   const int* exPtr, const int* exBus, const int* ldPtr, const int* ldBus, const double* ldVal,
                                   const int* lgPtr, const int* lgGen, const int* hzPtr, const int* hzGen,
+                                  const int* goPtr, const int* goGen, const double* goTarget, const double* goInit, const int* goPart,
                                   int distributed, int refGen, int type, int useActiveLimits,
                                   double* wsDouble, int* wsInt, double* dsOut) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1039,6 +1042,12 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
     }
     for (int k = hzPtr[j]; k < hzPtr[j + 1]; k++) {
         w.genTarget[hzGen[k]] = 0.0;
+    }
+    for (int k = goPtr[j]; k < goPtr[j + 1]; k++) {
+        int g = goGen[k];
+        w.genTarget[g] = goTarget[k];
+        w.genInit[g] = goInit[k];
+        w.genPart[g] = goPart[k];
     }
     if (distributed) {
         // DcLoadFlowEngine.getActivePowerMismatch(remainingBuses): the enabled remaining buses in bus order
@@ -1874,7 +1883,9 @@ JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, jclass, jlong handle, jint nBases,
                                                                    jintArray jExPtr, jintArray jExBus, jintArray jLdPtr, jintArray jLdBus,
                                                                    jdoubleArray jLdVal, jintArray jLgPtr, jintArray jLgGen,
-                                                                   jintArray jHzPtr, jintArray jHzGen, jintArray jZrPtr, jintArray jZrCol,
+                                                                   jintArray jHzPtr, jintArray jHzGen, jintArray jGoPtr, jintArray jGoGen,
+                                                                   jdoubleArray jGoTarget, jdoubleArray jGoInit, jintArray jGoPart,
+                                                                   jintArray jZrPtr, jintArray jZrCol,
                                                                    jintArray jEdPtr, jintArray jEdRow, jintArray jEdKind, jdoubleArray jEdVal,
                                                                    jboolean distributed, jint participationType, jboolean useActiveLimits,
                                                                    jint referenceGenerator, jdoubleArray jOutTargets) {
@@ -1901,6 +1912,15 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         }
         uploadCsr(env, ctx->ctLgPtr, ctx->ctLgGen, jLgPtr, jLgGen, cols, "lost generators");
         uploadCsr(env, ctx->ctHzPtr, ctx->ctHzGen, jHzPtr, jHzGen, cols, "HVDC stations");
+        uploadCsr(env, ctx->ctGoPtr, ctx->ctGoGen, jGoPtr, jGoGen, cols, "generator actions");
+        {
+            DoubleArray goTarget(env, jGoTarget);
+            DoubleArray goInit(env, jGoInit);
+            IntArray goPart(env, jGoPart);
+            ctx->ctGoTarget.uploadInto(goTarget.p, (size_t) std::max<jsize>(goTarget.len, 1) * sizeof(double));
+            ctx->ctGoInit.uploadInto(goInit.p, (size_t) std::max<jsize>(goInit.len, 1) * sizeof(double));
+            ctx->ctGoPart.uploadInto(goPart.p, (size_t) std::max<jsize>(goPart.len, 1) * sizeof(int));
+        }
         uploadCsr(env, ctx->ctZrPtr, ctx->ctZrCol, jZrPtr, jZrCol, cols, "zeroed rows");
         uploadCsr(env, ctx->ctEdPtr, ctx->ctEdRow, jEdPtr, jEdRow, cols, "row edits");
         {
@@ -1928,6 +1948,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 ctx->nSc > 0 ? ctx->scBusPtr.as<int>() : nullptr, ctx->nSc > 0 ? ctx->scBusList.as<int>() : nullptr,
                 ctx->ctExPtr.as<int>(), ctx->ctExBus.as<int>(), ctx->ctLdPtr.as<int>(), ctx->ctLdBus.as<int>(), ctx->ctLdVal.as<double>(),
                 ctx->ctLgPtr.as<int>(), ctx->ctLgGen.as<int>(), ctx->ctHzPtr.as<int>(), ctx->ctHzGen.as<int>(),
+                ctx->ctGoPtr.as<int>(), ctx->ctGoGen.as<int>(), ctx->ctGoTarget.as<double>(), ctx->ctGoInit.as<double>(), ctx->ctGoPart.as<int>(),
                 distributed ? 1 : 0, referenceGenerator, participationType, useActiveLimits ? 1 : 0,
                 ctx->ctWsDouble.as<double>(), ctx->ctWsInt.as<int>(), ctx->ctDsOut.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());

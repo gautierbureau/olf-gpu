@@ -234,6 +234,8 @@ class DcWoodburyBaselineProbe {
         // OLF_DC_CHECK_TARGETS=1: the device-built modified targets checked bit for bit against the host's
         boolean checkTargets = gpuProvider && "1".equals(System.getenv("OLF_DC_CHECK_TARGETS"));
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.CHECK_DEVICE_TARGETS.set(checkTargets);
+        // OLF_DC_BASE_DIAG=1: the device base state's accuracy against OLF's own system (stderr DC_BASE_ACCURACY)
+        com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.BASE_ACCURACY_DIAGNOSTIC.set(gpuProvider && "1".equals(System.getenv("OLF_DC_BASE_DIAG")));
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.DEVICE_TARGET_COUNT.set(0);
         com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.set(0);
         long t0 = System.nanoTime();

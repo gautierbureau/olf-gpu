@@ -69,9 +69,14 @@ final class GpuDcStateReader {
      * {@code DcBranchVector.updateBranchModel}'s power and shift. Until {@link #clearLiveModel()}.
      */
     void useLiveModel(LfNetwork network, int[] branchNums) {
+        useLiveModel(branchNums, b -> network.getBranch(b).getPiModel());
+    }
+
+    /** {@link #useLiveModel(LfNetwork, int[])} with each branch's model given (a tap action's new one): the network unchanged. */
+    void useLiveModel(int[] branchNums, java.util.function.IntFunction<PiModel> model) {
         clearLiveModel();
         for (int b : branchNums) {
-            PiModel piModel = network.getBranch(b).getPiModel();
+            PiModel piModel = model.apply(b);
             live[b] = true;
             livePower[b] = AbstractClosedBranchDcFlowEquationTerm.computePower(creationParameters.isUseTransformerRatio(),
                     creationParameters.getDcApproximationType(), piModel);

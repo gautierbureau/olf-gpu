@@ -198,6 +198,8 @@ struct DcContext {
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
     Buf ctCompact, ctMap;                                           // the distinct columns built, and each column's one
+    Buf genBus;                                                     // each generator's bus (the warp kernels walk generators)
+    int genBusBuilt = -1;
     Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
     Buf ctGoPtr, ctGoGen, ctGoTarget, ctGoInit, ctGoPart;
     Buf ctEdPtr, ctEdRow, ctEdKind, ctEdVal;                       // operator strategies' row edits (set / add), in order
@@ -981,22 +983,217 @@ struct CtgTargetWork {
     Strided<int> excluded;       // nBuses
 };
 
-/** Column j's workspace: the double regions genTarget, genInit, factors (nGen each), genP, loadP (nBuses each),
- *  scMismatch (max(nSc, 1)); the int regions genPart, elements (nGen each), excluded (nBuses). */
-__device__ inline CtgTargetWork ctgWork(int j, int cols, int nGen, int nBuses, double* wsDouble, int* wsInt) {
-    const size_t g = static_cast<size_t>(nGen) * cols;
-    const size_t b = static_cast<size_t>(nBuses) * cols;
+/** Column j's workspace, contiguous per column (a warp walks it with coalesced loads): the double regions genTarget,
+ *  genInit, factors (nGen each), genP, loadP (nBuses each), scMismatch (max(nSc, 1)); the int regions genPart, elements
+ *  (nGen each), excluded (nBuses). */
+__device__ inline CtgTargetWork ctgWork(int j, int cols, int nGen, int nBuses, int nSc, double* wsDouble, int* wsInt) {
+    (void) cols;
+    const size_t dStride = 3 * static_cast<size_t>(nGen) + 2 * static_cast<size_t>(nBuses) + (nSc > 0 ? nSc : 1);
+    const size_t iStride = 2 * static_cast<size_t>(nGen) + nBuses;
+    double* d = wsDouble + j * dStride;
+    int* i = wsInt + j * iStride;
     CtgTargetWork w;
-    w.genTarget = {wsDouble + j, cols};
-    w.genInit = {wsDouble + g + j, cols};
-    w.factors = {wsDouble + 2 * g + j, cols};
-    w.genP = {wsDouble + 3 * g + j, cols};
-    w.loadP = {wsDouble + 3 * g + b + j, cols};
-    w.scMismatch = {wsDouble + 3 * g + 2 * b + j, cols};
-    w.genPart = {wsInt + j, cols};
-    w.elements = {wsInt + g + j, cols};
-    w.excluded = {wsInt + 2 * g + j, cols};
+    w.genTarget = {d, 1};
+    w.genInit = {d + nGen, 1};
+    w.factors = {d + 2 * (size_t) nGen, 1};
+    w.genP = {d + 3 * (size_t) nGen, 1};
+    w.loadP = {d + 3 * (size_t) nGen + nBuses, 1};
+    w.scMismatch = {d + 3 * (size_t) nGen + 2 * (size_t) nBuses, 1};
+    w.genPart = {i, 1};
+    w.elements = {i + nGen, 1};
+    w.excluded = {i + 2 * (size_t) nGen, 1};
     return w;
+}
+
+constexpr unsigned FULL_WARP = 0xffffffffu;
+
+/**
+ * An ordered fold by one warp: term(i) for i in [0, count) computed by the lanes 32 at a time (coalesced), then folded
+ * by lane 0 in index order through shuffles (fold(acc, x) on the valid terms only): the sequential loop's operations, in
+ * its order. The result is broadcast to the warp.
+ */
+template <typename Acc, typename Term, typename Fold>
+__device__ Acc warpOrderedFold(int count, Acc acc, Term term, Fold fold) {
+    int lane = threadIdx.x & 31;
+    for (int base = 0; base < count; base += 32) {
+        int i = base + lane;
+        bool valid = false;
+        double x = 0.0;
+        if (i < count) {
+            valid = term(i, x);
+        }
+        unsigned mask = __ballot_sync(FULL_WARP, valid);
+        while (mask != 0) {
+            int k = __ffs(mask) - 1;
+            double v = __shfl_sync(FULL_WARP, x, k);
+            if (lane == 0) {
+                acc = fold(acc, v);
+            }
+            mask &= mask - 1;
+        }
+    }
+    return acc;
+}
+
+__device__ inline double warpBroadcast(double v) {
+    return __shfl_sync(FULL_WARP, v, 0);
+}
+
+/** Java's DoubleStream.sum (Kahan, with the simple sum's infinity), the fold's state on lane 0. */
+struct JavaSum {
+    double sum = 0.0;
+    double comp = 0.0;
+    double simple = 0.0;
+    __device__ JavaSum add(double v) const {
+        JavaSum r;
+        double tmp = __dadd_rn(v, -comp);
+        double velvel = __dadd_rn(sum, tmp);
+        r.comp = __dadd_rn(__dadd_rn(velvel, -sum), -tmp);
+        r.sum = velvel;
+        r.simple = __dadd_rn(simple, v);
+        return r;
+    }
+    __device__ double result() const {
+        double tmp = __dadd_rn(sum, -comp);
+        return tmp != tmp && isinf(simple) ? simple : tmp;
+    }
+};
+
+__device__ inline bool busParticipates(const int* busFlags, Strided<int> excluded, int b) {
+    return (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS) && excluded[b] == 0;
+}
+
+/** distributeSlackSequential by one warp, operation for operation (its sums folded in order, its filters order-preserving). */
+__device__ void distributeSlackWarp(int nBuses, int nGen, const int* busFlags, const int* genBus, CtgTargetWork& w,
+                                    const double* genMinT, const double* genMaxT, const double* genMinP, const double* genMaxP,
+                                    const double* genDroop, const double* genPf, int refGen, int type, int useActiveLimits,
+                                    double mismatch, double* out) {
+    int lane = threadIdx.x & 31;
+    (void) nBuses;
+    double refPrevious = 0.0;
+    if (refGen >= 0) {
+        if (lane == 0) {
+            refPrevious = __dadd_rn(refPrevious, -__dadd_rn(w.genInit[refGen], -w.genTarget[refGen]));
+            w.genTarget[refGen] = w.genInit[refGen];
+        }
+        __syncwarp();
+    }
+    // the generation step's reset, generators in bus order (contiguous by bus): its amount folded in that order
+    double stepPrevious = warpOrderedFold(nGen, 0.0, [&](int g, double& x) {
+        if (!w.genPart[g] || !busParticipates(busFlags, w.excluded, genBus[g])) {
+            return false;
+        }
+        x = -__dadd_rn(w.genInit[g], -w.genTarget[g]);
+        w.genTarget[g] = w.genInit[g];
+        return true;
+    }, [](double acc, double x) { return __dadd_rn(acc, x); });
+    __syncwarp();
+    double remaining = warpBroadcast(lane == 0 ? __dadd_rn(mismatch, __dadd_rn(stepPrevious, refPrevious)) : 0.0);
+    // getParticipatingElements, in order: a ballot prefix per 32 generators
+    int count = 0;
+    for (int base = 0; base < nGen; base += 32) {
+        int g = base + lane;
+        bool keep = false;
+        double f = 0.0;
+        if (g < nGen && busParticipates(busFlags, w.excluded, genBus[g])) {
+            f = participationFactor(type, w.genTarget[g], genMaxP[g], genMinP[g], genDroop[g], genPf[g], remaining);
+            keep = stepParticipating(type, w.genPart[g], genDroop[g], genPf[g]) && f != 0;
+        }
+        unsigned mask = __ballot_sync(FULL_WARP, keep);
+        if (keep) {
+            int pos = count + __popc(mask & ((1u << lane) - 1));
+            w.elements[pos] = g;
+            w.factors[pos] = f;
+        }
+        count += __popc(mask);
+    }
+    __syncwarp();
+    int iteration = 0;
+    while (count > 0 && fabs(remaining) > P_RESIDUE_EPS) {
+        JavaSum sum = warpOrderedFold(count, JavaSum(), [&](int k, double& x) { x = w.factors[k]; return true; },
+                                      [](JavaSum acc, double x) { return acc.add(x); });
+        double norm = warpBroadcast(lane == 0 ? sum.result() : 0.0);
+        if (!(norm > 0.0)) {
+            break;
+        }
+        for (int k = lane; k < count; k += 32) {
+            w.factors[k] = __ddiv_rn(w.factors[k], norm);
+        }
+        __syncwarp();
+        // one pass: each element's new target from the pass's remaining mismatch (independent), the amount done
+        // folded in element order, the elements at their limits dropped keeping the order
+        double done = 0.0;
+        int kept = 0;
+        for (int base = 0; base < count; base += 32) {
+            int k = base + lane;
+            bool valid = k < count;
+            int g = valid ? w.elements[k] : 0;
+            double factor = valid ? w.factors[k] : 0.0;
+            bool drop = false;
+            bool changed = false;
+            double delta = 0.0;
+            if (valid) {
+                double minTargetP = useActiveLimits ? genMinT[g] : -1.7976931348623157e308;
+                double maxTargetP = useActiveLimits ? genMaxT[g] : 1.7976931348623157e308;
+                double targetP = w.genTarget[g];
+                if (targetP < 0) {
+                    maxTargetP = javaMin(maxTargetP, 0.0);
+                } else {
+                    minTargetP = javaMax(minTargetP, 0.0);
+                }
+                double newTargetP = __dadd_rn(targetP, __dmul_rn(remaining, factor));
+                if (remaining > 0 && newTargetP > maxTargetP) {
+                    newTargetP = maxTargetP;
+                    drop = true;
+                } else if (remaining < 0 && newTargetP < minTargetP) {
+                    newTargetP = minTargetP;
+                    drop = true;
+                }
+                if (newTargetP != targetP) {
+                    w.genTarget[g] = newTargetP;
+                    changed = true;
+                    delta = __dadd_rn(newTargetP, -targetP);
+                }
+            }
+            unsigned changedMask = __ballot_sync(FULL_WARP, changed);
+            while (changedMask != 0) {
+                int src = __ffs(changedMask) - 1;
+                double v = __shfl_sync(FULL_WARP, delta, src);
+                if (lane == 0) {
+                    done = __dadd_rn(done, v);
+                }
+                changedMask &= changedMask - 1;
+            }
+            bool keepIt = valid && !drop;
+            unsigned keepMask = __ballot_sync(FULL_WARP, keepIt);
+            __syncwarp();                                    // every lane read its element before any is moved down
+            if (keepIt) {
+                int pos = kept + __popc(keepMask & ((1u << lane) - 1));
+                w.elements[pos] = g;
+                w.factors[pos] = factor;
+            }
+            kept += __popc(keepMask);
+            __syncwarp();
+        }
+        count = kept;
+        remaining = warpBroadcast(lane == 0 ? __dadd_rn(remaining, -done) : 0.0);
+        iteration++;
+    }
+    if (lane == 0) {
+        out[0] = remaining;
+        out[1] = (double) iteration;
+    }
+}
+
+/** Each generator's bus (generators are contiguous by bus). */
+__global__ void buildGenBus(int nBuses, const int* busGenStart, int* genBus) {
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nBuses) {
+        return;
+    }
+    for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+        genBus[g] = b;
+    }
 }
 
 /**
@@ -1007,7 +1204,7 @@ __device__ inline CtgTargetWork ctgWork(int j, int cols, int nGen, int nBuses, d
  * the remaining buses when the slack is distributed, then the per-bus generation and the components' mismatches the
  * target vector reads.
  */
-__global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const int* busFlags, const int* busGenStart,
+__global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const int* busFlags, const int* busGenStart, const int* genBus,
                                   const double* baseLoadP, const double* baseInit, const double* baseTarget, const int* basePart,
                                   const double* genMinT, const double* genMaxT, const double* genMinP, const double* genMaxP,
                                   const double* genDroop, const double* genPf, const int* scBusPtr, const int* scBusList,
@@ -1016,73 +1213,89 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
                                   const int* goPtr, const int* goGen, const double* goTarget, const double* goInit, const int* goPart,
                                   int distributed, int refGen, int type, int useActiveLimits,
                                   double* wsDouble, int* wsInt, double* dsOut) {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    // one WARP per column (the loops below walk every generator and bus: coalesced lanes, the sums folded in order)
+    int j = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x & 31;
     if (j >= cols) {
-        return;
+        return;                                              // whole warps: cols is per warp
     }
-    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, wsDouble, wsInt);
-    for (int g = 0; g < nGen; g++) {
+    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, nSc, wsDouble, wsInt);
+    for (int g = lane; g < nGen; g += 32) {
         w.genTarget[g] = baseTarget[g];
         w.genInit[g] = baseInit[g];
         w.genPart[g] = basePart[g];
     }
-    for (int b = 0; b < nBuses; b++) {
+    for (int b = lane; b < nBuses; b += 32) {
         w.loadP[b] = baseLoadP[b];
         w.excluded[b] = 0;
     }
-    for (int k = exPtr[j]; k < exPtr[j + 1]; k++) {
-        w.excluded[exBus[k]] = 1;
+    __syncwarp();
+    if (lane == 0) {
+        // the column's changes, in processLostPowerChanges' order, then the generator actions
+        for (int k = exPtr[j]; k < exPtr[j + 1]; k++) {
+            w.excluded[exBus[k]] = 1;
+        }
+        for (int k = ldPtr[j]; k < ldPtr[j + 1]; k++) {
+            w.loadP[ldBus[k]] = ldVal[k];
+        }
+        for (int k = lgPtr[j]; k < lgPtr[j + 1]; k++) {
+            int g = lgGen[k];
+            w.genTarget[g] = 0.0;
+            w.genInit[g] = 0.0;
+            w.genPart[g] = 0;
+        }
+        for (int k = hzPtr[j]; k < hzPtr[j + 1]; k++) {
+            w.genTarget[hzGen[k]] = 0.0;
+        }
+        for (int k = goPtr[j]; k < goPtr[j + 1]; k++) {
+            int g = goGen[k];
+            w.genTarget[g] = goTarget[k];
+            w.genInit[g] = goInit[k];
+            w.genPart[g] = goPart[k];
+        }
     }
-    for (int k = ldPtr[j]; k < ldPtr[j + 1]; k++) {
-        w.loadP[ldBus[k]] = ldVal[k];
-    }
-    for (int k = lgPtr[j]; k < lgPtr[j + 1]; k++) {
-        int g = lgGen[k];
-        w.genTarget[g] = 0.0;
-        w.genInit[g] = 0.0;
-        w.genPart[g] = 0;
-    }
-    for (int k = hzPtr[j]; k < hzPtr[j + 1]; k++) {
-        w.genTarget[hzGen[k]] = 0.0;
-    }
-    for (int k = goPtr[j]; k < goPtr[j + 1]; k++) {
-        int g = goGen[k];
-        w.genTarget[g] = goTarget[k];
-        w.genInit[g] = goInit[k];
-        w.genPart[g] = goPart[k];
-    }
+    __syncwarp();
     if (distributed) {
-        // DcLoadFlowEngine.getActivePowerMismatch(remainingBuses): the enabled remaining buses in bus order
-        double sum = 0.0;
-        for (int b = 0; b < nBuses; b++) {
+        // DcLoadFlowEngine.getActivePowerMismatch(remainingBuses): each bus's generation summed by its lane, the buses
+        // folded in bus order
+        double sum = warpOrderedFold(nBuses, 0.0, [&](int b, double& x) {
+            if ((busFlags[b] & BUS_DISABLED) != 0 || w.excluded[b]) {
+                return false;
+            }
             double s = 0.0;
             for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
                 s = __dadd_rn(s, w.genTarget[g]);
             }
-            if ((busFlags[b] & BUS_DISABLED) == 0 && !w.excluded[b]) {
-                sum = __dadd_rn(sum, __dadd_rn(s, -w.loadP[b]));
-            }
-        }
-        distributeSlackSequential(nBuses, busFlags, w.excluded, busGenStart, w.genInit, w.genTarget, genMinT, genMaxT, genMinP, genMaxP,
-                                  genDroop, genPf, w.genPart, refGen, type, useActiveLimits, -sum, w.elements, w.factors, dsOut + 2 * (size_t) j);
+            x = __dadd_rn(s, -w.loadP[b]);
+            return true;
+        }, [](double acc, double x) { return __dadd_rn(acc, x); });
+        double mismatch = warpBroadcast(lane == 0 ? -sum : 0.0);
+        distributeSlackWarp(nBuses, nGen, busFlags, genBus, w, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, refGen, type,
+                            useActiveLimits, mismatch, dsOut + 2 * (size_t) j);
+        __syncwarp();
     }
     // the target vector's inputs, re-read from the changed tables (AbstractLfBus.getGenerationTargetP)
-    for (int b = 0; b < nBuses; b++) {
+    for (int b = lane; b < nBuses; b += 32) {
         double s = 0.0;
         for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
             s = __dadd_rn(s, w.genTarget[g]);
         }
         w.genP[b] = s;
     }
+    __syncwarp();
     for (int sc = 0; sc < nSc; sc++) {
-        double sum = 0.0;
-        for (int k = scBusPtr[sc]; k < scBusPtr[sc + 1]; k++) {
-            int b = scBusList[k];
-            if ((busFlags[b] & BUS_DISABLED) == 0) {
-                sum = __dadd_rn(sum, __dadd_rn(w.genP[b], -w.loadP[b]));
+        int start = scBusPtr[sc];
+        double sum = warpOrderedFold(scBusPtr[sc + 1] - start, 0.0, [&](int k, double& x) {
+            int b = scBusList[start + k];
+            if ((busFlags[b] & BUS_DISABLED) != 0) {
+                return false;
             }
+            x = __dadd_rn(w.genP[b], -w.loadP[b]);
+            return true;
+        }, [](double acc, double x) { return __dadd_rn(acc, x); });
+        if (lane == 0) {
+            w.scMismatch[sc] = -sum;
         }
-        w.scMismatch[sc] = -sum;
     }
 }
 
@@ -1096,9 +1309,9 @@ __global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, c
     if (t >= (long) n * cols) {
         return;
     }
-    int c = (int) (t / cols);
-    int j = (int) (t % cols);
-    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, wsDouble, wsInt);
+    int j = (int) (t / n);                                   // the equation column fastest: coalesced writes
+    int c = (int) (t % n);
+    CtgTargetWork w = ctgWork(j, cols, nGen, nBuses, nSc, wsDouble, wsInt);
     out[(size_t) j * n + c] = targetValue(c, tKind, tElem, rhsPtr, rhsKind, rhsElem, rhsCoef, w.genP, w.loadP, busFlags, busSc, scSlackCount,
                                           w.scMismatch, a1Const, a1Row, power);
 }
@@ -2039,8 +2252,14 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             t0 = dcNowMs();
         }
-        ctgTargetsPrepare<<<grid(distinct), BLOCK, 0, ctx->stream>>>(distinct, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
-                ctx->busGenStart.as<int>(), ctx->busLoadP.as<double>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(),
+        if (ctx->genBusBuilt != ctx->nGen) {
+            ctx->genBus.ensure((size_t) std::max(ctx->nGen, 1) * sizeof(int));
+            buildGenBus<<<grid(ctx->nBuses), BLOCK, 0, ctx->stream>>>(ctx->nBuses, ctx->busGenStart.as<int>(), ctx->genBus.as<int>());
+            DC_CUDA_CHECK(cudaGetLastError());
+            ctx->genBusBuilt = ctx->nGen;
+        }
+        ctgTargetsPrepare<<<grid((long) distinct * 32), BLOCK, 0, ctx->stream>>>(distinct, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
+                ctx->busGenStart.as<int>(), ctx->genBus.as<int>(), ctx->busLoadP.as<double>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(),
                 ctx->genPart.as<int>(), ctx->genMinT.as<double>(), ctx->genMaxT.as<double>(), ctx->genMinP.as<double>(),
                 ctx->genMaxP.as<double>(), ctx->genDroop.as<double>(), ctx->genPf.as<double>(),
                 ctx->nSc > 0 ? ctx->scBusPtr.as<int>() : nullptr, ctx->nSc > 0 ? ctx->scBusList.as<int>() : nullptr,
@@ -2396,6 +2615,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setBuses(JNIEnv* env, jclass, j
         ctx->busFlags.upload(flags.p, (size_t) nb * sizeof(int));
         ctx->busSc.upload(sc.p, (size_t) nb * sizeof(int));
         ctx->busGenStart.upload(genStart.p, (size_t) (nb + 1) * sizeof(int));
+        ctx->genBusBuilt = -1;                               // the generator -> bus table follows the buses
         ctx->busGenP.alloc((size_t) nb * sizeof(double));
         ctx->busExcluded.alloc((size_t) nb * sizeof(int));
         DC_CUDA_CHECK(cudaMemset(ctx->busExcluded.p, 0, (size_t) nb * sizeof(int)));

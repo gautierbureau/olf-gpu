@@ -361,21 +361,7 @@ final class GpuBatchPrecomputer {
                         states.put(r.contingencyId(), r.state());
                     }
                     recordDistributed(r, preDistributed, distributed);
-                    if (r.islandedBusNums().length > 0) {
-                        islandedBuses.put(r.contingencyId(), r.islandedBusNums());
-                    }
-                    if (r.automationSystemSwitchedBranchNums().length > 0) {
-                        automationSystemSwitched.put(r.contingencyId(), r.automationSystemSwitchedBranchNums());
-                    }
-                    if (r.deviceTapMoves().length > 0) {
-                        deviceTapMoves.put(r.contingencyId(), r.deviceTapMoves());
-                    }
-                    if (r.reactiveLimitDecisions() != null) {
-                        decisions.put(r.contingencyId(), r.reactiveLimitDecisions());
-                    }
-                    if (r.sensitivityBasis() != null) {
-                        sensitivityBases.put(r.contingencyId(), r.sensitivityBasis());
-                    }
+                    recordConverged(r, islandedBuses, automationSystemSwitched, deviceTapMoves, decisions, sensitivityBases);
                 } else if (r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
                         && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
                     // The device ran OLF's full Newton budget (deviceSolverParameters carries the
@@ -728,6 +714,28 @@ final class GpuBatchPrecomputer {
         }
         recordDistributed(r, preDistributed, distributed);
         GpuBatchScopeCensus.record("DEVICE:UNREALISTIC_STATE");
+    }
+
+    /** What a converged scenario's solve leaves beside its state, each where the scenario has one. */
+    private static void recordConverged(BatchScenarioResult r, Map<String, int[]> islandedBuses,
+                                        Map<String, int[]> automationSystemSwitched, Map<String, double[]> deviceTapMoves,
+                                        Map<String, BatchScenarioResult.ReactiveLimitDecisions> decisions,
+                                        Map<String, double[]> sensitivityBases) {
+        if (r.islandedBusNums().length > 0) {
+            islandedBuses.put(r.contingencyId(), r.islandedBusNums());
+        }
+        if (r.automationSystemSwitchedBranchNums().length > 0) {
+            automationSystemSwitched.put(r.contingencyId(), r.automationSystemSwitchedBranchNums());
+        }
+        if (r.deviceTapMoves().length > 0) {
+            deviceTapMoves.put(r.contingencyId(), r.deviceTapMoves());
+        }
+        if (r.reactiveLimitDecisions() != null) {
+            decisions.put(r.contingencyId(), r.reactiveLimitDecisions());
+        }
+        if (r.sensitivityBasis() != null) {
+            sensitivityBases.put(r.contingencyId(), r.sensitivityBasis());
+        }
     }
 
     private static List<BatchScenarioResult> retryRejectedOnDevice(

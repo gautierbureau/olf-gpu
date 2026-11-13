@@ -231,6 +231,55 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveInterleaved)(
                         jSolutions, jPivoted, jPivotClamps, true);
 }
 
+// One system factorized on one lane, then solved against cols right-hand sides at once (solveLaneColumns): the DC
+// path's single matrix with many right-hand sides. rightHandSides and solutions are n x cols, column-major.
+extern "C" JNIEXPORT void JNICALL
+OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveColumns)(
+        JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
+        jdoubleArray jValues, jint cols, jdoubleArray jRightHandSides, jdoubleArray jSolutions) {
+    try {
+        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
+        const std::vector<int> colIdx = intsOf(env, jColIdx);
+        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
+        const std::vector<int> colOrder = intsOf(env, jColOrder);
+        const int nnz = rowPtr[n];
+        std::vector<double> values(nnz);
+        std::vector<double> rightHandSides(static_cast<size_t>(n) * cols);
+        env->GetDoubleArrayRegion(jValues, 0, nnz, values.data());
+        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
+        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(), colOrder.data());
+        BatchedLu lu;
+        createBatchedLu(lu, *plan, 1);
+        DeviceBuf dValues, dB, dX, dWork, dIdentity;
+        dValues.upload(values.data(), values.size() * sizeof(double));
+        dB.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
+        dX.alloc(rightHandSides.size() * sizeof(double));
+        dWork.alloc(rightHandSides.size() * sizeof(double));
+        std::vector<int> identity(cols);
+        for (int k = 0; k < cols; k++) {
+            identity[k] = k;
+        }
+        dIdentity.upload(identity.data(), identity.size() * sizeof(int));
+        cudaStream_t stream = nullptr;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        std::vector<double> solutions(rightHandSides.size());
+        try {
+            const int lane0 = 0;
+            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(1), &lane0, 1, stream);
+            solveLaneColumns(lu, 0, cols, dB.as<double>(), dX.as<double>(), dWork.as<double>(), dIdentity.as<int>(), stream);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaMemcpy(solutions.data(), dX.p, solutions.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        } catch (...) {
+            cudaStreamDestroy(stream);
+            throw;
+        }
+        CUDA_CHECK(cudaStreamDestroy(stream));
+        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+    } catch (const std::exception& e) {
+        throwJava(env, e);
+    }
+}
+
 // factorizeAndSolve's factorization, then the solve of the lanes whose scenario is in selected only (selectLanes,
 // solveSelectedLanes: the adaptive refinement's corrections), every other scenario's solution left as it is.
 extern "C" JNIEXPORT void JNICALL

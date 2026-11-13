@@ -300,6 +300,7 @@ contingencies need a modified target column (2160 lose power, the others island 
 | device-built columns | 35.6–37.8 | 17.8–20.9 | x1.93 | 1.7–2.9 (kernel 1.7) | 9.7–13.8 (noisy) | 0.35–0.5 | same |
 | per-network gate | 32.9 | 16.1 | x2.04 | — | — | — | flows 1.5e-4 MW = 16 % of the derived tolerance (9.4e-4 MW), violations 1 % |
 | monitored branches found once | 33.6 | 8.1 | x4.14 | 1.5 | 1.15 (was 9–14) | 0.39 | same; all 9959 network results bit-identical to OLF's update |
+| our batched LU (the default) | 31.1 | 7.2 (8.6 GPU-only cold) | x4.31 | 1.15 | 1.1–1.4 | 0.30 | flows 1.5e-4 MW = 31 % of the tighter derived tolerance (4.9e-4 MW: our LU's base state is 4.0e-9 rad from the refined one, cuDSS's 1.35e-8) |
 
 The host per-contingency loop was OLF's `PostContingencyNetworkResult.update`: `AbstractNetworkResult.addResults` walks
 every branch of the network (~12,000) per contingency to find the 100 monitored ones (JFR: 639 of the loop's 722

@@ -44,11 +44,18 @@ factors (`GpuLodfCalculator`).
   measured base uncertainty: 3 x 2 x power(b) x (device + LU distance to the refined state), never below 1e-8 MW
   (network.xiidm: 9.4e-4 MW on the worst branch, 16 % used). Not asked upstream (the zero-impedance model of a
   retained switch in DC stays an option).
-- OPEN, consistency: the DC context factorizes with cuDSS, the AC batch with our batched LU (the default since
-  1b6ae05e). DC's shape is one matrix and thousands of right-hand sides (S, chunk target columns, PTDF blocks): our LU
-  would need a multi-RHS solve on one lane's factors. Worth it for one linear solver and no cuDSS on the DC path, not for
-  speed (the LU is ~0.5 s of a network.xiidm run) nor accuracy (the gap above is the double floor; our fast engine does
-  not pivot, and this matrix is where pivoting matters - measure before choosing).
+- DONE 2026-11-13, our batched LU on the DC path (the default, `GpuLoadFlowParameters.linearSolver`; CUDSS stays
+  selectable). New in the LU: `solveLaneColumns`, many right-hand sides on one lane's factors (scalar engine: every
+  column at once; pivoting engine: a column at a time). The DC context factorizes its one matrix on one lane, ordered on
+  its element structure: OLF numbers the DC equations and variables independently, so A's diagonal means nothing and a
+  minimum degree of A + A^T gave 2548 elimination levels and a dense LU; `GpuDcAssembly.luRowForColumn` pairs each
+  bus's P (or slack angle) equation with its angle and each alpha target with its shift (native completes the rest by
+  augmenting paths), then minimum degree on the matched pattern: ~80 levels, ~40k LU entries, no pivoting needed. A
+  largest-entry matching was wrong (994 rte6515 pivots off their element: negative reactances cancel the diagonal sums)
+  and lost 4 digits. Base-state accuracy vs a refined state: rte6515 6.9e-14 rad (cuDSS 2.1e-13, KLU 8.5e-14);
+  network.xiidm 4.0e-9 (cuDSS 1.35e-8, KLU 6.2e-9). GPU-only cold: network.xiidm 8.6 s (cuDSS 9.5), S 128 ms (737),
+  columns 1.15 s (1.5); rte6515 4.0 s. The OLF seam `runDcEngine` now takes the run's LoadFlowParameters
+  (olf-local-patches-dc-port e5a76855b) so the provider reads the solver choice.
 - DONE 2026-11-13: the per-contingency network results. 9 of the host loop's 10 s were OLF's `addResults` walking every
   branch per contingency to find the monitored ones; `GpuMonitoredBranchResults` finds them once per run and builds
   their results with OLF's own `createBranchResult` (gate `monitoredBranchResultsAreOlfsBitForBit`; all 9959 of

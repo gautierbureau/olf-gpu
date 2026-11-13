@@ -102,6 +102,17 @@ public final class BatchedLuNative {
                                                            int[] pivoted, int[] pivotClamps);
 
     /**
+     * Factorizes one system on one lane, then solves it against {@code cols} right-hand sides at once, on that lane's
+     * factors (the DC path's single matrix with many right-hand sides).
+     *
+     * @param values         CSR values, {@code nnz}
+     * @param rightHandSides {@code n * cols}, column-major
+     * @param solutions      {@code n * cols}, column-major (written)
+     */
+    public static native void factorizeAndSolveColumns(int n, int[] rowPtr, int[] colIdx, int[] rowOrder, int[] colOrder,
+                                                       double[] values, int cols, double[] rightHandSides, double[] solutions);
+
+    /**
      * Factorizes the scenarios of {@code laneMap} as {@link #factorizeAndSolve} does, then solves the systems of those
      * in {@code selected} only, as the adaptive refinement solves its corrections on the lanes still refining. Every
      * other scenario's solution is left as it is.

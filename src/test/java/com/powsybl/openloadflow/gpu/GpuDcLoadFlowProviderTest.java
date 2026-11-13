@@ -258,6 +258,35 @@ class GpuDcLoadFlowProviderTest {
         return t;
     }
 
+    /**
+     * The DC load flow on both linear solvers of {@code GpuLoadFlowParameters.linearSolver}: our batched LU (the default,
+     * one lane solved against many right-hand sides) and cuDSS, each matching the stock engine; our LU's factorization
+     * counter moves on the first and not on the second.
+     */
+    @Test
+    void bothLinearSolversMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        for (com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver linearSolver : com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver.values()) {
+            Network cpuNetwork = IeeeCdfNetworkFactory.create118();
+            Network gpuNetwork = IeeeCdfNetworkFactory.create118();
+            LoadFlowParameters parameters = dc();
+            com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters.create(parameters).setLinearSolver(linearSolver);
+            LoadFlowResult cpu = run(cpuNetwork, parameters, false);
+            long before = com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative.factorizationCounts()[0];
+            GpuLoadFlowProvider.LAST_GPU_COMPONENT_COUNT.set(-1);
+            LoadFlowResult gpu = run(gpuNetwork, parameters, true);
+            long factorizations = com.powsybl.openloadflow.ac.solver.gpu.BatchedLuNative.factorizationCounts()[0] - before;
+            assertTrue(GpuLoadFlowProvider.LAST_GPU_COMPONENT_COUNT.get() >= 1, linearSolver + ": the device solved a component");
+            assertSameResults(linearSolver.name(), cpu, gpu);
+            assertSameNetworkState(linearSolver.name(), cpuNetwork, gpuNetwork);
+            if (linearSolver == com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver.BATCHED_LU) {
+                assertTrue(factorizations > 0, "our batched LU factorized the DC system");
+            } else {
+                assertEquals(0, factorizations, "cuDSS solved it: our batched LU did not factorize");
+            }
+        }
+    }
+
     @Test
     void providerIsRegistered() {
         assertTrue(LoadFlow.find(GpuLoadFlowProvider.NAME).getName().equals(GpuLoadFlowProvider.NAME));

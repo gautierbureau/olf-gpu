@@ -4,6 +4,7 @@
 // See batched_lu.cuh.
 #include "batched_lu.cuh"
 
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -165,6 +166,32 @@ void solveLanes(BatchedLu& lu, const double* b, double* x, cudaStream_t stream) 
     }
     if (!lu.hPivoted.empty()) {
         solveSupernodalLanes(lu.supernodal, b, x, stream);
+    }
+}
+
+void solveLaneColumns(BatchedLu& lu, int position, int cols, const double* b, double* x, double* work,
+                      const int* identityLanes, cudaStream_t stream) {
+    if (position < 0 || position >= lu.width) {
+        throw std::runtime_error("solveLaneColumns: position " + std::to_string(position) + " not in the last factorization");
+    }
+    const bool pivoted = std::find(lu.hPivoted.begin(), lu.hPivoted.end(), lu.hLaneMap[position]) != lu.hPivoted.end();
+    if (!pivoted) {
+        // the fast engine's lane of that position: its positions are the factorization's unless lanes went past it
+        int lane = position;
+        if (!lu.fastHasEveryLane) {
+            const std::vector<int>& fastMap = lu.scalar.hLaneMap;
+            lane = static_cast<int>(std::find(fastMap.begin(), fastMap.end(), lu.hLaneMap[position]) - fastMap.begin());
+        }
+        solveScalarLaneColumns(lu.scalar, lane, cols, b, x, work, identityLanes, stream);
+        gBatchedLuFastLaneSolves += cols;
+        return;
+    }
+    if (lu.width != 1) {
+        throw std::runtime_error("solveLaneColumns: a pivoted lane among several scenarios is not supported");
+    }
+    const int n = lu.scalar.n;
+    for (int k = 0; k < cols; k++) {
+        solveSupernodalLanes(lu.supernodal, b + static_cast<size_t>(k) * n, x + static_cast<size_t>(k) * n, stream);
     }
 }
 

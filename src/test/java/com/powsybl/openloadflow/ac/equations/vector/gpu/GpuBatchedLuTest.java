@@ -409,6 +409,50 @@ class GpuBatchedLuTest {
      * one batch, nothing clamped. Without the pivoting engine the first lane's zero pivot is clamped and its solution
      * is wrong.
      */
+    /**
+     * One system solved against many right-hand sides on one lane's factors (the DC path) gives, column for column, what
+     * the batch gives the same system with each right-hand side on a lane of its own; and the dense solution. Through
+     * more columns than a thread block holds, and fewer.
+     */
+    @Test
+    void solvesManyRightHandSidesOnOneLane() {
+        for (int[] shape : new int[][] {{40, 3}, {300, 70}, {300, 1500}}) {
+            int n = shape[0];
+            int cols = shape[1];
+            Csr csr = toCsr(jacobianLikePattern(n, 4.0 / n, 21));
+            double[] values = diagonallyDominantValues(csr, 1, 22);
+            double[] rightHandSides = new double[cols * n];
+            Random random = new Random(23);
+            for (int k = 0; k < rightHandSides.length; k++) {
+                rightHandSides[k] = random.nextDouble() * 2 - 1;
+            }
+            int[] order = shuffled(n, 24);
+            double[] columns = new double[cols * n];
+            BatchedLuNative.factorizeAndSolveColumns(n, csr.rowPtr(), csr.colIdx(), order, order, values, cols, rightHandSides, columns);
+            // the batch: the same values on every lane, one right-hand side per lane
+            double[] batchValues = new double[cols * values.length];
+            for (int s = 0; s < cols; s++) {
+                System.arraycopy(values, 0, batchValues, s * values.length, values.length);
+            }
+            double[] lanes = new double[cols * n];
+            BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), order, order, cols, batchValues, rightHandSides,
+                    java.util.stream.IntStream.range(0, cols).toArray(), lanes, new int[cols], new int[cols]);
+            double worstBatch = 0;
+            double worstDense = 0;
+            for (int s = 0; s < Math.min(cols, 5); s++) {
+                double[] reference = denseSolve(dense(csr, values, 0), Arrays.copyOfRange(rightHandSides, s * n, (s + 1) * n));
+                for (int i = 0; i < n; i++) {
+                    worstDense = Math.max(worstDense, Math.abs(columns[s * n + i] - reference[i]));
+                }
+            }
+            for (int k = 0; k < columns.length; k++) {
+                worstBatch = Math.max(worstBatch, Math.abs(columns[k] - lanes[k]));
+            }
+            assertTrue(worstBatch < 1e-12, n + " x " + cols + ": columns against lanes " + worstBatch);
+            assertTrue(worstDense < 1e-10, n + " x " + cols + ": columns against the dense solve " + worstDense);
+        }
+    }
+
     @Test
     void eachLanePivotsInsideASupernode() {
         Csr csr = toCsr(new boolean[][] {{true, true}, {true, true}});

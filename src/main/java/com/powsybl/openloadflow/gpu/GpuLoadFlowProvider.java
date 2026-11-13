@@ -23,6 +23,7 @@ import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuLinearSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameterJsonSerializer;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
@@ -151,12 +152,14 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
     }
 
     @Override
-    protected List<DcLoadFlowResult> runDcEngine(Network network, DcLoadFlowParameters dcParameters, ReportNode reportNode) {
+    protected List<DcLoadFlowResult> runDcEngine(Network network, LoadFlowParameters parameters, DcLoadFlowParameters dcParameters,
+                                                 ReportNode reportNode) {
         if (!GpuDcSolver.isAvailable()) {
             LOGGER.info("GPU DC load flow: no device, stock engine");
             LAST_GPU_COMPONENT_COUNT.set(-1);
-            return super.runDcEngine(network, dcParameters, reportNode);
+            return super.runDcEngine(network, parameters, dcParameters, reportNode);
         }
+        GpuLinearSolver linearSolver = GpuLoadFlowParameters.get(parameters).getLinearSolver();
         int onDevice = 0;
         List<DcLoadFlowResult> results = new ArrayList<>();
         for (LfNetwork lfNetwork : LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters(), reportNode)) {
@@ -166,7 +169,7 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
             }
             try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
                 boolean device = true;
-                try (GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context)) {
+                try (GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context, linearSolver)) {
                     engine.prepare();
                     results.add(engine.run());
                 } catch (UnsupportedOperationException e) {

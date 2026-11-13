@@ -25,6 +25,8 @@
 //              exceeded limit of a group emitted — the kernel SCREENS, the host DECIDES
 //              (GpuLimitScanner.detectFromCandidates), exactly the AC contract.
 #include "../common/trace.cuh"
+#include "../lu/batched_lu.cuh"
+#include "../lu/minimum_degree.cuh"
 
 #include <cuda_runtime.h>
 #include <cudss.h>
@@ -33,6 +35,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <cmath>
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -230,8 +236,29 @@ struct DcContext {
         if (stream) { cudaStreamDestroy(stream); }
     }
 
+    // --- the linear solver: cuDSS, or our batched LU (lu/batched_lu.cuh) with one lane - the system factorized once
+    // and solved against many right-hand sides at a time (solveLaneColumns)
+    bool ourLu = false;
+    std::vector<int> luRowForColumn;                               // the matching: the equation row of each variable
+                                                                   // column (from the caller; empty: by the largest entry)
+    std::vector<int> hRowPtr, hColIdx;                             // the CSR pattern on the host, our LU plans from it
+    std::shared_ptr<olfgpu::LuPlan> luPlan;
+    olfgpu::BatchedLu lu;
+    olfgpu::DeviceBuf luWork, luIdentity;
+    int luIdentityCols = 0;
+
+    /** Our LU: the plan on the first call (the matching, then the minimum degree of the matched pattern), then the
+     *  factorization of the current values on its one lane. */
+    void factorizeOurLu();
+
     /** Dense RHS/solution matrices of the given column count (recreated when the count changes). */
     void ensureRhs(int cols) {
+        if (ourLu) {
+            b.ensure(static_cast<size_t>(n) * cols * sizeof(double));
+            x.ensure(static_cast<size_t>(n) * cols * sizeof(double));
+            rhsCols = cols;
+            return;
+        }
         if (cols == rhsCols && matB != nullptr) {
             return;
         }
@@ -250,10 +277,107 @@ struct DcContext {
             return;                                          // cuDSS SIGFPEs on an n x 0 solve
         }
         ensureRhs(cols);
+        if (ourLu) {
+            if (cols > luIdentityCols) {
+                std::vector<int> identity(cols);
+                for (int k = 0; k < cols; k++) {
+                    identity[k] = k;
+                }
+                luIdentity.upload(identity.data(), identity.size() * sizeof(int));
+                luIdentityCols = cols;
+            }
+            luWork.ensure(static_cast<size_t>(n) * cols * sizeof(double));
+            olfgpu::solveLaneColumns(lu, 0, cols, b.as<double>(), x.as<double>(), luWork.as<double>(), luIdentity.as<int>(), stream);
+            DC_CUDA_CHECK(cudaStreamSynchronize(stream));
+            return;
+        }
         DC_CUDSS_CHECK(cudssExecute(handle, CUDSS_PHASE_SOLVE, config, data, matA, matX, matB));
         DC_CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 };
+
+/** rowForColumn[c] = the row matched to column c, completed into a perfect matching: the caller's pairs (rowForCol,
+ *  -1 for a free column) first, then each free row takes its largest free column, then augmenting paths. */
+std::vector<int> completeMatching(int n, const std::vector<int>& rowPtr, const std::vector<int>& colIdx, const std::vector<double>& val,
+                                  std::vector<int> rowForCol) {
+    rowForCol.resize(n, -1);
+    std::vector<int> colForRow(n, -1);
+    for (int c = 0; c < n; c++) {
+        if (rowForCol[c] >= 0) {
+            if (colForRow[rowForCol[c]] >= 0) {
+                throw std::runtime_error("the matching pairs a row twice");
+            }
+            colForRow[rowForCol[c]] = c;
+        }
+    }
+    for (int r = 0; r < n; r++) {
+        if (colForRow[r] >= 0) {
+            continue;
+        }
+        int best = -1;
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            if (rowForCol[colIdx[k]] < 0 && val[k] != 0 && (best < 0 || std::fabs(val[k]) > std::fabs(val[best]))) {
+                best = k;
+            }
+        }
+        if (best >= 0) {
+            rowForCol[colIdx[best]] = r;
+            colForRow[r] = colIdx[best];
+        }
+    }
+    std::vector<char> visited(n);
+    std::function<bool(int)> augment = [&](int r) {
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            int c = colIdx[k];
+            if (val[k] == 0 || visited[c]) {
+                continue;
+            }
+            visited[c] = 1;
+            if (rowForCol[c] < 0 || augment(rowForCol[c])) {
+                rowForCol[c] = r;
+                colForRow[r] = c;
+                return true;
+            }
+        }
+        return false;
+    };
+    for (int r = 0; r < n; r++) {
+        if (colForRow[r] < 0) {
+            std::fill(visited.begin(), visited.end(), 0);
+            if (!augment(r)) {
+                throw std::runtime_error("structurally singular DC matrix: no column for row " + std::to_string(r));
+            }
+        }
+    }
+    return rowForCol;
+}
+
+void DcContext::factorizeOurLu() {
+    if (!luPlan) {
+        std::vector<double> hVal(nnz);
+        DC_CUDA_CHECK(cudaMemcpy(hVal.data(), val.p, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+        const std::vector<int> rowForCol = completeMatching(n, hRowPtr, hColIdx, hVal, luRowForColumn);
+        // the matched pattern (row c = the equation matched to variable c: its diagonal is the matching), ordered by
+        // minimum degree; the plan eliminates variable colOrder[k] on its matched equation
+        std::vector<int> pRowPtr(n + 1, 0), pColIdx(nnz);
+        for (int c = 0; c < n; c++) {
+            const int r = rowForCol[c];
+            const int len = hRowPtr[r + 1] - hRowPtr[r];
+            std::copy(hColIdx.begin() + hRowPtr[r], hColIdx.begin() + hRowPtr[r + 1], pColIdx.begin() + pRowPtr[c]);
+            pRowPtr[c + 1] = pRowPtr[c] + len;
+        }
+        std::vector<int> colOrder = olfgpu::minimumDegreeOrder(n, pRowPtr.data(), pColIdx.data());
+        std::vector<int> rowOrder(n);
+        for (int k = 0; k < n; k++) {
+            rowOrder[k] = rowForCol[colOrder[k]];
+        }
+        luPlan = olfgpu::buildLuPlan(n, hRowPtr.data(), hColIdx.data(), rowOrder.data(), colOrder.data());
+        olfgpu::createBatchedLu(lu, *luPlan, 1);
+    }
+    const int lane0 = 0;
+    olfgpu::factorizeLanes(lu, val.as<double>(), olfgpu::scenarioMajorLayout(1), &lane0, 1, stream);
+    DC_CUDA_CHECK(cudaStreamSynchronize(stream));
+}
 
 // ---------------------------------------------------------------------------------------------
 // kernels
@@ -1920,7 +2044,8 @@ JNIEXPORT jlong JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx,
                                                                  jintArray jContribPtr, jintArray jContribKind, jintArray jContribElem,
                                                                  jdoubleArray jContribCoef, jintArray jTargetKind, jintArray jTargetElem,
-                                                                 jintArray jRhsPtr, jintArray jRhsKind, jintArray jRhsElem, jdoubleArray jRhsCoef) {
+                                                                 jintArray jRhsPtr, jintArray jRhsKind, jintArray jRhsElem, jdoubleArray jRhsCoef,
+                                                                 jboolean ourLu, jintArray jLuRowForColumn) {
     DcContext* ctx = new DcContext();
     try {
         IntArray rowPtr(env, jRowPtr);
@@ -1951,7 +2076,21 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jc
         if (rhsKind.len != nRhs || rhsElem.len != nRhs || rhsCoef.len != nRhs) {
             throw std::runtime_error("rhs arrays inconsistent with rhsPtr");
         }
-        initCudss(ctx);
+        ctx->ourLu = ourLu == JNI_TRUE;
+        if (ctx->ourLu) {
+            DC_CUDA_CHECK(cudaStreamCreate(&ctx->stream));
+            ctx->hRowPtr.assign(rowPtr.p, rowPtr.p + n + 1);
+            ctx->hColIdx.assign(colIdx.p, colIdx.p + ctx->nnz);
+            if (jLuRowForColumn != nullptr) {
+                IntArray rowForColumn(env, jLuRowForColumn);
+                if (rowForColumn.len != n) {
+                    throw std::runtime_error("the matching must have length n");
+                }
+                ctx->luRowForColumn.assign(rowForColumn.p, rowForColumn.p + n);
+            }
+        } else {
+            initCudss(ctx);
+        }
         ctx->rowPtr.upload(rowPtr.p, (size_t) (n + 1) * sizeof(int));
         ctx->colIdx.upload(colIdx.p, (size_t) ctx->nnz * sizeof(int));
         ctx->val.alloc((size_t) ctx->nnz * sizeof(double));
@@ -1969,8 +2108,10 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jc
         ctx->t.alloc((size_t) n * sizeof(double));
         ctx->scalarOut.alloc(sizeof(double));
         ctx->dsOut.alloc(2 * sizeof(double));
-        DC_CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matA, n, n, ctx->nnz, ctx->rowPtr.p, nullptr, ctx->colIdx.p, ctx->val.p,
-                                            DC_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        if (!ctx->ourLu) {
+            DC_CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matA, n, n, ctx->nnz, ctx->rowPtr.p, nullptr, ctx->colIdx.p, ctx->val.p,
+                                                DC_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        }
         ctx->ensureRhs(1);
         ctx->assembled = true;
         return reinterpret_cast<jlong>(ctx);
@@ -2168,6 +2309,16 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_fillValues(JNIEnv* env, jclass,
                 ctx->contribElem.as<int>(), ctx->contribCoef.as<double>(), ctx->power.as<double>(), ctx->val.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         ctx->ensureRhs(1);
+        if (ctx->ourLu) {
+            double t0 = dcTiming() ? dcNowMs() : 0;
+            ctx->factorizeOurLu();
+            if (dcTiming()) {
+                std::fprintf(stderr, "DC_TIMING batched LU %s n=%d nnz=%d %.1f ms\n", ctx->analyzed ? "factorization" : "plan + factorization",
+                             ctx->n, ctx->nnz, dcNowMs() - t0);
+            }
+            ctx->analyzed = true;
+            return;
+        }
         if (!ctx->analyzed) {
             std::lock_guard<std::mutex> guard(cudssGlobalLock());
             double t0 = 0;

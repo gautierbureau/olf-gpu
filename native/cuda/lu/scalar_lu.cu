@@ -227,6 +227,45 @@ __global__ void backwardLevel(int nRows, int width, int capacity, const int* __r
     z[static_cast<size_t>(i) * capacity + a] = x / lu[static_cast<size_t>(luDiag[i]) * capacity + a];
 }
 
+// forwardLevel and backwardLevel for one lane's factors and many right-hand sides: thread (row of the level, column),
+// the column fastest; z is n x cols, interleaved by column (z[i * cols + k]); lu points at the lane's entry 0 and its
+// entries are capacity apart.
+__global__ void forwardLevelColumns(int nRows, int cols, int capacity, const int* __restrict__ rows,
+                                    const int* __restrict__ luRowPtr, const int* __restrict__ luCol,
+                                    const int* __restrict__ luDiag, const double* __restrict__ lu, double* __restrict__ z) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nRows) * cols) {
+        return;
+    }
+    const int t = static_cast<int>(g / cols);
+    const int k = static_cast<int>(g - static_cast<size_t>(t) * cols);
+    const int i = rows[t];
+    double y = z[static_cast<size_t>(i) * cols + k];
+    const int qEnd = luDiag[i];
+    for (int q = luRowPtr[i]; q < qEnd; q++) {
+        y = fma(-lu[static_cast<size_t>(q) * capacity], z[static_cast<size_t>(luCol[q]) * cols + k], y);
+    }
+    z[static_cast<size_t>(i) * cols + k] = y;
+}
+
+__global__ void backwardLevelColumns(int nRows, int cols, int capacity, const int* __restrict__ rows,
+                                     const int* __restrict__ luRowPtr, const int* __restrict__ luCol,
+                                     const int* __restrict__ luDiag, const double* __restrict__ lu, double* __restrict__ z) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nRows) * cols) {
+        return;
+    }
+    const int t = static_cast<int>(g / cols);
+    const int k = static_cast<int>(g - static_cast<size_t>(t) * cols);
+    const int i = rows[t];
+    double x = z[static_cast<size_t>(i) * cols + k];
+    const int qEnd = luRowPtr[i + 1];
+    for (int q = luDiag[i] + 1; q < qEnd; q++) {
+        x = fma(-lu[static_cast<size_t>(q) * capacity], z[static_cast<size_t>(luCol[q]) * cols + k], x);
+    }
+    z[static_cast<size_t>(i) * cols + k] = x / lu[static_cast<size_t>(luDiag[i]) * capacity];
+}
+
 // forwardLevel (backward false) or backwardLevel (backward true) with each row's terms split over blockDim.y warps, as
 // factorStepSplit splits an entry's contributions: warp k sums the terms k, k + K, ... of one row for 32 lanes, the
 // first warp adds the K partial sums in warp order and finishes the row.
@@ -438,6 +477,38 @@ void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, 
                     lu.dTrouble.as<int>());
         }
     }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void solveScalarLaneColumns(ScalarLu& lu, int lane, int cols, const double* b, double* x, double* work,
+                            const int* identityLanes, cudaStream_t stream) {
+    if (cols <= 0) {
+        return;
+    }
+    if (lane < 0 || lane >= lu.width) {
+        throw std::runtime_error("solveScalarLaneColumns: lane " + std::to_string(lane) + " not in the last factorization");
+    }
+    const dim3 tileBlock(TILE, TILE_ROWS);
+    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (cols + TILE - 1) / TILE);
+    // the column-major right-hand sides into the factors' row order, interleaved by column: the batch's own
+    // permutation with the columns in the place of the lanes
+    toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, cols, cols, identityLanes, nullptr, lu.dRowPosition.as<int>(),
+            b, work);
+    const double* factors = lu.dLu.as<double>() + lane;
+    for (int l = 0; l + 1 < static_cast<int>(lu.forwardLevelStart.size()); l++) {
+        const int rows = lu.forwardLevelStart[l + 1] - lu.forwardLevelStart[l];
+        forwardLevelColumns<<<blocksFor(static_cast<size_t>(rows) * cols), LU_BLOCK, 0, stream>>>(rows, cols, lu.capacity,
+                lu.dForwardRow.as<int>() + lu.forwardLevelStart[l], lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(),
+                lu.dLuDiag.as<int>(), factors, work);
+    }
+    for (int l = 0; l + 1 < static_cast<int>(lu.backwardLevelStart.size()); l++) {
+        const int rows = lu.backwardLevelStart[l + 1] - lu.backwardLevelStart[l];
+        backwardLevelColumns<<<blocksFor(static_cast<size_t>(rows) * cols), LU_BLOCK, 0, stream>>>(rows, cols, lu.capacity,
+                lu.dBackwardRow.as<int>() + lu.backwardLevelStart[l], lu.dLuRowPtr.as<int>(), lu.dLuCol.as<int>(),
+                lu.dLuDiag.as<int>(), factors, work);
+    }
+    fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, cols, cols, identityLanes, nullptr, lu.dColPosition.as<int>(),
+            work, x);
     CUDA_CHECK(cudaGetLastError());
 }
 

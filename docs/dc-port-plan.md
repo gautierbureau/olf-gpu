@@ -1,5 +1,13 @@
 # DC port plan — Woodbury security analysis + time-series load flow on the GPU
 
+> **Brought back onto `main` (2026-11-13, branch `dc-port`)** from the `dc` branch, without two parts:
+> the **time-series** DC load flow (§4j and its follow-ups, `GpuTimeSeriesDcEngine`; it needs OLF's
+> time-series API branch) and the **LODF** factors (§4h, `GpuLodfCalculator`; its OLF API,
+> `LodfCalculator`, was since reworked upstream as `LodfEngine` on `lodf-matrix`). Their sections are
+> left out of this file; the `dc` branch keeps them. OLF dependency: `olf-local-patches-dc-port`
+> (version `2.4.0-SNAPSHOT-gpu-dc`) = `olf-local-patches` + vectorized DC + the alternative-DC-engine
+> seams + the DC sensitivity tests in the test jar. See `docs/tasks.md` #94.
+
 Written 2026-09-14. This worktree (`~/Projects/powsybl/powsybl-open-loadflow-gpu-1`, branch `dc`)
 is the DC session; the AC session keeps `~/Projects/powsybl/powsybl-open-loadflow-gpu`
 (`test_inteliji` == `master` at branch time, uncommitted work in flight). Both are worktrees of

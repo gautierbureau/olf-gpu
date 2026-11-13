@@ -51,7 +51,7 @@ from those two lists; add a channel there, then here.
 | `OLF_GPU_LU_COMPARE` | native | Every Newton step of our batched LU against cuDSS's uniform batch on the same systems: worst difference, backward errors, clamped pivots |
 | `OLF_GPU_LU_PATTERN_DUMP` | native | `<file>`: our batched LU's pattern, elimination order and switch dummy rows, one binary file per structure size (`<file>-n<n>`, integers only) |
 | `OLF_GPU_LOOP_TRACE_CTG` | java | `<contingency id>`: the native outer-loop trace of that contingency's slot, in every chunk. |
-| `OLF_GPU_PHASE_TIME` | java + native | Where the run's time goes: phases of the security analysis, chunk sizing, context reuse. Native: where the time goes (analysis, outer-loop passes, solves) |
+| `OLF_GPU_PHASE_TIME` | java + native | Where the run's time goes: phases of the security analysis, chunk sizing, context reuse. Native: where the time goes (analysis, outer-loop passes, solves); in the DC library, each cuDSS phase |
 | `OLF_GPU_PRELOSS_TRACE` | java | The replayed loss pre-distribution: what each contingency's generators take before the first solve. |
 | `OLF_GPU_QUALIFY_TRACE` | java | Why each contingency is batched, or which rule sends it to the CPU. |
 | `OLF_GPU_REJECT_TRACE` | java + native | The scenarios the device rejects, with the reason. |

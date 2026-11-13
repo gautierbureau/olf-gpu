@@ -103,7 +103,9 @@ class DcWoodburyBaselineProbe {
                         Double.parseDouble(System.getenv().getOrDefault("OLF_DC_REDISPATCH_SHARE", "0.3")),
                         Double.parseDouble(System.getenv().getOrDefault("OLF_DC_REDISPATCH_MW", "50")),
                         "1".equals(System.getenv("OLF_DC_RETAIN_BREAKERS")),
-                        Long.parseLong(System.getenv().getOrDefault("OLF_DC_SEED", "42")))
+                        Long.parseLong(System.getenv().getOrDefault("OLF_DC_SEED", "42")),
+                        // OLF_DC_KINDS: the topological strategy kinds cycled through (coupler, move, breaker)
+                        System.getenv("OLF_DC_KINDS") != null ? List.of(System.getenv("OLF_DC_KINDS").split(",")) : TopologyStudy.DEFAULT_KINDS)
                 : null;
         // OLF_DC_ONLY_STRATEGIES=id,id: replay these strategies of the study alone, with their contingencies (diagnosis)
         String onlyStrategies = System.getenv("OLF_DC_ONLY_STRATEGIES");

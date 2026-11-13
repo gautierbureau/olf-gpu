@@ -307,7 +307,11 @@ final class GpuLimitScanner {
                 scanGroup(branch, g, manager);
             }
         }
-        manager.detectVoltageAngleViolations(network);
+        if (reader != null) {
+            detectVoltageAngleViolations(network, manager);  // OLF's decisions, the angles read from the state
+        } else {
+            manager.detectVoltageAngleViolations(network);
+        }
     }
 
     /** Confirm the branch-limit candidates (table order, most severe first per group) and return
@@ -423,6 +427,9 @@ final class GpuLimitScanner {
     }
 
     private double busAngle(LfBus bus) {
+        if (dcReader != null) {
+            return dcReader.busAngle(dcState, bus);
+        }
         return view != null ? view.busAngle(state, bus) : bus.getAngle();
     }
 }

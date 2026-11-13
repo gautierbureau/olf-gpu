@@ -463,11 +463,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         GpuMonitoredBranchResults monitoredBranchResults = GpuMonitoredBranchResults.build(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
         boolean needBusResults = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                 || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty());
-        // contingencies answered from their state, as the AC path does: no voltage-angle limit or monitored bus (they read
-        // the buses' angles), no operator strategy (it re-runs on the loaded state), monitored branches whose results the
-        // state gives
-        boolean stateFree = stateReader != null && !needAngles && !needBusResults
-                && strategySetup.operatorStrategiesByContingencyId().isEmpty()
+        // contingencies answered from their state, as the AC path does: the voltage-angle limits read the state's angles,
+        // the monitored branches' results the state gives; no monitored bus (its result reads the bus); a contingency
+        // whose operator strategies have a threshold condition (it reads the network's flows) is loaded
+        boolean stateFree = stateReader != null && !needBusResults
                 && monitoredBranchResults.readableFromState(createResultExtension);
         boolean checkStateReader = stateFree && CHECK_STATE_READER.get();
         long tSetup = System.nanoTime();
@@ -567,7 +566,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 // loaded into the equation system, where the vectorized DC network recomputes every branch flow
                 double[] state = Arrays.copyOfRange(states, i * n, (i + 1) * n);
                 int emitted = records[i];
-                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
+                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId())
+                        && !hasThresholdCondition(strategySetup.operatorStrategiesByContingencyId().get(contingency.getId()));
                 if (!fromState || checkStateReader) {
                     equationSystem.getStateVector().set(state);
                     if (needAngles) {
@@ -623,7 +623,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             runStrategies(solver, lfNetwork, context, strategyScenarios, strategySetup, elementByBranch, baseTargets, busNetInjection, distribution,
                     arrayModelApplies, scanner, table, needAngles, preContingencyNetworkResult, preContingencyLimitViolationManager,
                     monitorIndexes, createResultExtension, securityAnalysisParameters, limitReductions, dcPowerFactor, violationsParameters,
-                    strategyResultsByContingency);
+                    strategyResultsByContingency,
+                    monitoredBranchResults, stateFree, checkStateReader);
         }
         // leave the base state loaded, as the stock path's restore would
         equationSystem.getStateVector().set(preContingencyStates);
@@ -655,7 +656,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                                AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
                                SecurityAnalysisParameters securityAnalysisParameters, List<LimitReduction> limitReductions, double dcPowerFactor,
                                SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                               Map<String, List<OperatorStrategyResult>> strategyResultsByContingency) {
+                               Map<String, List<OperatorStrategyResult>> strategyResultsByContingency,
+                               GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader) {
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         int n = equationSystem.getIndex().getColumnCount();
         DcLoadFlowParameters parameters = context.getParameters();
@@ -762,9 +764,22 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 lfContingency.apply(parameters.getBalanceType());
                 LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
                 double[] state = Arrays.copyOfRange(states, i * n, (i + 1) * n);
-                equationSystem.getStateVector().set(state);
-                if (needAngles) {
-                    updateNetwork(lfNetwork, equationSystem, state);
+                int emitted = records[i];
+                // the action branches' models moved on the host (tap, switch): the screen's flows for them are not
+                // the host's, so they are scanned in full, and read on their current model
+                int[] uncovered = lfActions.stream()
+                        .map(strategySetup.actionElementsByLfAction()::get).filter(Objects::nonNull).flatMap(Collection::stream)
+                        .mapToInt(e -> e.getLfBranch().getNum()).distinct().toArray();
+                // answered from the device state, as the AC path starts a strategy from it: not loaded into OLF's model
+                boolean fromState = stateFree && emitted <= CAPACITY && monitoredBranchResults.appliesTo(contingency.getId());
+                if (!fromState || checkStateReader) {
+                    equationSystem.getStateVector().set(state);
+                    if (needAngles) {
+                        updateNetwork(lfNetwork, equationSystem, state);
+                    }
+                }
+                if (fromState) {
+                    stateReader.useLiveModel(lfNetwork, uncovered);
                 }
                 // the stock predicate: the contingency's branches and the partially disabled ones of THIS connectivity result
                 Set<LfBranch> disabledBranches = new HashSet<>();
@@ -773,29 +788,23 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 Predicate<LfBranch> isBranchDisabled = disabledBranches::contains;
 
                 var violationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
-                int emitted = records[i];
-                // the action branches' models moved on the host (tap, switch): the screen's flows for them are not
-                // the host's, so they are scanned in full
-                int[] uncovered = lfActions.stream()
-                        .map(strategySetup.actionElementsByLfAction()::get).filter(Objects::nonNull).flatMap(Collection::stream)
-                        .mapToInt(e -> e.getLfBranch().getNum()).distinct().toArray();
                 if (emitted > CAPACITY) {
                     violationManager.detectViolations(lfNetwork, isBranchDisabled);
                 } else {
                     int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
                     Arrays.sort(candidates);
-                    scanner.detectFromCandidates(lfNetwork, violationManager, candidates, isBranchDisabled, uncovered);
+                    scanner.detectFromCandidates(lfNetwork, violationManager, candidates, isBranchDisabled, uncovered,
+                            fromState ? stateReader : null, state, dcPowerFactor);
                 }
-                var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, monitorIndexes, createResultExtension,
-                        preContingencyNetworkResult, contingency, LoadFlowModel.DC, dcPowerFactor,
-                        securityAnalysisParameters.getModifiedMonitoredElementsParameters());
-                postActionsNetworkResult.update(isBranchDisabled);
+                NetworkResult networkResult = fromState
+                        ? strategyResultFromState(monitoredBranchResults, lfNetwork, contingency, isBranchDisabled, state, checkStateReader,
+                                monitorIndexes, preContingencyNetworkResult, dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters())
+                        : olfNetworkResult(lfNetwork, contingency, isBranchDisabled, monitorIndexes, createResultExtension, preContingencyNetworkResult,
+                                dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                stateReader.clearLiveModel();
                 strategyResultsByContingency.computeIfAbsent(contingency.getId(), k -> new ArrayList<>()).add(new OperatorStrategyResult(operatorStrategy,
                         List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED,
-                                new LimitViolationsResult(violationManager.getLimitViolations()),
-                                new NetworkResult(postActionsNetworkResult.getBranchResults(), postActionsNetworkResult.getBusResults(),
-                                        postActionsNetworkResult.getThreeWindingsTransformerResults()),
-                                Double.NaN))));
+                                new LimitViolationsResult(violationManager.getLimitViolations()), networkResult, Double.NaN))));
                 networkState.restore();
             }
         }
@@ -838,7 +847,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     creationParameters.getDcApproximationType(), branch.getPiModel()) : 0;
         }
         solver.setBranches(ph1Row, ph2Row, a1Row, a1Const, power);
-        return new GpuDcStateReader(ph1Row, ph2Row, a1Row, a1Const, power);
+        return new GpuDcStateReader(ph1Row, ph2Row, a1Row, a1Const, power, busPhRow, creationParameters);
     }
 
     private int actionElementOffset;
@@ -1185,6 +1194,53 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         }
         return new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                 postContingencyNetworkResult.getThreeWindingsTransformerResults());
+    }
+
+    /** OLF's post-actions network result, on the state loaded into its model. */
+    private static NetworkResult olfNetworkResult(LfNetwork lfNetwork, Contingency contingency, Predicate<LfBranch> isBranchDisabled,
+                                                  AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
+                                                  PreContingencyNetworkResult preContingencyNetworkResult, double dcPowerFactor,
+                                                  SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified) {
+        var result = new PostContingencyNetworkResult(lfNetwork, monitorIndexes, createResultExtension, preContingencyNetworkResult, contingency,
+                LoadFlowModel.DC, dcPowerFactor, modified);
+        result.update(isBranchDisabled);
+        return new NetworkResult(result.getBranchResults(), result.getBusResults(), result.getThreeWindingsTransformerResults());
+    }
+
+    /** An operator strategy's network result read from its device state, the actions applied on the network (the
+     *  reader on their branches' current model); the check hook compares it, and every branch value, with OLF's. */
+    private NetworkResult strategyResultFromState(GpuMonitoredBranchResults monitoredBranchResults, LfNetwork lfNetwork, Contingency contingency,
+                                                  Predicate<LfBranch> isBranchDisabled, double[] state, boolean check,
+                                                  AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
+                                                  PreContingencyNetworkResult preContingencyNetworkResult, double dcPowerFactor,
+                                                  SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modified) {
+        List<BranchResult> branchResults = monitoredBranchResults.branchResultsFromState(contingency, isBranchDisabled, preContingencyNetworkResult,
+                modified, stateReader, state, dcPowerFactor);
+        STATE_FREE_CONTINGENCY_COUNT.incrementAndGet();
+        if (check) {
+            List<BranchResult> olf = olfNetworkResult(lfNetwork, contingency, isBranchDisabled, monitorIndexes, false, preContingencyNetworkResult,
+                    dcPowerFactor, modified).getBranchResults();
+            STATE_READER_MISMATCH_COUNT.addAndGet(compareStateReader(lfNetwork, state, dcPowerFactor) + GpuMonitoredBranchResults.compare(branchResults, olf));
+        }
+        return new NetworkResult(branchResults, List.of(), List.of());
+    }
+
+    /** Whether one of these operator strategies has a threshold condition: OLF evaluates it on the network's values. */
+    private static boolean hasThresholdCondition(List<Indexed<OperatorStrategy>> strategies) {
+        if (strategies == null) {
+            return false;
+        }
+        for (Indexed<OperatorStrategy> strategy : strategies) {
+            for (var conditionalActions : strategy.value().getConditionalActions()) {
+                String type = conditionalActions.getCondition().getType();
+                if (com.powsybl.contingency.strategy.condition.BranchThresholdCondition.NAME.equals(type)
+                        || com.powsybl.contingency.strategy.condition.ThreeWindingsTransformerThresholdCondition.NAME.equals(type)
+                        || com.powsybl.contingency.strategy.condition.InjectionThresholdCondition.NAME.equals(type)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** The contingency's network result read from its state (stateFree runs); the check hook compares it with OLF's. */

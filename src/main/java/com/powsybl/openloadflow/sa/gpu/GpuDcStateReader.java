@@ -8,9 +8,13 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
+import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationTerm;
 import com.powsybl.openloadflow.dc.equations.ClosedBranchDcCurrent;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.util.Evaluable;
 import net.jafama.FastMath;
@@ -36,13 +40,57 @@ final class GpuDcStateReader {
     private final int[] a1Row;
     private final double[] a1Const;
     private final double[] power;
+    private final int[] busPhRow;
+    private final DcEquationSystemCreationParameters creationParameters;
 
-    GpuDcStateReader(int[] ph1Row, int[] ph2Row, int[] a1Row, double[] a1Const, double[] power) {
+    /** Branches whose model an operator strategy's actions changed on the network (a tap): their power and fixed shift
+     *  are read from the branch's current pi model, as the vectorized network updates them (onTapPositionChange). */
+    private final boolean[] live;
+    private final double[] livePower;
+    private final double[] liveA1;
+    private int[] liveBranches = new int[0];
+
+    GpuDcStateReader(int[] ph1Row, int[] ph2Row, int[] a1Row, double[] a1Const, double[] power, int[] busPhRow,
+                     DcEquationSystemCreationParameters creationParameters) {
         this.ph1Row = ph1Row;
         this.ph2Row = ph2Row;
         this.a1Row = a1Row;
         this.a1Const = a1Const;
         this.power = power;
+        this.busPhRow = busPhRow;
+        this.creationParameters = creationParameters;
+        this.live = new boolean[power.length];
+        this.livePower = new double[power.length];
+        this.liveA1 = new double[power.length];
+    }
+
+    /**
+     * Read these branches' model from the network, as it is now (after an operator strategy's actions were applied):
+     * {@code DcBranchVector.updateBranchModel}'s power and shift. Until {@link #clearLiveModel()}.
+     */
+    void useLiveModel(LfNetwork network, int[] branchNums) {
+        clearLiveModel();
+        for (int b : branchNums) {
+            PiModel piModel = network.getBranch(b).getPiModel();
+            live[b] = true;
+            livePower[b] = AbstractClosedBranchDcFlowEquationTerm.computePower(creationParameters.isUseTransformerRatio(),
+                    creationParameters.getDcApproximationType(), piModel);
+            liveA1[b] = piModel.getA1();
+        }
+        liveBranches = branchNums;
+    }
+
+    void clearLiveModel() {
+        for (int b : liveBranches) {
+            live[b] = false;
+        }
+        liveBranches = new int[0];
+    }
+
+    /** {@code bus.getAngle()} once {@code DcLoadFlowEngine.updateNetwork} wrote {@code state}: its angle variable's value. */
+    double busAngle(double[] state, LfBus bus) {
+        int row = busPhRow[bus.getNum()];
+        return row >= 0 ? state[row] : bus.getAngle();
     }
 
     /** {@code branch.getP1().eval()} (side 1) or {@code getP2()} (side 2) with {@code state} loaded. */
@@ -56,9 +104,10 @@ final class GpuDcStateReader {
         if (ph1Row[b] < 0 || ph2Row[b] < 0) {
             return 0;
         }
-        double a1 = a1Row[b] >= 0 ? state[a1Row[b]] : a1Const[b];
+        double a1 = a1Row[b] >= 0 ? state[a1Row[b]] : (live[b] ? liveA1[b] : a1Const[b]);
+        double pw = live[b] ? livePower[b] : power[b];
         double deltaPhase = state[ph2Row[b]] - state[ph1Row[b]] + PiModel.A2 - a1;
-        return side == GpuTwoSides.ONE ? -power[b] * deltaPhase : power[b] * deltaPhase;
+        return side == GpuTwoSides.ONE ? -pw * deltaPhase : pw * deltaPhase;
     }
 
     /** {@code branch.getI1().eval()} or {@code getI2()} with {@code state} loaded. */

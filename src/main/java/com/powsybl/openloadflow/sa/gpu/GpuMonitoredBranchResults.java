@@ -14,7 +14,9 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.impl.LfBoundaryLineBranch;
 import com.powsybl.openloadflow.network.impl.LfBranchImpl;
+import com.powsybl.openloadflow.network.impl.LfTieLineBranch;
 import com.powsybl.openloadflow.sa.PreContingencyNetworkResult;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.SecurityAnalysisParameters;
@@ -50,25 +52,46 @@ final class GpuMonitoredBranchResults {
     private final StateMonitorIndex monitorIndex;
     private final boolean applies;
     private final List<LfBranch> monitored;
-    /** Every monitored branch a line or a two-winding transformer of non-zero impedance (LfBranchImpl), whose result is
-     *  its six evaluables: then the results can be read from a state (branchResultsFromState). */
+    /** Every monitored branch's result made of its six evaluables, non-zero impedance and both buses present: a line
+     *  or a two-winding transformer (LfBranchImpl), a tie line (LfTieLineBranch: the line's and its halves'), a boundary
+     *  line (LfBoundaryLineBranch: no flow transfer). Then the results can be read from a state (branchResultsFromState). */
     private final boolean readableFromState;
     private final double[] currentScale1;
     private final double[] currentScale2;
+    private final String[] half1Id;                          // a tie line's halves, null otherwise
+    private final String[] half2Id;
+    private final boolean[] boundary;
 
     private GpuMonitoredBranchResults(StateMonitorIndex monitorIndex, boolean applies, List<LfBranch> monitored) {
         this.monitorIndex = monitorIndex;
         this.applies = applies;
         this.monitored = monitored;
-        this.readableFromState = monitored.stream().allMatch(b -> b instanceof LfBranchImpl && !b.isZeroImpedance(LoadFlowModel.DC)
-                && b.getBus1() != null && b.getBus2() != null);
+        this.readableFromState = monitored.stream().allMatch(b -> (b instanceof LfBranchImpl || b instanceof LfTieLineBranch
+                || b instanceof LfBoundaryLineBranch) && !b.isZeroImpedance(LoadFlowModel.DC) && b.getBus1() != null && b.getBus2() != null);
         this.currentScale1 = new double[monitored.size()];
         this.currentScale2 = new double[monitored.size()];
+        this.half1Id = new String[monitored.size()];
+        this.half2Id = new String[monitored.size()];
+        this.boundary = new boolean[monitored.size()];
         if (readableFromState) {
             for (int k = 0; k < monitored.size(); k++) {
-                // LfBranchImpl.createBranchResult's scales: the nominal voltage of each terminal's level, its bus's
-                currentScale1[k] = PerUnit.ib(monitored.get(k).getBus1().getNominalV());
-                currentScale2[k] = PerUnit.ib(monitored.get(k).getBus2().getNominalV());
+                LfBranch branch = monitored.get(k);
+                if (branch instanceof LfTieLineBranch tieLine) {
+                    // LfTieLineBranch.createBranchResult: each half's terminal level
+                    currentScale1[k] = PerUnit.ib(tieLine.getHalf1().getTerminal().getVoltageLevel().getNominalV());
+                    currentScale2[k] = PerUnit.ib(tieLine.getHalf2().getTerminal().getVoltageLevel().getNominalV());
+                    half1Id[k] = tieLine.getHalf1().getId();
+                    half2Id[k] = tieLine.getHalf2().getId();
+                } else if (branch instanceof LfBoundaryLineBranch) {
+                    // LfBoundaryLineBranch.createBranchResult: the boundary line's terminal level (its network side, bus 1), both sides
+                    currentScale1[k] = PerUnit.ib(branch.getBus1().getNominalV());
+                    currentScale2[k] = currentScale1[k];
+                    boundary[k] = true;
+                } else {
+                    // LfBranchImpl.createBranchResult's scales: the nominal voltage of each terminal's level, its bus's
+                    currentScale1[k] = PerUnit.ib(branch.getBus1().getNominalV());
+                    currentScale2[k] = PerUnit.ib(branch.getBus2().getNominalV());
+                }
             }
         }
     }
@@ -148,7 +171,8 @@ final class GpuMonitoredBranchResults {
                 continue;
             }
             BranchResult pre = preContingency.getBranchResult(branch.getId());
-            double preP1 = pre != null ? pre.getP1() : Double.NaN;
+            double preP1 = boundary[k] || pre == null ? Double.NaN : pre.getP1();
+            double preOfContingencyP1 = boundary[k] ? Double.NaN : preContingencyBranchOfContingencyP1;
             double flowP1 = reader.p(state, branch, GpuTwoSides.ONE) * PerUnit.SB;
             double flowQ1 = branch.getQ1().eval() * PerUnit.SB;
             double flowP2 = reader.p(state, branch, GpuTwoSides.TWO) * PerUnit.SB;
@@ -156,10 +180,10 @@ final class GpuMonitoredBranchResults {
             double currentI1 = reader.i(state, branch, GpuTwoSides.ONE, dcPowerFactor) * currentScale1[k];
             double currentI2 = reader.i(state, branch, GpuTwoSides.TWO, dcPowerFactor) * currentScale2[k];
             double flowTransfer = Double.NaN;
-            if (!Double.isNaN(preP1) && !Double.isNaN(preContingencyBranchOfContingencyP1)) {
+            if (!Double.isNaN(preP1) && !Double.isNaN(preOfContingencyP1)) {
                 double flowChange = flowP1 - preP1;
-                if (Math.abs(preContingencyBranchOfContingencyP1) > P_EPSILON_SI) {
-                    flowTransfer = flowChange / preContingencyBranchOfContingencyP1;
+                if (Math.abs(preOfContingencyP1) > P_EPSILON_SI) {
+                    flowTransfer = flowChange / preOfContingencyP1;
                 } else {
                     flowTransfer = 0.;
                 }
@@ -167,6 +191,11 @@ final class GpuMonitoredBranchResults {
             BranchResult result = new BranchResult(branch.getId(), flowP1, flowQ1, currentI1, flowP2, flowQ2, currentI2, flowTransfer);
             if (changed(pre, result, threshold)) {
                 out.add(result);
+                if (half1Id[k] != null) {
+                    // the tie line first, then its halves (LfTieLineBranch.createBranchResult)
+                    out.add(new BranchResult(half1Id[k], flowP1, flowQ1, currentI1, Double.NaN, Double.NaN, Double.NaN, flowTransfer));
+                    out.add(new BranchResult(half2Id[k], flowP2, flowQ2, currentI2, Double.NaN, Double.NaN, Double.NaN, flowTransfer));
+                }
             }
         }
         return out;

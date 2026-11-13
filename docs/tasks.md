@@ -86,6 +86,14 @@ factors (`GpuLodfCalculator`).
   Gate contingenciesAnsweredFromTheirState (reader vs model bit for bit on every branch, results vs OLF); network.xiidm:
   all 9959 answered from their state, 0 differing values (OLF_DC_CHECK_STATE=1). Host per-contingency loop 0.6 -> 0.25-
   0.30 s. (GPU-side timings of that day were taken with another session's test run using the GPU at 92 %.)
+- DONE 2026-11-13, the state path widened: voltage-angle limits checked on the state's angles (the scanner's own copy
+  of OLF's check), tie lines and boundary lines' results built from the state, operator strategies answered from
+  their device state (the actions still applied on the network for the topology and the taps; the reader takes the
+  action branches' power and shift from their current pi model, as DcBranchVector.updateBranchModel does). A
+  contingency whose strategies have a threshold condition (OLF reads the network's flows) still loads its state.
+  Gate strategiesAndAngleLimitsAnsweredFromTheirState (tap, switch, generator and load actions, violated angle
+  limits; reader vs model bit for bit). Remaining on the host for strategies: their target columns (replay) and the
+  actions' application + full NetworkState.restore.
 - Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (now ~0.3 s), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
   connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
 - Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off

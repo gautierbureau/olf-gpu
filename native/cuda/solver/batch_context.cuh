@@ -40,6 +40,7 @@
 #include "context/generator_voltage_control_freeze_context.cuh"
 #include "context/forced_target_q_context.cuh"
 #include "context/hvdc_ac_emulation_context.cuh"
+#include "context/realistic_voltage_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -216,16 +217,7 @@ struct BatchSolverContext {
     // nS*n: the closed branches' part of dQbuf, written by the Newton fills (each zeroes its active scenarios' rows and
     // adds the p and q it puts in F, on the frozen rows) and copied into dQbuf by every check's refill
     DeviceBuf dQbufClosed;
-    // AcloadFlowEngine's realistic-voltage check, run on the INTERMEDIATE states of the driver's
-    // sweep: per row, 1 = a non-fictitious bus's BUS_V at or above minNominalVoltageRealisticVoltageCheck.
-    DeviceBuf dRealisticRow, dRealisticGate, dRealisticBad;
-    int realisticCheck = 0;
-    double realisticMinV = 0.0, realisticMaxV = 0.0;
-    // AcloadFlowEngine DEFERS the check until the last outer loop that can FIX an unrealistic state
-    // has run (voltageRemoteControlRobustMode; ReactiveLimits and the discrete TransformerVoltageControl
-    // are the two loops that declare canFixUnrealisticState). -1 = no such loop, check every solve.
-    // 0 = ReactiveLimits is the last one, 1 = the discrete TransformerVoltageControl.
-    int realisticFixingLoop = GpuRealisticVoltageFixingLoop::NONE;
+    RealisticVoltageContext realisticVoltage;
     long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
                                                              // read-backs above describe the LAST solve only
     int newtonLoopIterations = 0;                            // the batched Newton iterations of the last solveBatchContext call

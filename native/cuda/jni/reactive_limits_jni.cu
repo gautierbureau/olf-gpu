@@ -194,7 +194,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRealisticCheck)(
     if (ctx == nullptr) {
         return;
     }
-    ctx->realisticCheck = 0;
+    ctx->realisticVoltage.realisticCheck = 0;
     if (enabled == 0 || jRowChecked == nullptr) {
         return;
     }
@@ -203,12 +203,12 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchRealisticCheck)(
         return;
     }
     jbyte* rc = env->GetByteArrayElements(jRowChecked, nullptr);
-    ctx->dRealisticRow.upload(rc, static_cast<size_t>(ctx->n) * sizeof(char));
+    ctx->realisticVoltage.dRealisticRow.upload(rc, static_cast<size_t>(ctx->n) * sizeof(char));
     env->ReleaseByteArrayElements(jRowChecked, rc, JNI_ABORT);
-    ctx->realisticMinV = minV;
-    ctx->realisticMaxV = maxV;
-    ctx->realisticFixingLoop = fixingLoop;
-    ctx->realisticCheck = 1;
+    ctx->realisticVoltage.realisticMinV = minV;
+    ctx->realisticVoltage.realisticMaxV = maxV;
+    ctx->realisticVoltage.realisticFixingLoop = fixingLoop;
+    ctx->realisticVoltage.realisticCheck = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL

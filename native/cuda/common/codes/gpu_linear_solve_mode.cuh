@@ -1,7 +1,7 @@
 // Copyright (c) 2026, RTE (http://www.rte-france.com)
 // SPDX-License-Identifier: MPL-2.0
 //
-// How a batch context factors its matrices (ctx->mode). Mirrors
+// How a batch context factors its matrices (ctx->linearSolver.mode). Mirrors
 // com.powsybl.openloadflow.ac.solver.gpu.codes.GpuLinearSolveMode (GpuCodesMirrorTest checks they agree).
 #ifndef OLF_GPU_COMMON_CODES_GPU_LINEAR_SOLVE_MODE_CUH
 #define OLF_GPU_COMMON_CODES_GPU_LINEAR_SOLVE_MODE_CUH

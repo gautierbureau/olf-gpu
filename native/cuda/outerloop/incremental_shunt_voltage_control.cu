@@ -181,10 +181,10 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
     std::vector<char>& active = drv.active;
     int nIncrementalShuntVoltageControlControllerShunts = ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts;
     if (nIncrementalShuntVoltageControlControllerShunts <= 0) return;
-    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
-            && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
+    if (ctx->linearSolver.mode != GpuLinearSolveMode::UBATCH && ctx->linearSolver.mode != GpuLinearSolveMode::ROBUST
+            && ctx->linearSolver.mode != GpuLinearSolveMode::BATCHED_LU) {
         static bool warned = false;
-        if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->linearSolver.mode); warned = true; }
         return;
     }
     int nG = ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlGroups;

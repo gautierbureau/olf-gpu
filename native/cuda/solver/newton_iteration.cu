@@ -39,29 +39,29 @@ namespace olfgpu {
 // The compacted solver (straggler compaction, narrow refinement), created the first time a compacted width is
 // needed, for capacity scenarios at most.
 static void ensureCompactedSolver(BatchSolverContext* ctx, int n, int nnz, int capacity) {
-    if (ctx->compactedCapacity != 0) {
+    if (ctx->linearSolver.compactedCapacity != 0) {
         return;
     }
-    ctx->compactedCapacity = std::max(1, capacity);
-    ctx->dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->compactedCapacity * sizeof(double));
-    ctx->dBCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dDxCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->compactedCapacity) * sizeof(int));
-    CUDSS_CHECK(cudssCreate(&ctx->compactedSolver.handle));
-    CUDSS_CHECK(cudssSetStream(ctx->compactedSolver.handle, ctx->stream));
-    CUDSS_CHECK(cudssConfigCreate(&ctx->compactedSolver.config));
-    applyReorderAlg(ctx->compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
+    ctx->linearSolver.compactedCapacity = std::max(1, capacity);
+    ctx->linearSolver.dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dBCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dDxCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->linearSolver.compactedCapacity) * sizeof(int));
+    CUDSS_CHECK(cudssCreate(&ctx->linearSolver.compactedSolver.handle));
+    CUDSS_CHECK(cudssSetStream(ctx->linearSolver.compactedSolver.handle, ctx->stream));
+    CUDSS_CHECK(cudssConfigCreate(&ctx->linearSolver.compactedSolver.config));
+    applyReorderAlg(ctx->linearSolver.compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
     int compactedIterativeRefinementSteps = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-    CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->compactedUniformBatchSystemMatrix, n, n, nnz,
-            ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
+    CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.compactedUniformBatchSystemMatrix, n, n, nnz,
+            ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->linearSolver.dValsCompacted.as<double>(),
             OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchSolutionMatrix, n, 1, n, ctx->dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    ctx->dRCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchResidualMatrix, n, 1, n, ctx->dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchDeltaMatrix, n, 1, n, ctx->dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->linearSolver.dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchSolutionMatrix, n, 1, n, ctx->linearSolver.dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    ctx->linearSolver.dRCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchResidualMatrix, n, 1, n, ctx->linearSolver.dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchDeltaMatrix, n, 1, n, ctx->linearSolver.dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 // A new batch size needs a FRESH data object and a fresh ANALYSIS. Setting
@@ -73,16 +73,16 @@ static void ensureCompactedSolver(BatchSolverContext* ctx, int n, int nnz, int c
 // Tier change to a width analyzed before: its own data object, the batch size set back on the
 // (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
 static cudssData_t compactedDataForWidth(BatchSolverContext* ctx, int w) {
-    cudssData_t& cached = ctx->compactData[w];
+    cudssData_t& cached = ctx->linearSolver.compactData[w];
     if (cached == nullptr) {
-        CUDSS_CHECK(cudssDataCreate(ctx->compactedSolver.handle, &cached));
-        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+        CUDSS_CHECK(cudssDataCreate(ctx->linearSolver.compactedSolver.handle, &cached));
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
         gAnalysesCompact++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->compactedSolver.config, cached, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-    } else if (w != ctx->compactWidth) {
-        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.compactedSolver.config, cached, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchSolutionMatrix, ctx->linearSolver.compactedUniformBatchRightHandSideMatrix)); }
+    } else if (w != ctx->linearSolver.compactWidth) {
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
     }
-    ctx->compactWidth = w;
+    ctx->linearSolver.compactWidth = w;
     return cached;
 }
 
@@ -289,10 +289,10 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         return false;
     };
     auto ensureLinearResidualBuffers = [&]() {
-        if (!ctx->dLinRp.p) {
-            ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
-            ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
-            ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
+        if (!ctx->linearSolver.dLinRp.p) {
+            ctx->linearSolver.dLinRp.alloc((size_t) n * nS * sizeof(double));
+            ctx->linearSolver.dLinRm.alloc((size_t) n * nS * sizeof(double));
+            ctx->linearSolver.dLinSc.alloc((size_t) 3 * nS * sizeof(double));
         }
     };
 
@@ -406,11 +406,11 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                 // dVals/dDx/dB still held it; it is scored here against the mismatch of the budget's iteration.
                 if (atBudget) {
                     ensureLinearResidualBuffers();
-                    linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
-                            ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
+                    linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->linearSolver.dLinRp.as<double>(),
+                            ctx->linearSolver.dLinRm.as<double>(), ctx->dF.as<double>(), ctx->linearSolver.dLinSc.as<double>());
                     std::vector<double> hsc((size_t) 3 * nS);
                     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                    CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->linearSolver.dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
                     for (int s2 = 0; s2 < nS; s2++) {
                         if (active[s2] && it[s2] == maxIter) {
                             lastSolveRatio[s2] = hsc[3 * s2 + 2];
@@ -504,7 +504,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             CUDA_CHECK(cudaMemcpyAsync(ctx->dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }
-        if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        if (ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH || ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
         //      (honest Newton). Our batched LU (BATCHED_LU mode) factorizes the active scenarios only; the inactive ones
@@ -515,10 +515,10 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         markIdentityLanes<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
-        if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        if (ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
             batchedLuNewtonSolve(ctx, drv, k);
         } else {
-        if (!ctx->analyzed) {
+        if (!ctx->linearSolver.analyzed) {
             bool timeIt = traceOn(Trace::TRACE);
             long long t0 = 0;
             if (timeIt) {
@@ -527,15 +527,15 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                         std::chrono::steady_clock::now().time_since_epoch()).count();
             }
             gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
             double ms = -1.0;
             if (timeIt) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 ms = (std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count() - t0) / 1.0e6;
             }
-            traceLuNnz(ctx->solver.handle, ctx->solver.data, "ubatch", ctx->nScenarios, ms);
-            ctx->analyzed = true;
+            traceLuNnz(ctx->linearSolver.solver.handle, ctx->linearSolver.solver.data, "ubatch", ctx->nScenarios, ms);
+            ctx->linearSolver.analyzed = true;
         }
         // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
         // host-side phase overhead vs separate FACTORIZATION + SOLVE calls.
@@ -553,7 +553,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         // two, so a tier change re-analyzes rarely.
         constexpr double COMPACT_FRAC = 0.5;
         const int compactLimit = std::max(1, std::min(nS, static_cast<int>(COMPACT_FRAC * nS)));
-        bool compactSolve = !deviceFixedIter && ctx->mode == GpuLinearSolveMode::UBATCH && nActive > 0 && nActive <= compactLimit
+        bool compactSolve = !deviceFixedIter && ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH && nActive > 0 && nActive <= compactLimit
                 && nActive < nS;
         if (!compactSolve) {
             gWidthIterSum += nS;                             // full-width factorization this iteration
@@ -561,7 +561,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         if (compactSolve) {
             ensureCompactedSolver(ctx, n, nnz, compactLimit);
             std::vector<int> cmap;
-            cmap.reserve(ctx->compactedCapacity);
+            cmap.reserve(ctx->linearSolver.compactedCapacity);
             for (int cs = 0; cs < nS; cs++) {
                 if (active[cs]) {
                     cmap.push_back(cs);
@@ -572,33 +572,33 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             while (w < nReal) {
                 w <<= 1;
             }
-            if (w > ctx->compactedCapacity) {
-                w = ctx->compactedCapacity;
+            if (w > ctx->linearSolver.compactedCapacity) {
+                w = ctx->linearSolver.compactedCapacity;
             }
             while (static_cast<int>(cmap.size()) < w) {
                 cmap.push_back(cmap[0]);
             }
             gWidthIterSum += w;                              // compacted width actually factorized
             gCompactIters++;
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
-            gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
-            gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dB.as<double>(), ctx->dBCompacted.as<double>());
+            CUDA_CHECK(cudaMemcpyAsync(ctx->linearSolver.dCompactedScenarioMap.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+            gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->linearSolver.dValsCompacted.as<double>());
+            gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dB.as<double>(), ctx->linearSolver.dBCompacted.as<double>());
             cudssData_t compactData = compactedDataForWidth(ctx, w);
-            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, compactData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchSolutionMatrix, ctx->linearSolver.compactedUniformBatchRightHandSideMatrix)); }
+            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->linearSolver.dRCompacted.p != nullptr && ctx->linearSolver.dIterativeRefinementScore.p != nullptr && ctx->linearSolver.dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
-                refineLanes(ctx, w, n, nnz, ctx->dValsCompacted.as<double>(), ctx->dDxCompacted.as<double>(), ctx->dBCompacted.as<double>(),
-                        ctx->dRCompacted.as<double>(), ctx->dDeltaCompacted.as<double>(), nullptr, configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
+                refineLanes(ctx, w, n, nnz, ctx->linearSolver.dValsCompacted.as<double>(), ctx->linearSolver.dDxCompacted.as<double>(), ctx->linearSolver.dBCompacted.as<double>(),
+                        ctx->linearSolver.dRCompacted.as<double>(), ctx->linearSolver.dDeltaCompacted.as<double>(), nullptr, configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
                     AnalysisTimer at_(__LINE__, 'S');
-                    CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix));
+                    CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, compactData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix));
                 });
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
-            scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDxCompacted.as<double>(), ctx->dDx.as<double>());
+            scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dDxCompacted.as<double>(), ctx->dDx.as<double>());
         } else {
             gFullFactorizations++;
-            { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, ubPhase, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
-            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
+            { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, ubPhase, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
+            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->linearSolver.dR.p != nullptr && ctx->linearSolver.uniformBatchResidualMatrix != nullptr && ctx->linearSolver.dIterativeRefinementScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see refineLanes). A uniform-batch solve runs every
                 // lane of its batch, so the lanes that need refinement go to the compacted solver when that is narrower:
                 // gathered and factorized there once, then solved at that width. A full-width refinement solve cost
@@ -607,9 +607,9 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                 int refineReal = 0;
                 cudssData_t refineData = nullptr;
                 refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
-                        ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
+                        ctx->linearSolver.dR.as<double>(), ctx->linearSolver.dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
                     AnalysisTimer at_(__LINE__, 'S');
-                    CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_SOLVE, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchDeltaMatrix, ctx->uniformBatchResidualMatrix));
+                    CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchDeltaMatrix, ctx->linearSolver.uniformBatchResidualMatrix));
                 }, [&](const std::vector<char>& lane, int nLane) {
                     if (refineData == nullptr) {
                         int w = 1;
@@ -620,7 +620,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                             return false;                    // no narrower than the full width
                         }
                         ensureCompactedSolver(ctx, n, nnz, compactLimit);
-                        if (w > ctx->compactedCapacity) {
+                        if (w > ctx->linearSolver.compactedCapacity) {
                             return false;
                         }
                         for (int cs = 0; cs < nS; cs++) {
@@ -632,16 +632,16 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                         while (static_cast<int>(refineMap.size()) < w) {
                             refineMap.push_back(refineMap[0]);
                         }
-                        CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, refineMap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
-                        gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
+                        CUDA_CHECK(cudaMemcpyAsync(ctx->linearSolver.dCompactedScenarioMap.p, refineMap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+                        gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->linearSolver.dValsCompacted.as<double>());
                         refineData = compactedDataForWidth(ctx, w);
                         gRefinementFactorizations++;
-                        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
+                        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_FACTORIZATION, ctx->linearSolver.compactedSolver.config, refineData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix)); }
                     }
                     int w = static_cast<int>(refineMap.size());       // the lanes factorized first: a superset of those left
-                    gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dR.as<double>(), ctx->dRCompacted.as<double>());
-                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
-                    scatterScenarios<<<grid(n * refineReal), BLOCK, 0, ctx->stream>>>(n, refineReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDeltaCompacted.as<double>(), ctx->dDelta.as<double>());
+                    gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dR.as<double>(), ctx->linearSolver.dRCompacted.as<double>());
+                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, refineData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix)); }
+                    scatterScenarios<<<grid(n * refineReal), BLOCK, 0, ctx->stream>>>(n, refineReal, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dDeltaCompacted.as<double>(), ctx->linearSolver.dDelta.as<double>());
                     return true;
                 });
             }
@@ -667,14 +667,14 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             ensureLinearResidualBuffers();
             launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                     ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+                    ctx->dB.as<double>(), ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>());
         }
         if (guardDue) {
-            linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>(),
-                    ctx->dF.as<double>(), ctx->dLinSc.as<double>());
+            linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>(),
+                    ctx->dF.as<double>(), ctx->linearSolver.dLinSc.as<double>());
             std::vector<double> hsc((size_t) 3 * nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->linearSolver.dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
             for (int s = 0; s < nS; s++) {
                 if (!active[s] || solves[s] != 0 || it[s] != 1) continue;
                 double ratio = hsc[3 * s + 2];
@@ -721,18 +721,18 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             double* fS = ctx->dF.as<double>() + (size_t) s * n;
             negateIntoOne<<<grid(n), BLOCK, 0, ctx->stream>>>(n, fS, bS);
             repairZeroDiagonalRightHandSide(ctx, 1, bS, s);
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.systemMatrix, valsS));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.rightHandSideMatrix, bS));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.solutionMatrix, dxS));
-            if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.systemMatrix, valsS));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.rightHandSideMatrix, bS));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.solutionMatrix, dxS));
+            if (!ctx->linearSolver.analyzed) {
                 gAnalysesMain++;
-                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
-                traceLuNnz(ctx->solver.handle, ctx->solver.data, "per-scenario", ctx->nScenarios);
-                ctx->analyzed = true;
+                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
+                traceLuNnz(ctx->linearSolver.solver.handle, ctx->linearSolver.solver.data, "per-scenario", ctx->nScenarios);
+                ctx->linearSolver.analyzed = true;
             }
             gRobustFactorizations++;
-            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                    ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
+            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
             if (ctx->clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
                 // unclamped, the robust mode took full Newton steps and its base load flow on network.xiidm's
@@ -748,7 +748,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             ensureLinearResidualBuffers();
             launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                     ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+                    ctx->dB.as<double>(), ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>());
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }

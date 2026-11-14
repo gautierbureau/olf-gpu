@@ -192,19 +192,19 @@ void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx) 
     SharedStructure* st = ctx->structure.get();
     const int n = ctx->n;
     // the lanes the last factorization solved: a retired scenario's rows are not swept, its dx is its own
-    BatchedLu& lu = *ctx->batchedLu;
+    BatchedLu& lu = *ctx->linearSolver.batchedLu;
     const int width = lu.width;
     if (width == 0) {
         return;
     }
     const int* laneMap = deviceLaneMap(lu);
     const size_t cells = static_cast<size_t>(n) * width;
-    if (!ctx->dSingletonHazardSlot.p) {
+    if (!ctx->linearSolver.dSingletonHazardSlot.p) {
         std::vector<int> hazardSlot(n, -1);
         for (int i = 0; i < st->nZeroDiagonalRows; i++) {
             hazardSlot[st->hZeroDiagonalRow[i]] = i;
         }
-        ctx->dSingletonHazardSlot.upload(hazardSlot.data(), hazardSlot.size() * sizeof(int));
+        ctx->linearSolver.dSingletonHazardSlot.upload(hazardSlot.data(), hazardSlot.size() * sizeof(int));
         // the pattern by column: the rows a fixed variable touches
         std::vector<int> columnStart(n + 1, 0);
         std::vector<int> columnRow(st->colIdx.size());
@@ -220,16 +220,16 @@ void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx) 
                 columnRow[fill[st->colIdx[k]]++] = r;
             }
         }
-        ctx->dSingletonColumnStart.upload(columnStart.data(), columnStart.size() * sizeof(int));
-        ctx->dSingletonColumnRow.upload(columnRow.data(), columnRow.size() * sizeof(int));
+        ctx->linearSolver.dSingletonColumnStart.upload(columnStart.data(), columnStart.size() * sizeof(int));
+        ctx->linearSolver.dSingletonColumnRow.upload(columnRow.data(), columnRow.size() * sizeof(int));
     }
-    ctx->dSingletonList.ensure(cells * sizeof(int));
-    ctx->dSingletonFixed.ensure(cells);
-    ctx->dSingletonTouched.ensure(cells);
-    ctx->dSingletonOwner.ensure(cells * sizeof(int));
-    ctx->dSingletonProposal.ensure(cells * sizeof(int));
-    ctx->dSingletonProposalValue.ensure(cells * sizeof(double));
-    ctx->dSingletonCounters.ensure(3 * sizeof(int));        // listed, listed for the next sweep, a variable fixed
+    ctx->linearSolver.dSingletonList.ensure(cells * sizeof(int));
+    ctx->linearSolver.dSingletonFixed.ensure(cells);
+    ctx->linearSolver.dSingletonTouched.ensure(cells);
+    ctx->linearSolver.dSingletonOwner.ensure(cells * sizeof(int));
+    ctx->linearSolver.dSingletonProposal.ensure(cells * sizeof(int));
+    ctx->linearSolver.dSingletonProposalValue.ensure(cells * sizeof(double));
+    ctx->linearSolver.dSingletonCounters.ensure(3 * sizeof(int));        // listed, listed for the next sweep, a variable fixed
     OriginalSystem o;
     o.n = n;
     o.nnz = ctx->nnz;
@@ -237,40 +237,40 @@ void substituteSingletons(BatchSolverContext* ctx, const double* b, double* dx) 
     o.colIdx = st->dColIdx.as<int>();
     o.vals = ctx->dVals.as<double>();
     o.b = b;
-    o.hazardSlot = ctx->dSingletonHazardSlot.as<int>();
+    o.hazardSlot = ctx->linearSolver.dSingletonHazardSlot.as<int>();
     o.layout = ctx->layout;
-    if (st->nZeroDiagonalRows > 0 && repairsZeroDiagonals(ctx) && ctx->zeroDiagonalRepairCapacity >= ctx->nScenarios) {
+    if (st->nZeroDiagonalRows > 0 && repairsZeroDiagonals(ctx) && ctx->linearSolver.zeroDiagonalRepairCapacity >= ctx->nScenarios) {
         o.nZeroDiagonalRows = st->nZeroDiagonalRows;
         o.nZeroDiagonalRowValues = st->nZeroDiagonalRowValues;
         o.valueStart = st->dZeroDiagonalRowValueStart.as<int>();
-        o.valueSnapshot = ctx->dZeroDiagonalRowSnapshot.as<double>();
-        o.rightHandSideSnapshot = ctx->dZeroDiagonalRightHandSideSnapshot.as<double>();
+        o.valueSnapshot = ctx->linearSolver.dZeroDiagonalRowSnapshot.as<double>();
+        o.rightHandSideSnapshot = ctx->linearSolver.dZeroDiagonalRightHandSideSnapshot.as<double>();
     }
-    int* counters = ctx->dSingletonCounters.as<int>();
+    int* counters = ctx->linearSolver.dSingletonCounters.as<int>();
     CUDA_CHECK(cudaMemsetAsync(counters, 0, sizeof(int), ctx->stream));
     listShortRows<<<grid(static_cast<int>(cells)), BLOCK, 0, ctx->stream>>>(o, width, laneMap,
-            ctx->dSingletonList.as<int>(), counters);
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSingletonFixed.p, 0, cells, ctx->stream));
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSingletonTouched.p, 0, cells, ctx->stream));
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSingletonOwner.p, 0x7f, cells * sizeof(int), ctx->stream));
+            ctx->linearSolver.dSingletonList.as<int>(), counters);
+    CUDA_CHECK(cudaMemsetAsync(ctx->linearSolver.dSingletonFixed.p, 0, cells, ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->linearSolver.dSingletonTouched.p, 0, cells, ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->linearSolver.dSingletonOwner.p, 0x7f, cells * sizeof(int), ctx->stream));
     int listed = 0;
     CUDA_CHECK(cudaMemcpyAsync(&listed, counters, sizeof(int), cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     // the pending cells of a sweep are some of its listed ones: the second list never holds more than the first
-    ctx->dSingletonPendingList.ensure(static_cast<size_t>(std::max(listed, 1)) * sizeof(int));
-    int* list = ctx->dSingletonList.as<int>();
-    int* next = ctx->dSingletonPendingList.as<int>();
+    ctx->linearSolver.dSingletonPendingList.ensure(static_cast<size_t>(std::max(listed, 1)) * sizeof(int));
+    int* list = ctx->linearSolver.dSingletonList.as<int>();
+    int* next = ctx->linearSolver.dSingletonPendingList.as<int>();
     for (int sweep = 0; sweep < MAX_SWEEPS && listed > 0; sweep++) {
         CUDA_CHECK(cudaMemsetAsync(counters + 1, 0, 2 * sizeof(int), ctx->stream));
-        proposeSingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(o, width, listed, list, laneMap, ctx->dSingletonFixed.as<char>(),
-                dx, sweep == 0 ? nullptr : ctx->dSingletonTouched.as<char>(), ctx->dSingletonOwner.as<int>(),
-                ctx->dSingletonProposal.as<int>(), ctx->dSingletonProposalValue.as<double>());
-        applySingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(n, width, listed, list, laneMap, ctx->dSingletonOwner.as<int>(),
-                ctx->dSingletonProposal.as<int>(), ctx->dSingletonProposalValue.as<double>(), ctx->dSingletonColumnStart.as<int>(),
-                ctx->dSingletonColumnRow.as<int>(), ctx->dSingletonFixed.as<char>(), dx, ctx->dSingletonTouched.as<char>(),
+        proposeSingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(o, width, listed, list, laneMap, ctx->linearSolver.dSingletonFixed.as<char>(),
+                dx, sweep == 0 ? nullptr : ctx->linearSolver.dSingletonTouched.as<char>(), ctx->linearSolver.dSingletonOwner.as<int>(),
+                ctx->linearSolver.dSingletonProposal.as<int>(), ctx->linearSolver.dSingletonProposalValue.as<double>());
+        applySingletons<<<grid(listed), BLOCK, 0, ctx->stream>>>(n, width, listed, list, laneMap, ctx->linearSolver.dSingletonOwner.as<int>(),
+                ctx->linearSolver.dSingletonProposal.as<int>(), ctx->linearSolver.dSingletonProposalValue.as<double>(), ctx->linearSolver.dSingletonColumnStart.as<int>(),
+                ctx->linearSolver.dSingletonColumnRow.as<int>(), ctx->linearSolver.dSingletonFixed.as<char>(), dx, ctx->linearSolver.dSingletonTouched.as<char>(),
                 counters + 2);
-        listPendingRows<<<grid(listed), BLOCK, 0, ctx->stream>>>(width, listed, list, ctx->dSingletonProposal.as<int>(),
-                ctx->dSingletonOwner.as<int>(), next, counters + 1);
+        listPendingRows<<<grid(listed), BLOCK, 0, ctx->stream>>>(width, listed, list, ctx->linearSolver.dSingletonProposal.as<int>(),
+                ctx->linearSolver.dSingletonOwner.as<int>(), next, counters + 1);
         int pendingAndFixed[2] = {0, 0};
         CUDA_CHECK(cudaMemcpyAsync(pendingAndFixed, counters + 1, 2 * sizeof(int), cudaMemcpyDeviceToHost, ctx->stream));
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

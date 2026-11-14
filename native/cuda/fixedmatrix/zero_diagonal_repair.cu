@@ -35,7 +35,7 @@ namespace olfgpu {
 
 
 bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
-    return ctx->mode != GpuLinearSolveMode::ROBUST;
+    return ctx->linearSolver.mode != GpuLinearSolveMode::ROBUST;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -135,38 +135,38 @@ __global__ void repairZeroDiagonalRightHandSideBatch(int nZeroDiagonalRows, int 
 void repairZeroDiagonalRows(BatchSolverContext* ctx, int nS, double* vals) {
     auto* structure = ctx->structure.get();
     if (structure->nZeroDiagonalRows == 0 || !repairsZeroDiagonals(ctx)) return;
-    if (ctx->zeroDiagonalRepairCapacity < nS) {
+    if (ctx->linearSolver.zeroDiagonalRepairCapacity < nS) {
         const size_t slots = ctx->layout.interleaved ? ctx->layout.stride : nS;   // the copy is laid out as the values
-        ctx->dZeroDiagonalRowSnapshot.alloc(slots * structure->nZeroDiagonalRowValues * sizeof(double));
-        ctx->dZeroDiagonalRightHandSideSnapshot.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(double));
-        ctx->dZeroDiagonalDonorChoice.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(int));
-        ctx->zeroDiagonalRepairCapacity = nS;
+        ctx->linearSolver.dZeroDiagonalRowSnapshot.alloc(slots * structure->nZeroDiagonalRowValues * sizeof(double));
+        ctx->linearSolver.dZeroDiagonalRightHandSideSnapshot.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(double));
+        ctx->linearSolver.dZeroDiagonalDonorChoice.alloc((size_t) nS * structure->nZeroDiagonalRows * sizeof(int));
+        ctx->linearSolver.zeroDiagonalRepairCapacity = nS;
     }
     int nnz = structure->nnz;
     snapshotZeroDiagonalRowsBatch<<<grid(structure->nZeroDiagonalRowValues * nS), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRowValues, nS, nnz,
             structure->dZeroDiagonalRowValuePosition.template as<int>(), ctx->dActive.template as<char>(), vals,
-            ctx->dZeroDiagonalRowSnapshot.template as<double>(), ctx->layout);
+            ctx->linearSolver.dZeroDiagonalRowSnapshot.template as<double>(), ctx->layout);
     repairZeroDiagonalRowsBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, nnz, structure->nZeroDiagonalRowValues,
             structure->dZeroDiagonalRow.template as<int>(), structure->dZeroDiagonalRowValueStart.template as<int>(), structure->dZeroDiagonalDonorStart.template as<int>(),
                     structure->dZeroDiagonalDonor.template as<int>(),
             structure->dZeroDiagonalDonorOwnIndex.template as<int>(), structure->dZeroDiagonalRepairSign.template as<char>(), structure->dRowPtr.template as<int>(),
                     structure->dColIdx.template as<int>(),
-            structure->dDiagPos.template as<int>(), ctx->dActive.template as<char>(), ctx->dZeroDiagonalRowSnapshot.template as<double>(), vals,
-            ctx->dZeroDiagonalDonorChoice.template as<int>(), ctx->layout);
+            structure->dDiagPos.template as<int>(), ctx->dActive.template as<char>(), ctx->linearSolver.dZeroDiagonalRowSnapshot.template as<double>(), vals,
+            ctx->linearSolver.dZeroDiagonalDonorChoice.template as<int>(), ctx->layout);
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
  *  repairZeroDiagonalRows on this context; {@code sOff} selects the scenario block for a per-scenario call). */
 void repairZeroDiagonalRightHandSide(BatchSolverContext* ctx, int nS, double* B, int sOff) {
     auto* structure = ctx->structure.get();
-    if (structure->nZeroDiagonalRows == 0 || ctx->zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
+    if (structure->nZeroDiagonalRows == 0 || ctx->linearSolver.zeroDiagonalRepairCapacity < sOff + nS || !repairsZeroDiagonals(ctx)) return;
     int n = structure->n;
-    double* bsnap = ctx->dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * structure->nZeroDiagonalRows;
+    double* bsnap = ctx->linearSolver.dZeroDiagonalRightHandSideSnapshot.template as<double>() + (size_t) sOff * structure->nZeroDiagonalRows;
     snapshotZeroDiagonalRightHandSideBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, n, structure->dZeroDiagonalRow.template as<int>(), B, bsnap);
     repairZeroDiagonalRightHandSideBatch<<<((structure->nZeroDiagonalRows * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(structure->nZeroDiagonalRows, nS, n,
             structure->dZeroDiagonalRow.template as<int>(),
             structure->dZeroDiagonalDonor.template as<int>(), structure->dZeroDiagonalDonorOwnIndex.template as<int>(), structure->dZeroDiagonalRepairSign.template as<char>(),
-            ctx->dZeroDiagonalDonorChoice.template as<int>() + (size_t) sOff * structure->nZeroDiagonalRows, bsnap, B);
+            ctx->linearSolver.dZeroDiagonalDonorChoice.template as<int>() + (size_t) sOff * structure->nZeroDiagonalRows, bsnap, B);
 }
 
 }  // namespace olfgpu

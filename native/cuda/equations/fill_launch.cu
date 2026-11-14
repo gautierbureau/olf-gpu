@@ -311,7 +311,7 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
             const size_t threads = static_cast<size_t>(nnz) * (ctx->layout.stride / SECTOR_SCENARIOS);
             zeroActiveInterleavedValues<<<static_cast<unsigned>((threads + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(
                     nnz, ctx->layout, ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dIdentityLane.as<char>());
-        } else if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        } else if (ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH || ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
             // the uniform batches: a retired scenario gets its identity system before every solve (newton_iteration)
             const dim3 zeroGrid(std::min((nnz + BLOCK - 1) / BLOCK, ZERO_BLOCKS_PER_SCENARIO), nS);
             zeroActiveValues<<<zeroGrid, BLOCK, 0, ctx->stream>>>(nnz, ctx->dActive.as<char>(), ctx->dVals.as<double>(),

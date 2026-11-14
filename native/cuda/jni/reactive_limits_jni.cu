@@ -87,10 +87,10 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQ)(
     if (ctx == nullptr) {
         return;
     }
-    ctx->forcedTargetQPreDistribution.clear();
+    ctx->forcedTargetQ.forcedTargetQPreDistribution.clear();
     if (jIdx == nullptr || jIn == nullptr || jPts == nullptr || env->GetArrayLength(jIdx) == 0) {
-        ctx->nForcedTargetQ = 0;
-        ctx->nForcedTargetQLimitEntries = 0;
+        ctx->forcedTargetQ.nForcedTargetQ = 0;
+        ctx->forcedTargetQ.nForcedTargetQLimitEntries = 0;
         return;
     }
     int nForcedTargetQ = env->GetArrayLength(jIdx) / 7;
@@ -101,16 +101,16 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQ)(
     }
     jdouble* in = env->GetDoubleArrayElements(jIn, nullptr);
     jdouble* pts = env->GetDoubleArrayElements(jPts, nullptr);
-    ctx->dForcedTargetQIndices.upload(idx, static_cast<size_t>(nForcedTargetQ) * 7 * sizeof(int));
-    ctx->dForcedTargetQParameters.upload(in, static_cast<size_t>(nForcedTargetQ) * 5 * sizeof(double));
-    ctx->dForcedTargetQPoints.upload(pts, static_cast<size_t>(env->GetArrayLength(jPts)) * sizeof(double));
-    ctx->dForcedTargetQApplied.alloc(static_cast<size_t>(ctx->nScenarios) * nForcedTargetQ * sizeof(double));
+    ctx->forcedTargetQ.dForcedTargetQIndices.upload(idx, static_cast<size_t>(nForcedTargetQ) * 7 * sizeof(int));
+    ctx->forcedTargetQ.dForcedTargetQParameters.upload(in, static_cast<size_t>(nForcedTargetQ) * 5 * sizeof(double));
+    ctx->forcedTargetQ.dForcedTargetQPoints.upload(pts, static_cast<size_t>(env->GetArrayLength(jPts)) * sizeof(double));
+    ctx->forcedTargetQ.dForcedTargetQApplied.alloc(static_cast<size_t>(ctx->nScenarios) * nForcedTargetQ * sizeof(double));
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jIn, in, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jPts, pts, JNI_ABORT);
-    ctx->nForcedTargetQ = nForcedTargetQ;
-    ctx->nForcedTargetQLimitEntries = nForcedTargetQLimitEntries;
-    ctx->forcedTargetQExtrapolate = extrapolate;
+    ctx->forcedTargetQ.nForcedTargetQ = nForcedTargetQ;
+    ctx->forcedTargetQ.nForcedTargetQLimitEntries = nForcedTargetQLimitEntries;
+    ctx->forcedTargetQ.forcedTargetQExtrapolate = extrapolate;
 }
 
 // The installed scenarios' loss pre-distribution moves of the forced generators ([nInstalled * nForcedTargetQ], pu), or null
@@ -120,7 +120,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchForcedTargetQPre)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jPre) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotRows(env, ctx, ctx->forcedTargetQPreDistribution, ctx->nForcedTargetQ, ctx->nForcedTargetQ > 0 ? jPre : nullptr,
+        installSlotRows(env, ctx, ctx->forcedTargetQ.forcedTargetQPreDistribution, ctx->forcedTargetQ.nForcedTargetQ, ctx->forcedTargetQ.nForcedTargetQ > 0 ? jPre : nullptr,
                         "setBatchForcedTargetQPre");
     }
 }

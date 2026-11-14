@@ -677,16 +677,16 @@ void distributedSlackCheck(BatchSolverContext* ctx, DriverPass& drv) {
                 ctx->dTarget.as<double>(), ctx->dOuterLoopUnstable.as<char>(), ctx->distributedSlack.dSlackDistributionFailure.as<char>(),
                 ctx->distributedSlack.dSlackRetainedShareApplied.as<double>(),
                 ctx->distributedSlack.dDistributedSlackLastPassAccounting.p ? ctx->distributedSlack.dDistributedSlackLastPassAccounting.as<double>() : nullptr);
-        if (ctx->nForcedTargetQ > 0) {                              // forced target Q follows the generators' new P
-            forcedTargetQBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators,
-                    ctx->forcedTargetQExtrapolate, ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
-                    ctx->forcedTargetQPreDistribution.deviceOrNull(),
+        if (ctx->forcedTargetQ.nForcedTargetQ > 0) {                              // forced target Q follows the generators' new P
+            forcedTargetQBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->forcedTargetQ.nForcedTargetQ, nS, n, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators,
+                    ctx->forcedTargetQ.forcedTargetQExtrapolate, ctx->forcedTargetQ.dForcedTargetQIndices.as<int>(), ctx->forcedTargetQ.dForcedTargetQParameters.as<double>(), ctx->forcedTargetQ.dForcedTargetQPoints.as<double>(),
+                    ctx->forcedTargetQ.forcedTargetQPreDistribution.deviceOrNull(),
                     ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
                     ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(),
                     ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>(), ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(),
                     ctx->distributedSlack.distributedSlackLostGenerators.view(),
                     ctx->distributedSlack.distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
-                    ctx->dOuterLoopCheckActive.as<char>(), ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>());
+                    ctx->dOuterLoopCheckActive.as<char>(), ctx->dTarget.as<double>(), ctx->forcedTargetQ.dForcedTargetQApplied.as<double>());
         }
     }
 }
@@ -698,13 +698,13 @@ void distributedSlackResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     resetInstalledRows(ctx, ctx->distributedSlack.dSlackRetainedShare.as<double>(), 1, nullptr, 0.0);
     resetInstalledRows(ctx, ctx->distributedSlack.dSlackRetainedShareApplied.as<double>(), 1, nullptr, std::numeric_limits<double>::quiet_NaN());
-    if (ctx->nForcedTargetQ > 0) {                              // forced target Q: the clamp at each scenario's start P
-        forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->distributedSlack.nDistributedSlackBuses, ctx->forcedTargetQExtrapolate,
-                ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
-                ctx->forcedTargetQPreDistribution.deviceOrNull(),
+    if (ctx->forcedTargetQ.nForcedTargetQ > 0) {                              // forced target Q: the clamp at each scenario's start P
+        forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->forcedTargetQ.nForcedTargetQ, nS, n, ctx->distributedSlack.nDistributedSlackBuses, ctx->forcedTargetQ.forcedTargetQExtrapolate,
+                ctx->forcedTargetQ.dForcedTargetQIndices.as<int>(), ctx->forcedTargetQ.dForcedTargetQParameters.as<double>(), ctx->forcedTargetQ.dForcedTargetQPoints.as<double>(),
+                ctx->forcedTargetQ.forcedTargetQPreDistribution.deviceOrNull(),
                 ctx->distributedSlack.distributedSlackLostGenerators.view(),
                 ctx->distributedSlack.distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
-                ctx->dTarget.as<double>(), ctx->dForcedTargetQApplied.as<double>(), installMaskOrNull(ctx));
+                ctx->dTarget.as<double>(), ctx->forcedTargetQ.dForcedTargetQApplied.as<double>(), installMaskOrNull(ctx));
     }
 }
 

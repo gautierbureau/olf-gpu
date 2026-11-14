@@ -243,7 +243,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSvcMinBPerScenario.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    drv.usePerScenarioReactiveLimits = ctx->reactiveLimits.nReactiveLimitEntries > 0 && (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->nForcedTargetQLimitEntries > 0);
+    drv.usePerScenarioReactiveLimits = ctx->reactiveLimits.nReactiveLimitEntries > 0 && (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->forcedTargetQ.nForcedTargetQLimitEntries > 0);
     // The per-scenario limits exist, and the seed computes each installed scenario's (solve_seed.cu), whether or not this
     // call's scenarios read them: an install whose overrides turn usePerScenarioReactiveLimits on, while scenarios of
     // earlier calls still solve, has them read theirs. Curves allocate these on their own table upload; a Q override

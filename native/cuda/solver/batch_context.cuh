@@ -38,6 +38,7 @@
 #include "context/automation_system_context.cuh"
 #include "context/monitoring_voltage_context.cuh"
 #include "context/generator_voltage_control_freeze_context.cuh"
+#include "context/forced_target_q_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -156,16 +157,7 @@ struct BatchSolverContext {
     SlotRows<char> distrQSubgroup{0};                                     // tasks #71: per (slot, dq member) subgroup
                                                                           // labels (0: none) and the
     DeviceBuf dReactiveRelocationDistrQMemberStart;                                    // qr group -> first dq member map
-    // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
-    // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
-    // bus's reactive limits (reactiveLimitEntry). forcedTargetQIndices stride 7 {qRow, distributedSlackGeneratorIndex, ptsOff, npts, distributedSlackBusIndex, baseQRowMode, reactiveLimitEntry}; forcedTargetQParameters stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
-    // baseRowTargetP}; dForcedTargetQApplied [nS * nForcedTargetQ] = the clamped value the scenario's Q target carries now; dForcedTargetQPreDistribution
-    // [nS * nForcedTargetQ] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
-    int nForcedTargetQ = 0;
-    int nForcedTargetQLimitEntries = 0;                                        // of which limit entries (voltage-controlled bus)
-    int forcedTargetQExtrapolate = 0;
-    SlotRows<double> forcedTargetQPreDistribution{0.0};
-    DeviceBuf dForcedTargetQIndices, dForcedTargetQParameters, dForcedTargetQPoints, dForcedTargetQApplied;
+    ForcedTargetQContext forcedTargetQ;
     // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — per slot, (contribution; new weight), the last one wins.
     SlotTable distrQWeightOverrides{1, 1};

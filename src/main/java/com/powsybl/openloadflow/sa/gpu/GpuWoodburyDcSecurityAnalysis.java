@@ -54,9 +54,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 
 import static com.powsybl.openloadflow.dc.DcLoadFlowEngine.updateNetwork;
@@ -427,7 +432,6 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             boolean createResultExtension, SecurityAnalysisParameters securityAnalysisParameters,
                             List<LimitReduction> limitReductions, double dcPowerFactor, Map<String, PostContingencyResult> resultById,
                             Map<String, List<OperatorStrategyResult>> strategyResultsByContingency) {
-        List<StrategyScenario> strategyScenarios = new ArrayList<>();
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         int n = equationSystem.getIndex().getColumnCount();
         long t0 = System.nanoTime();
@@ -447,7 +451,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         // The stock path snapshots the network here (NetworkState.save), and that snapshot re-anchors every
         // generator's INITIAL target P to its base value: the per-contingency redistribution then starts from
         // the base dispatch, not from the original network's. Do the same before modelling it.
-        NetworkState.save(lfNetwork);
+        NetworkState networkState = NetworkState.save(lfNetwork);
         double[] baseTargets = context.getTargetVector().getArray().clone();
         boolean multiSlack = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().size() > 1;
         boolean arrayModelApplies = !multiSlack && (!context.getParameters().isDistributedSlack()
@@ -470,8 +474,6 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         boolean deviceTargets = participationType >= 0;
         boolean checkTargets = deviceTargets && CHECK_DEVICE_TARGETS.get();
         Map<LfGenerator, Integer> generatorIndex = deviceTargets ? syncInjectionTables(solver, assembly, lfNetwork) : Map.of();
-        int deviceTargetCount = 0;
-        int targetMismatches = 0;
         GpuMonitoredBranchResults monitoredBranchResults = GpuMonitoredBranchResults.build(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
         boolean needBusResults = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                 || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty());
@@ -484,190 +486,33 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         ChunkReads reads = chunkReads(lfNetwork, n, monitoredBranchResults);
         long tSetup = System.nanoTime();
 
-        // --- chunks
-        SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters = securityAnalysisParameters.getIncreasedViolationsParameters();
-        double[] states = new double[n * DEVICE_CHUNK];
-        double[] targets = new double[n * DEVICE_CHUNK];
-        long tDevice = 0;
-        long tHost = 0;
-        long tColumns = 0;
-        int hostScreened = 0;
-        int modifiedTargets = 0;
-        int replayedTargets = 0;
-        for (int from = 0; from < device.size(); from += DEVICE_CHUNK) {
-            int to = Math.min(from + DEVICE_CHUNK, device.size());
-            int count = to - from;
-            int[] ctgPtr = new int[count + 1];
-            int[] ctgBase = new int[count];
-            List<Integer> elemList = new ArrayList<>();
-            int nBases = 0;
-            long tb0 = System.nanoTime();
-            ChunkChanges changes = deviceTargets ? new ChunkChanges() : null;
-            for (int i = 0; i < count; i++) {
-                DeviceCandidate candidate = device.get(from + i);
-                for (ComputedContingencyElement element : candidate.elements()) {
-                    elemList.add(deviceColumn(element));
-                }
-                ctgPtr[i + 1] = elemList.size();
-                ctgBase[i] = -1;
-                // the stock adds the stations of an HVDC left without power to the lost generators FIRST,
-                // then decides on lost power
-                PropagatedContingency propagated = candidate.connectivity().getPropagatedContingency();
-                candidate.connectivity().getHvdcsWithoutPower().forEach(hvdc -> {
-                    propagated.getGeneratorIdsToLose().add(hvdc.getConverterStation1().getId());
-                    propagated.getGeneratorIdsToLose().add(hvdc.getConverterStation2().getId());
-                });
-                boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
-                if (lostPower || needsModifiedTarget(candidate)) {
-                    if (changes != null && !changes.add(candidate, lostPower, lfNetwork, equationSystem, generatorIndex)) {
-                        changes = null;                      // something the device cannot place: this chunk on the host
-                        modifiedTargets -= nBases;
-                        nBases = 0;
-                        for (int k = 0; k < i; k++) {
-                            ctgBase[k] = -1;
-                        }
-                        i = -1;                              // rebuild the chunk's columns on the host from the start
-                        elemList.clear();
-                        continue;
-                    }
-                    if (changes != null && !checkTargets) {
-                        ctgBase[i] = nBases++;
-                        modifiedTargets++;
-                        continue;
-                    }
-                    if (!lostPower && arrayModelApplies && !checkTargets) {   // the check compares with the exact replay
-                        buildModifiedTarget(candidate, lfNetwork, equationSystem, baseTargets, busNetInjection, distribution, targets, nBases * n);
-                    } else {
-                        buildModifiedTargetByReplay(candidate, lostPower, lfNetwork, context, targets, nBases * n);
-                        replayedTargets++;
-                    }
-                    ctgBase[i] = nBases++;
-                    modifiedTargets++;
-                }
-            }
-            int[] ctgElem = elemList.stream().mapToInt(Integer::intValue).toArray();
-            if (changes != null && nBases > 0) {
-                double[] built = checkTargets ? new double[n * nBases] : null;
-                buildOnDevice(solver, changes, context.getParameters().isDistributedSlack(), participationType,
-                        context.getParameters().getNetworkParameters().isUseActiveLimits(), assembly.referenceGeneratorIndex(), built, ctgBase);
-                deviceTargetCount += nBases;
-                if (built != null) {
-                    targetMismatches += compareTargets(built, targets, n * nBases, n, targetMismatches);
-                }
-            } else {
-                solver.setChunkTargets(targets, nBases);
-            }
-            tColumns += System.nanoTime() - tb0;
-            long tc0 = System.nanoTime();
-            // states answered from stay on the device: only the values read come back (check hook: every state)
-            int[] records = solver.woodburyChunk(ctgPtr, ctgElem, ctgBase, GpuViolationScreen.BAND, CAPACITY,
-                    stateFree && !checkStateReader ? null : states);
-            boolean[] fromStateOf = stateFree
-                    ? readChunk(solver, reads, device.subList(from, to), records, states, checkStateReader, monitoredBranchResults, strategySetup, table)
-                    : new boolean[count];
-            tDevice += System.nanoTime() - tc0;
-
-            long th0 = System.nanoTime();
-            for (int i = 0; i < count; i++) {
-                DeviceCandidate candidate = device.get(from + i);
-                PropagatedContingency propagated = candidate.connectivity().getPropagatedContingency();
-                LfContingency lfContingency = candidate.lfContingency();
-                Contingency contingency = propagated.getContingency();
-                // a child of the network's report node, as the AC security analysis does: not of the previous
-                // contingency's, which nested every contingency in the one before (and re-checked every ancestor's values)
-                ReportNode postContSimReportNode = Reports.createPostContingencySimulation(networkReportNode, contingency.getId());
-                lfNetwork.setReportNode(postContSimReportNode);
-                logPostContingencyStart(lfNetwork, lfContingency);
-
-                // the post-contingency state: answered from the array where the run allows it (stateFree), else
-                // loaded into the equation system, where the vectorized DC network recomputes every branch flow
-                int emitted = records[i];
-                boolean fromState = fromStateOf[i];
-                double[] state = !fromState || checkStateReader ? Arrays.copyOfRange(states, i * n, (i + 1) * n) : null;
-                GpuDcStateValues values = fromState ? reads.gathered().select(i) : null;
-                if (!fromState || checkStateReader) {
-                    equationSystem.getStateVector().set(state);
-                    if (needAngles) {
-                        updateNetwork(lfNetwork, equationSystem, state);
-                    }
-                }
-                Map<LfBranch, DisabledBranchStatus> disabledBranches = lfContingency.getDisabledNetwork().getBranchesStatus();
-                Predicate<LfBranch> isBranchDisabled = disabledBranches::containsKey;
-
-                // violations: the screen's candidates confirmed on OLF's own values (read from the state, or from the model)
-                var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
-                if (emitted > CAPACITY) {
-                    hostScreened++;
-                    postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabled);
-                } else {
-                    int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
-                    Arrays.sort(candidates);             // table order: a group's limits contiguous, most severe first
-                    scanner.detectFromCandidates(lfNetwork, postContingencyLimitViolationManager, candidates, isBranchDisabled, new int[0],
-                            fromState ? stateReader : null, values, dcPowerFactor);
-                }
-
-                NetworkResult networkResult = fromState
-                        ? networkResultFromState(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled, values, checkStateReader,
-                                monitorIndexes, preContingencyNetworkResult, dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters())
-                        : networkResult(monitoredBranchResults, lfNetwork, candidate, contingency, isBranchDisabled,
-                                needBusResults, monitorIndexes, createResultExtension, preContingencyNetworkResult, dcPowerFactor,
-                                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
-
-                var connectivityResult = new ConnectivityResult(
-                        lfContingency.getCreatedSynchronousComponentsCount(), 0,
-                        lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
-                        lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
-                        lfContingency.getDisconnectedElementIds());
-                LimitViolationsResult postContingencyViolations = new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations());
-                resultById.put(contingency.getId(), new PostContingencyResult(contingency, PostContingencyComputationStatus.CONVERGED,
-                        postContingencyViolations, networkResult, connectivityResult, Double.NaN));
-
-                // the operator strategies of this contingency: the condition is read on the post-contingency
-                // violations (and state), exactly where the stock reads it
-                List<Indexed<OperatorStrategy>> strategies = strategySetup.operatorStrategiesByContingencyId().get(contingency.getId());
-                if (strategies != null) {
-                    for (Indexed<OperatorStrategy> operatorStrategy : strategies) {
-                        List<String> actionIds = checkCondition(operatorStrategy.value(), postContingencyViolations, lfNetwork);
-                        List<LfAction> lfActions = actionIds.stream().map(strategySetup.lfActionById()::get).filter(Objects::nonNull).toList();
-                        LfOperatorStrategy lfOperatorStrategy = new LfOperatorStrategy(operatorStrategy, lfActions);
-                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null, postContSimReportNode, null));
-                    }
-                }
-            }
-            tHost += System.nanoTime() - th0;
-        }
-        if (!strategyScenarios.isEmpty()) {
-            runStrategies(solver, lfNetwork, context, strategyScenarios, strategySetup, elementByBranch, baseTargets, busNetInjection, distribution,
-                    arrayModelApplies, scanner, table, needAngles, preContingencyNetworkResult, preContingencyLimitViolationManager,
-                    monitorIndexes, createResultExtension, securityAnalysisParameters, limitReductions, dcPowerFactor, violationsParameters,
-                    strategyResultsByContingency,
-                    monitoredBranchResults, stateFree, checkStateReader,
-                    new DeviceTargets(deviceTargets, checkTargets, participationType, generatorIndex, assembly.referenceGeneratorIndex(),
-                            context.getParameters().isDistributedSlack(), context.getParameters().getNetworkParameters().isUseActiveLimits(),
-                            assembly.busesWithZeroPTarget()));
-        }
+        // --- one pipeline for the contingencies and their operator strategies (continuous batching)
+        PipelineStats stats = new PipelineStats();
+        Run run = new Run(solver, lfNetwork, context, networkReportNode, n, strategySetup, elementByBranch, baseTargets, busNetInjection,
+                distribution, arrayModelApplies,
+                new DeviceTargets(deviceTargets, checkTargets, participationType, generatorIndex, assembly.referenceGeneratorIndex(),
+                        context.getParameters().isDistributedSlack(), context.getParameters().getNetworkParameters().isUseActiveLimits(),
+                        assembly.busesWithZeroPTarget()),
+                scanner, table, needAngles, needBusResults, monitoredBranchResults, stateFree, checkStateReader, reads,
+                preContingencyNetworkResult, preContingencyLimitViolationManager, monitorIndexes, createResultExtension,
+                securityAnalysisParameters, limitReductions, dcPowerFactor, resultById, strategyResultsByContingency,
+                networkState, new ReentrantLock(), stats);
+        runPipeline(run, device);
         // leave the base state loaded, as the stock path's restore would
         equationSystem.getStateVector().set(preContingencyStates);
         updateNetwork(lfNetwork, equationSystem, preContingencyStates);
         if (GpuTrace.PHASE_TIME.isOn()) {
             System.err.printf("DC_WOODBURY_PHASE n=%d elements=%d device=%d modifiedTargets=%d (replayed %d, device-built %d) setup=%.0f ms [factor=%.0f branches=%.0f S=%.0f table=%.0f model=%.0f]"
                         + " columns=%.0f ms device=%.0f ms host=%.0f ms hostScreened=%d%n",
-                    n, elementCount, device.size(), modifiedTargets, replayedTargets, deviceTargetCount, (tSetup - t0) / 1e6, (tFactor - t0) / 1e6, (tBranches - tFactor) / 1e6,
-                    (tS - tBranches) / 1e6, (tTable - tS) / 1e6, (tSetup - tTable) / 1e6, tColumns / 1e6, tDevice / 1e6, tHost / 1e6, hostScreened);
+                    n, elementCount, device.size(), stats.modifiedTargets, stats.replayedTargets, stats.deviceTargetCount, (tSetup - t0) / 1e6,
+                    (tFactor - t0) / 1e6, (tBranches - tFactor) / 1e6, (tS - tBranches) / 1e6, (tTable - tS) / 1e6, (tSetup - tTable) / 1e6,
+                    stats.ctgPrepareNanos / 1e6, stats.ctgDeviceNanos / 1e6, stats.ctgAnswerNanos / 1e6, stats.hostScreened);
         }
-        DEVICE_TARGET_COUNT.addAndGet(deviceTargetCount);
-        TARGET_MISMATCH_COUNT.addAndGet(targetMismatches);
+        DEVICE_TARGET_COUNT.addAndGet(stats.deviceTargetCount);
+        TARGET_MISMATCH_COUNT.addAndGet(stats.targetMismatches);
         return device.size();
     }
 
-    /**
-     * The operator strategies of the device contingencies: per (contingency, strategy) scenario the
-     * stock's connectivity re-check (criterion on the device S over the contingency elements and the
-     * disabling switch actions, OLF's graph confirmation when it fires), the modified target with the
-     * actions (the exact replay), Woodbury over contingency AND action elements, then the stock result
-     * built with the contingency and the actions APPLIED on the network (the vectorized flows of a
-     * re-tapped transformer need its new model), and restored.
-     */
     /**
      * The branches the network may have been loaded with closed so that an action can close them, then removed from the
      * connectivity graph (Actions.addAllSwitchesToOperate / addAllBranchesToClose, Networks.restoreInitialTopology): every
@@ -878,187 +723,504 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         return resolved;
     }
 
-    private void runStrategies(GpuDcSolver solver, LfNetwork lfNetwork, DcLoadFlowContext context, List<StrategyScenario> scenarios,
-                               StrategySetup strategySetup, Map<String, ComputedContingencyElement> elementByBranch,
-                               double[] baseTargets, double[] busNetInjection, DcSlackDistributionModel distribution, boolean arrayModelApplies,
-                               GpuLimitScanner scanner, GpuLimitTable table, boolean needAngles,
-                               PreContingencyNetworkResult preContingencyNetworkResult, LimitViolationManager preContingencyLimitViolationManager,
-                               AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
-                               SecurityAnalysisParameters securityAnalysisParameters, List<LimitReduction> limitReductions, double dcPowerFactor,
-                               SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                               Map<String, List<OperatorStrategyResult>> strategyResultsByContingency,
-                               GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader,
-                               DeviceTargets deviceTargets) {
-        EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
-        int n = equationSystem.getIndex().getColumnCount();
-        DcLoadFlowParameters parameters = context.getParameters();
-        long t0 = System.nanoTime();
-        double[] maxSum = connectivityCriterion(solver, scenarios, strategySetup, elementByBranch);
-        int[] graphCheckCount = new int[4];
-        long[] stageNanos = new long[6];                     // prepare, device, answer, setup, answer waiting
-        ChunkReads runReads = chunkReads(lfNetwork, n, monitoredBranchResults);
-        NetworkState networkState = NetworkState.save(lfNetwork);
-        // the states stay on the device where every strategy reads from them (the check hook copies them all)
-        boolean gather = stateFree && !checkStateReader;
-        stageNanos[3] = System.nanoTime() - t0;
+    /** What every stage of a run reads: the solver, OLF's network and model, the screen, how results are built, where they go. */
+    private record Run(GpuDcSolver solver, LfNetwork lfNetwork, DcLoadFlowContext context, ReportNode networkReportNode, int n,
+                       StrategySetup strategySetup, Map<String, ComputedContingencyElement> elementByBranch,
+                       double[] baseTargets, double[] busNetInjection, DcSlackDistributionModel distribution, boolean arrayModelApplies,
+                       DeviceTargets deviceTargets, GpuLimitScanner scanner, GpuLimitTable table, boolean needAngles, boolean needBusResults,
+                       GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader, ChunkReads runReads,
+                       PreContingencyNetworkResult preContingencyNetworkResult, LimitViolationManager preContingencyLimitViolationManager,
+                       AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
+                       SecurityAnalysisParameters securityAnalysisParameters, List<LimitReduction> limitReductions, double dcPowerFactor,
+                       Map<String, PostContingencyResult> resultById, Map<String, List<OperatorStrategyResult>> strategyResultsByContingency,
+                       NetworkState networkState, ReentrantLock networkLock, PipelineStats stats) {
 
-        // continuous batching: chunk k+1 prepared on the host (connectivity, column changes) and chunk k on the device
-        // while the strategies of chunk k-1 are answered, in order. Prepare and the answers that apply a strategy to
-        // OLF's network (the check hook, an overflowed screen) take networkLock: both touch the network and its graph
-        java.util.concurrent.locks.ReentrantLock networkLock = new java.util.concurrent.locks.ReentrantLock();
-        java.util.concurrent.ExecutorService prepareStage = java.util.concurrent.Executors.newSingleThreadExecutor(stageThreads("olf-gpu-dc-prepare"));
-        java.util.concurrent.ExecutorService deviceStage = java.util.concurrent.Executors.newSingleThreadExecutor(stageThreads("olf-gpu-dc-device"));
-        int chunkCount = (scenarios.size() + DEVICE_CHUNK - 1) / DEVICE_CHUNK;
-        long[][] timeline = new long[chunkCount][4];
-        ArrayDeque<java.util.concurrent.CompletableFuture<DeviceStrategyChunk>> inFlight = new ArrayDeque<>();
+        /** The states stay on the device: only the values read come back (the check hook copies them all). */
+        boolean gather() {
+            return stateFree && !checkStateReader;
+        }
+
+        SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters() {
+            return securityAnalysisParameters.getIncreasedViolationsParameters();
+        }
+    }
+
+    /** A run's counters and times; each field is written by one stage only, and read after the last chunk is answered. */
+    private static final class PipelineStats {
+        private long ctgPrepareNanos;
+        private long ctgDeviceNanos;
+        private long ctgAnswerNanos;
+        private long strategyPrepareNanos;
+        private long strategyDeviceNanos;
+        private long strategyAnswerNanos;
+        private long waitNanos;
+        private int hostScreened;
+        private int modifiedTargets;
+        private int replayedTargets;
+        private int deviceTargetCount;
+        private int targetMismatches;
+        private int applied;
+        private int strategyCount;
+        private int strategyChunkCount;
+        private final int[] graphCheckCount = new int[4];
+        /** Per chunk: kind (0 contingencies, 1 strategies), prepare start and end, device start and end (ns from the start). */
+        private final Queue<long[]> timeline = new ConcurrentLinkedQueue<>();
+    }
+
+    /** A contingency chunk prepared on the host: its elements and bases, its column changes (null: host-built targets). */
+    private record PreparedContingencyChunk(List<DeviceCandidate> chunk, int[] ptr, int[] base, int[] elements,
+                                            GpuDcSolver.ChunkTargetChanges changes, double[] targets, int nBases) {
+    }
+
+    /** A contingency chunk after the device: its screen records, which are answered from their state, the others' states. */
+    private record ContingencyDeviceChunk(PreparedContingencyChunk prepared, int[] records, boolean[] fromStateOf, double[] states,
+                                          ChunkReads reads) {
+    }
+
+    /**
+     * The device contingencies and their operator strategies in one pipeline (continuous batching, as the AC security
+     * analysis does): a chunk is prepared on the host (its connectivity, its target column changes, under the network
+     * lock), run on the device (columns built, solved, Woodbury updates, flows, screen, reads), then answered on this
+     * thread, in order. A contingency chunk's answers check its strategies' conditions and queue them; their chunks enter
+     * the pipeline while the next contingency chunks are still in it, cut as one list of every strategy would be (the
+     * same chunks, so the same columns). Answers that load a state into OLF's model take the network lock too.
+     */
+    private void runPipeline(Run run, List<DeviceCandidate> device) {
+        PipelineStats stats = run.stats();
+        long t0 = System.nanoTime();
+        int ctgChunks = (device.size() + DEVICE_CHUNK - 1) / DEVICE_CHUNK;
+        int depth = run.gather() ? PIPELINE_DEPTH : HELD_STATES_DEPTH;
+        List<StrategyScenario> scenarios = new ArrayList<>();
+        ExecutorService prepareStage = Executors.newSingleThreadExecutor(stageThreads("olf-gpu-dc-prepare"));
+        ExecutorService deviceStage = Executors.newSingleThreadExecutor(stageThreads("olf-gpu-dc-device"));
+        ArrayDeque<CompletableFuture<?>> inFlight = new ArrayDeque<>();
+        int ctgSubmitted = 0;
+        int ctgAnswered = 0;
+        int strategiesSubmitted = 0;
         try {
-            int submitted = 0;
-            for (int answered = 0; answered < chunkCount; answered++) {
-                while (submitted < chunkCount && submitted <= answered + PIPELINE_DEPTH) {
-                    int chunk = submitted;
-                    int from = submitted * DEVICE_CHUNK;
-                    int to = Math.min(from + DEVICE_CHUNK, scenarios.size());
-                    inFlight.add(java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                        long ts = System.nanoTime();
-                        timeline[chunk][0] = ts - t0;
-                        networkLock.lock();
-                        try {
-                            PreparedStrategyChunk prepared = prepareStrategyChunk(scenarios.subList(from, to), Arrays.copyOfRange(maxSum, from, to), lfNetwork,
-                                    context, elementByBranch, strategySetup, deviceTargets, graphCheckCount);
-                            stageNanos[0] += System.nanoTime() - ts;
-                            timeline[chunk][1] = System.nanoTime() - t0;
-                            return prepared;
-                        } finally {
-                            networkLock.unlock();
-                        }
-                    }, prepareStage).thenApplyAsync(prepared -> {
-                        long ts = System.nanoTime();
-                        timeline[chunk][2] = ts - t0;
-                        DeviceStrategyChunk device = runStrategyChunkOnDevice(solver, prepared, n, gather, stateFree, deviceTargets, runReads,
-                                monitoredBranchResults, strategySetup, table);
-                        stageNanos[1] += System.nanoTime() - ts;
-                        timeline[chunk][3] = System.nanoTime() - t0;
-                        return device;
-                    }, deviceStage));
-                    submitted++;
+            while (true) {
+                // the contingency chunks first (their answers unlock strategies), then the full strategy chunks, then the
+                // last partial one once every contingency is answered
+                while (inFlight.size() < depth) {
+                    if (ctgSubmitted < ctgChunks && ctgSubmitted - ctgAnswered < CONTINGENCY_DEPTH) {
+                        int from = ctgSubmitted * DEVICE_CHUNK;
+                        inFlight.add(submitContingencyChunk(run, device.subList(from, Math.min(from + DEVICE_CHUNK, device.size())),
+                                prepareStage, deviceStage, t0));
+                        ctgSubmitted++;
+                    } else if (scenarios.size() - strategiesSubmitted >= DEVICE_CHUNK
+                            || ctgAnswered == ctgChunks && strategiesSubmitted < scenarios.size()) {
+                        int to = Math.min(strategiesSubmitted + DEVICE_CHUNK, scenarios.size());
+                        inFlight.add(submitStrategyChunk(run, List.copyOf(scenarios.subList(strategiesSubmitted, to)), prepareStage, deviceStage, t0));
+                        strategiesSubmitted = to;
+                        stats.strategyChunkCount++;
+                    } else {
+                        break;
+                    }
+                }
+                if (inFlight.isEmpty()) {
+                    break;
                 }
                 long tw = System.nanoTime();
-                DeviceStrategyChunk device = joinStage(inFlight.poll());
+                Object done = joinStage(inFlight.poll());
                 long ts = System.nanoTime();
-                stageNanos[4] += ts - tw;
-                PreparedStrategyChunk prepared = device.prepared();
-                int count = prepared.scenarios().size();
-                int[] records = device.records();
-                StrategyChunkReads chunkReads = device.reads();
-                for (int i = 0; i < count; i++) {
-                    StrategyScenario sc = prepared.scenarios().get(i);
-                    LfContingency lfContingency = sc.candidate().lfContingency();
-                    Contingency contingency = sc.connectivity().getPropagatedContingency().getContingency();
-                    OperatorStrategy operatorStrategy = sc.operatorStrategy().value();
-                    List<LfAction> lfActions = sc.lfOperatorStrategy().getActions();
-                    ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
-                    lfNetwork.setReportNode(osSimReportNode);
-
-                    int emitted = records[i];
-                    // answered from the device state, as the AC path starts a strategy from it: OLF's network not changed (no
-                    // contingency nor actions applied, nothing to restore); else, and for the check hook's reference, the stock
-                    // way: applied first (flows evaluated on the final topology and tap positions), the network restored after
-                    boolean fromState = chunkReads.fromStateOf()[i];
-                    double[] state = !fromState || !gather ? Arrays.copyOfRange(chunkReads.states(), i * n, (i + 1) * n) : null;
-                    GpuDcStateValues values = fromState && gather ? device.values().gathered().select(i) : GpuDcStateValues.of(state);
-                    boolean applied = !fromState || checkStateReader;
-                    if (applied) {
-                        // OLF's network and its connectivity, which the prepare stage reads for the next chunks
-                        networkLock.lock();
-                        stageNanos[5]++;
-                    }
-                    try {
-                        if (applied) {
-                            lfContingency.apply(parameters.getBalanceType());
-                            LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
-                        }
-                        int[] uncovered = chunkReads.uncoveredOf()[i];
-                        if (applied) {
-                            equationSystem.getStateVector().set(state);
-                            if (needAngles) {
-                                updateNetwork(lfNetwork, equationSystem, state);
-                            }
-                        }
-                        if (fromState && applied) {
-                            stateReader.useLiveModel(lfNetwork, uncovered);  // the actions applied: their models are the network's
-                        } else if (fromState) {
-                            // a tap action's new model as applying would set it (a relative change from the base position)
-                            Map<LfBranch, PiModel> newModels = tapActionModels(lfActions);
-                            stateReader.useLiveModel(uncovered, b -> {
-                                LfBranch branch = lfNetwork.getBranch(b);
-                                return newModels.getOrDefault(branch, branch.getPiModel());
-                            });
-                        }
-                        // the stock predicate: the contingency's branches and the partially disabled ones of THIS connectivity result,
-                        // and what applying disables on the network: the branches out of the main component, those the actions open
-                        Set<LfBranch> disabledBranches = new HashSet<>();
-                        sc.connectivity().getPropagatedContingency().getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
-                        for (LfAction action : lfActions) {
-                            if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
-                                disabledBranches.addAll(branchAction.getDisabledBranches());
-                            }
-                        }
-                        // and PropagatedContingency.toLfContingency's disabled network: every branch of a bus out of the main
-                        // component (tested on the buses, not copied: with every breaker retained, those sets are large)
-                        Set<LfBranch> partialDisabled = sc.connectivity().getPartialDisabledBranches();
-                        Set<LfBus> lostBuses = sc.connectivity().getDisabledBuses();
-                        Predicate<LfBranch> isBranchDisabled = lostBuses.isEmpty() && partialDisabled.isEmpty() ? disabledBranches::contains
-                                : b -> disabledBranches.contains(b) || partialDisabled.contains(b) || lostBuses.contains(b.getBus1()) || lostBuses.contains(b.getBus2());
-
-                        var violationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, violationsParameters);
-                        if (emitted > CAPACITY) {
-                            violationManager.detectViolations(lfNetwork, isBranchDisabled);
-                        } else {
-                            int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
-                            Arrays.sort(candidates);
-                            scanner.detectFromCandidates(lfNetwork, violationManager, candidates, isBranchDisabled, uncovered,
-                                    fromState ? stateReader : null, values, dcPowerFactor);
-                        }
-                        NetworkResult networkResult = fromState
-                                ? strategyResultFromState(monitoredBranchResults, lfNetwork, contingency, isBranchDisabled, values, checkStateReader,
-                                        monitorIndexes, preContingencyNetworkResult, dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters())
-                                : olfNetworkResult(lfNetwork, contingency, isBranchDisabled, monitorIndexes, createResultExtension, preContingencyNetworkResult,
-                                        dcPowerFactor, securityAnalysisParameters.getModifiedMonitoredElementsParameters());
-                        stateReader.clearLiveModel();
-                        strategyResultsByContingency.computeIfAbsent(contingency.getId(), k -> new ArrayList<>()).add(new OperatorStrategyResult(operatorStrategy,
-                                List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED,
-                                        new LimitViolationsResult(violationManager.getLimitViolations()), networkResult, Double.NaN))));
-                        if (applied) {
-                            networkState.restore();
-                        }
-                    } finally {
-                        if (applied) {
-                            networkLock.unlock();
-                        }
-                    }
+                stats.waitNanos += ts - tw;
+                if (done instanceof ContingencyDeviceChunk chunk) {
+                    answerContingencyChunk(run, chunk, scenarios);
+                    ctgAnswered++;
+                    stats.ctgAnswerNanos += System.nanoTime() - ts;
+                } else {
+                    answerStrategyChunk(run, (DeviceStrategyChunk) done);
+                    stats.strategyAnswerNanos += System.nanoTime() - ts;
                 }
-                stageNanos[2] += System.nanoTime() - ts;
             }
         } finally {
             prepareStage.shutdownNow();
             deviceStage.shutdownNow();
         }
+        stats.strategyCount = scenarios.size();
         if (GpuTrace.PHASE_TIME.isOn()) {
-            System.err.printf("DC_WOODBURY_APPLIED %d strategies answered on OLF's network%n", stageNanos[5]);
-            for (int c = 0; c < chunkCount; c += Math.max(1, chunkCount / 12)) {
-                System.err.printf("DC_WOODBURY_TIMELINE chunk %d prepare %.0f-%.0f device %.0f-%.0f ms%n", c, timeline[c][0] / 1e6, timeline[c][1] / 1e6,
-                        timeline[c][2] / 1e6, timeline[c][3] / 1e6);
+            printPipelineDiagnostics(run, t0);
+        }
+    }
+
+    private CompletableFuture<ContingencyDeviceChunk> submitContingencyChunk(Run run, List<DeviceCandidate> chunk, ExecutorService prepareStage,
+                                                                             ExecutorService deviceStage, long t0) {
+        PipelineStats stats = run.stats();
+        long[] timeline = new long[5];
+        stats.timeline.add(timeline);
+        return CompletableFuture.supplyAsync(() -> {
+            long ts = System.nanoTime();
+            timeline[1] = ts - t0;
+            run.networkLock().lock();                 // the host replay of a target column changes OLF's network
+            try {
+                return prepareContingencyChunk(run, chunk);
+            } finally {
+                run.networkLock().unlock();
+                stats.ctgPrepareNanos += System.nanoTime() - ts;
+                timeline[2] = System.nanoTime() - t0;
             }
-            int graphChecks = graphCheckCount[0];
+        }, prepareStage).thenApplyAsync(prepared -> {
+            long ts = System.nanoTime();
+            timeline[3] = ts - t0;
+            ContingencyDeviceChunk result = runContingencyChunkOnDevice(run, prepared);
+            stats.ctgDeviceNanos += System.nanoTime() - ts;
+            timeline[4] = System.nanoTime() - t0;
+            return result;
+        }, deviceStage);
+    }
+
+    private CompletableFuture<DeviceStrategyChunk> submitStrategyChunk(Run run, List<StrategyScenario> chunk, ExecutorService prepareStage,
+                                                                       ExecutorService deviceStage, long t0) {
+        PipelineStats stats = run.stats();
+        long[] timeline = new long[] {1, 0, 0, 0, 0};
+        stats.timeline.add(timeline);
+        // OLF's connectivity criterion on the device S first (a device call: the device stage), then the prepare stage
+        return CompletableFuture.supplyAsync(() -> {
+            long ts = System.nanoTime();
+            double[] maxSum = connectivityCriterion(run.solver(), chunk, run.strategySetup(), run.elementByBranch());
+            stats.strategyDeviceNanos += System.nanoTime() - ts;
+            return maxSum;
+        }, deviceStage).thenApplyAsync(maxSum -> {
+            long ts = System.nanoTime();
+            timeline[1] = ts - t0;
+            run.networkLock().lock();                 // OLF's graph (the connectivity checks) and network (host replays)
+            try {
+                return prepareStrategyChunk(chunk, maxSum, run.lfNetwork(), run.context(), run.elementByBranch(), run.strategySetup(),
+                        run.deviceTargets(), stats.graphCheckCount);
+            } finally {
+                run.networkLock().unlock();
+                stats.strategyPrepareNanos += System.nanoTime() - ts;
+                timeline[2] = System.nanoTime() - t0;
+            }
+        }, prepareStage).thenApplyAsync(prepared -> {
+            long ts = System.nanoTime();
+            timeline[3] = ts - t0;
+            DeviceStrategyChunk result = runStrategyChunkOnDevice(run.solver(), prepared, run.n(), run.gather(), run.stateFree(), run.deviceTargets(),
+                    run.runReads(), run.monitoredBranchResults(), run.strategySetup(), run.table());
+            stats.strategyDeviceNanos += System.nanoTime() - ts;
+            timeline[4] = System.nanoTime() - t0;
+            return result;
+        }, deviceStage);
+    }
+
+    /**
+     * The prepare stage of a contingency chunk: its elements, and per contingency that changes the target (lost power,
+     * islanding, a lost phase shifter) its column's changes for the device, or the column itself built on the host when
+     * the device cannot place one of them (then for the whole chunk) and under the check hook (the reference).
+     */
+    private PreparedContingencyChunk prepareContingencyChunk(Run run, List<DeviceCandidate> chunk) {
+        LfNetwork lfNetwork = run.lfNetwork();
+        DcLoadFlowContext context = run.context();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
+        DeviceTargets deviceTargets = run.deviceTargets();
+        PipelineStats stats = run.stats();
+        int n = run.n();
+        int count = chunk.size();
+        int[] ctgPtr = new int[count + 1];
+        int[] ctgBase = new int[count];
+        List<Integer> elemList = new ArrayList<>();
+        int nBases = 0;
+        ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges() : null;
+        double[] targets = changes == null || deviceTargets.check() ? new double[n * count] : null;
+        for (int i = 0; i < count; i++) {
+            DeviceCandidate candidate = chunk.get(i);
+            for (ComputedContingencyElement element : candidate.elements()) {
+                elemList.add(deviceColumn(element));
+            }
+            ctgPtr[i + 1] = elemList.size();
+            ctgBase[i] = -1;
+            // the stock adds the stations of an HVDC left without power to the lost generators FIRST,
+            // then decides on lost power
+            PropagatedContingency propagated = candidate.connectivity().getPropagatedContingency();
+            candidate.connectivity().getHvdcsWithoutPower().forEach(hvdc -> {
+                propagated.getGeneratorIdsToLose().add(hvdc.getConverterStation1().getId());
+                propagated.getGeneratorIdsToLose().add(hvdc.getConverterStation2().getId());
+            });
+            boolean lostPower = !propagated.getGeneratorIdsToLose().isEmpty() || !propagated.getLoadIdsToLose().isEmpty();
+            if (lostPower || needsModifiedTarget(candidate)) {
+                if (changes != null && !changes.add(candidate, lostPower, lfNetwork, equationSystem, deviceTargets.generatorIndex())) {
+                    changes = null;                      // something the device cannot place: this chunk on the host
+                    stats.modifiedTargets -= nBases;
+                    nBases = 0;
+                    Arrays.fill(ctgBase, -1);
+                    if (targets == null) {
+                        targets = new double[n * count];
+                    }
+                    i = -1;                              // rebuild the chunk's columns on the host from the start
+                    elemList.clear();
+                    continue;
+                }
+                if (changes != null && !deviceTargets.check()) {
+                    ctgBase[i] = nBases++;
+                    stats.modifiedTargets++;
+                    continue;
+                }
+                if (!lostPower && run.arrayModelApplies() && !deviceTargets.check()) {   // the check compares with the exact replay
+                    buildModifiedTarget(candidate, lfNetwork, equationSystem, run.baseTargets(), run.busNetInjection(), run.distribution(),
+                            targets, nBases * n);
+                } else {
+                    buildModifiedTargetByReplay(candidate, lostPower, lfNetwork, context, targets, nBases * n);
+                    stats.replayedTargets++;
+                }
+                ctgBase[i] = nBases++;
+                stats.modifiedTargets++;
+            }
+        }
+        int[] ctgElem = elemList.stream().mapToInt(Integer::intValue).toArray();
+        return new PreparedContingencyChunk(chunk, ctgPtr, ctgBase, ctgElem, changes != null && nBases > 0 ? changes.build() : null,
+                targets, nBases);
+    }
+
+    /** The device stage of a contingency chunk: its columns built (or uploaded) and solved, Woodbury, flows, screen, reads. */
+    private ContingencyDeviceChunk runContingencyChunkOnDevice(Run run, PreparedContingencyChunk prepared) {
+        GpuDcSolver solver = run.solver();
+        DeviceTargets deviceTargets = run.deviceTargets();
+        PipelineStats stats = run.stats();
+        int n = run.n();
+        int count = prepared.chunk().size();
+        int nBases = prepared.nBases();
+        int[] base = prepared.base();
+        if (prepared.changes() != null) {
+            double[] built = deviceTargets.check() ? new double[n * nBases] : null;
+            buildOnDevice(solver, prepared.changes(), deviceTargets.distributed(), deviceTargets.participationType(),
+                    deviceTargets.useActiveLimits(), deviceTargets.referenceGenerator(), built, base);
+            stats.deviceTargetCount += nBases;
+            if (built != null) {
+                stats.targetMismatches += compareTargets(built, prepared.targets(), n * nBases, n, stats.targetMismatches);
+            }
+        } else {
+            solver.setChunkTargets(prepared.targets() != null ? prepared.targets() : new double[0], nBases);
+        }
+        // states answered from stay on the device: only the values read come back (check hook: every state)
+        double[] states = run.gather() ? null : new double[n * count];
+        int[] records = solver.woodburyChunk(prepared.ptr(), prepared.elements(), base, GpuViolationScreen.BAND, CAPACITY, states);
+        ChunkReads reads = new ChunkReads(new GpuDcStateValues.Gathered(run.lfNetwork().getBranches().size(), n),
+                run.runReads().monitoredBranchNums(), run.runReads().angleRows());
+        if (!run.stateFree()) {
+            return new ContingencyDeviceChunk(prepared, records, new boolean[count], states, reads);
+        }
+        ContingencyChunkReads chunkReads = readChunk(solver, reads, prepared.chunk(), records, states, run.checkStateReader(), n,
+                run.monitoredBranchResults(), run.strategySetup(), run.table());
+        return new ContingencyDeviceChunk(prepared, records, chunkReads.fromStateOf(), chunkReads.states(), reads);
+    }
+
+    /**
+     * The answers of a contingency chunk, in order: violations and network results (from the state where the run allows it,
+     * else on the state loaded into OLF's model, under the network lock), then each strategy's condition read on the
+     * post-contingency violations (and state), exactly where the stock reads it: the strategies applying are queued.
+     */
+    private void answerContingencyChunk(Run run, ContingencyDeviceChunk deviceChunk, List<StrategyScenario> strategyScenarios) {
+        LfNetwork lfNetwork = run.lfNetwork();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = run.context().getEquationSystem();
+        List<DeviceCandidate> chunk = deviceChunk.prepared().chunk();
+        int n = run.n();
+        int count = chunk.size();
+        int[] records = deviceChunk.records();
+        StrategySetup strategySetup = run.strategySetup();
+        for (int i = 0; i < count; i++) {
+            DeviceCandidate candidate = chunk.get(i);
+            PropagatedContingency propagated = candidate.connectivity().getPropagatedContingency();
+            LfContingency lfContingency = candidate.lfContingency();
+            Contingency contingency = propagated.getContingency();
+            boolean fromState = deviceChunk.fromStateOf()[i];
+            boolean loaded = !fromState || run.checkStateReader();
+            if (loaded) {
+                run.networkLock().lock();             // the state loaded into OLF's model, its flows and network read
+            }
+            try {
+                // a child of the network's report node, as the AC security analysis does: not of the previous
+                // contingency's, which nested every contingency in the one before (and re-checked every ancestor's values)
+                ReportNode postContSimReportNode = Reports.createPostContingencySimulation(run.networkReportNode(), contingency.getId());
+                lfNetwork.setReportNode(postContSimReportNode);
+                logPostContingencyStart(lfNetwork, lfContingency);
+
+                // the post-contingency state: answered from the array where the run allows it (stateFree), else
+                // loaded into the equation system, where the vectorized DC network recomputes every branch flow
+                int emitted = records[i];
+                GpuDcStateValues values = fromState ? deviceChunk.reads().gathered().select(i) : null;
+                if (loaded) {
+                    double[] state = Arrays.copyOfRange(deviceChunk.states(), i * n, (i + 1) * n);
+                    equationSystem.getStateVector().set(state);
+                    if (run.needAngles()) {
+                        updateNetwork(lfNetwork, equationSystem, state);
+                    }
+                }
+                Map<LfBranch, DisabledBranchStatus> disabledBranches = lfContingency.getDisabledNetwork().getBranchesStatus();
+                Predicate<LfBranch> isBranchDisabled = disabledBranches::containsKey;
+
+                // violations: the screen's candidates confirmed on OLF's own values (read from the state, or from the model)
+                var postContingencyLimitViolationManager = new LimitViolationManager(run.preContingencyLimitViolationManager(),
+                        run.limitReductions(), run.violationsParameters());
+                if (emitted > CAPACITY) {
+                    run.stats().hostScreened++;
+                    postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabled);
+                } else {
+                    int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
+                    Arrays.sort(candidates);             // table order: a group's limits contiguous, most severe first
+                    run.scanner().detectFromCandidates(lfNetwork, postContingencyLimitViolationManager, candidates, isBranchDisabled, new int[0],
+                            fromState ? stateReader : null, values, run.dcPowerFactor());
+                }
+
+                NetworkResult networkResult = fromState
+                        ? networkResultFromState(run.monitoredBranchResults(), lfNetwork, candidate, contingency, isBranchDisabled, values,
+                                run.checkStateReader(), run.monitorIndexes(), run.preContingencyNetworkResult(), run.dcPowerFactor(),
+                                run.securityAnalysisParameters().getModifiedMonitoredElementsParameters())
+                        : networkResult(run.monitoredBranchResults(), lfNetwork, candidate, contingency, isBranchDisabled,
+                                run.needBusResults(), run.monitorIndexes(), run.createResultExtension(), run.preContingencyNetworkResult(),
+                                run.dcPowerFactor(), run.securityAnalysisParameters().getModifiedMonitoredElementsParameters());
+
+                var connectivityResult = new ConnectivityResult(
+                        lfContingency.getCreatedSynchronousComponentsCount(), 0,
+                        lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
+                        lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
+                        lfContingency.getDisconnectedElementIds());
+                LimitViolationsResult postContingencyViolations = new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations());
+                run.resultById().put(contingency.getId(), new PostContingencyResult(contingency, PostContingencyComputationStatus.CONVERGED,
+                        postContingencyViolations, networkResult, connectivityResult, Double.NaN));
+
+                List<Indexed<OperatorStrategy>> strategies = strategySetup.operatorStrategiesByContingencyId().get(contingency.getId());
+                if (strategies != null) {
+                    for (Indexed<OperatorStrategy> operatorStrategy : strategies) {
+                        List<String> actionIds = checkCondition(operatorStrategy.value(), postContingencyViolations, lfNetwork);
+                        List<LfAction> lfActions = actionIds.stream().map(strategySetup.lfActionById()::get).filter(Objects::nonNull).toList();
+                        LfOperatorStrategy lfOperatorStrategy = new LfOperatorStrategy(operatorStrategy, lfActions);
+                        strategyScenarios.add(new StrategyScenario(candidate, operatorStrategy, lfOperatorStrategy, null, null, postContSimReportNode, null));
+                    }
+                }
+            } finally {
+                if (loaded) {
+                    run.networkLock().unlock();
+                }
+            }
+        }
+    }
+
+    /**
+     * The answers of a strategy chunk, in order. A strategy is answered from its device state, as the AC path starts a
+     * strategy from it: OLF's network not changed (no contingency nor actions applied, nothing to restore); else, and for
+     * the check hook's reference, the stock way: applied first (flows evaluated on the final topology and tap positions),
+     * the network restored after, under the network lock (the prepare stage reads OLF's network and graph).
+     */
+    private void answerStrategyChunk(Run run, DeviceStrategyChunk device) {
+        LfNetwork lfNetwork = run.lfNetwork();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = run.context().getEquationSystem();
+        DcLoadFlowParameters parameters = run.context().getParameters();
+        int n = run.n();
+        boolean gather = run.gather();
+        PreparedStrategyChunk prepared = device.prepared();
+        int count = prepared.scenarios().size();
+        int[] records = device.records();
+        StrategyChunkReads chunkReads = device.reads();
+        for (int i = 0; i < count; i++) {
+            StrategyScenario sc = prepared.scenarios().get(i);
+            LfContingency lfContingency = sc.candidate().lfContingency();
+            Contingency contingency = sc.connectivity().getPropagatedContingency().getContingency();
+            OperatorStrategy operatorStrategy = sc.operatorStrategy().value();
+            List<LfAction> lfActions = sc.lfOperatorStrategy().getActions();
+            ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
+            lfNetwork.setReportNode(osSimReportNode);
+
+            int emitted = records[i];
+            boolean fromState = chunkReads.fromStateOf()[i];
+            double[] state = !fromState || !gather ? Arrays.copyOfRange(chunkReads.states(), i * n, (i + 1) * n) : null;
+            GpuDcStateValues values = fromState && gather ? device.values().gathered().select(i) : GpuDcStateValues.of(state);
+            boolean applied = !fromState || run.checkStateReader();
+            if (applied) {
+                run.networkLock().lock();
+                run.stats().applied++;
+            }
+            try {
+                if (applied) {
+                    lfContingency.apply(parameters.getBalanceType());
+                    LfActionUtils.applyListOfActions(lfActions, lfNetwork, lfContingency, parameters.getNetworkParameters());
+                }
+                int[] uncovered = chunkReads.uncoveredOf()[i];
+                if (applied) {
+                    equationSystem.getStateVector().set(state);
+                    if (run.needAngles()) {
+                        updateNetwork(lfNetwork, equationSystem, state);
+                    }
+                }
+                if (fromState && applied) {
+                    stateReader.useLiveModel(lfNetwork, uncovered);  // the actions applied: their models are the network's
+                } else if (fromState) {
+                    // a tap action's new model as applying would set it (a relative change from the base position)
+                    Map<LfBranch, PiModel> newModels = tapActionModels(lfActions);
+                    stateReader.useLiveModel(uncovered, b -> {
+                        LfBranch branch = lfNetwork.getBranch(b);
+                        return newModels.getOrDefault(branch, branch.getPiModel());
+                    });
+                }
+                // the stock predicate: the contingency's branches and the partially disabled ones of THIS connectivity result,
+                // and what applying disables on the network: the branches out of the main component, those the actions open
+                Set<LfBranch> disabledBranches = new HashSet<>();
+                sc.connectivity().getPropagatedContingency().getBranchIdsToOpen().keySet().forEach(id -> disabledBranches.add(lfNetwork.getBranchById(id)));
+                for (LfAction action : lfActions) {
+                    if (action instanceof AbstractLfBranchAction<?> branchAction && branchAction.getDisabledBranches() != null) {
+                        disabledBranches.addAll(branchAction.getDisabledBranches());
+                    }
+                }
+                // and PropagatedContingency.toLfContingency's disabled network: every branch of a bus out of the main
+                // component (tested on the buses, not copied: with every breaker retained, those sets are large)
+                Set<LfBranch> partialDisabled = sc.connectivity().getPartialDisabledBranches();
+                Set<LfBus> lostBuses = sc.connectivity().getDisabledBuses();
+                Predicate<LfBranch> isBranchDisabled = lostBuses.isEmpty() && partialDisabled.isEmpty() ? disabledBranches::contains
+                        : b -> disabledBranches.contains(b) || partialDisabled.contains(b) || lostBuses.contains(b.getBus1()) || lostBuses.contains(b.getBus2());
+
+                var violationManager = new LimitViolationManager(run.preContingencyLimitViolationManager(), run.limitReductions(), run.violationsParameters());
+                if (emitted > CAPACITY) {
+                    violationManager.detectViolations(lfNetwork, isBranchDisabled);
+                } else {
+                    int[] candidates = Arrays.copyOfRange(records, count + i * CAPACITY, count + i * CAPACITY + emitted);
+                    Arrays.sort(candidates);
+                    run.scanner().detectFromCandidates(lfNetwork, violationManager, candidates, isBranchDisabled, uncovered,
+                            fromState ? stateReader : null, values, run.dcPowerFactor());
+                }
+                SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters =
+                        run.securityAnalysisParameters().getModifiedMonitoredElementsParameters();
+                NetworkResult networkResult = fromState
+                        ? strategyResultFromState(run.monitoredBranchResults(), lfNetwork, contingency, isBranchDisabled, values, run.checkStateReader(),
+                                run.monitorIndexes(), run.preContingencyNetworkResult(), run.dcPowerFactor(), modifiedMonitoredElementsParameters)
+                        : olfNetworkResult(lfNetwork, contingency, isBranchDisabled, run.monitorIndexes(), run.createResultExtension(),
+                                run.preContingencyNetworkResult(), run.dcPowerFactor(), modifiedMonitoredElementsParameters);
+                stateReader.clearLiveModel();
+                run.strategyResultsByContingency().computeIfAbsent(contingency.getId(), k -> new ArrayList<>()).add(new OperatorStrategyResult(operatorStrategy,
+                        List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED,
+                                new LimitViolationsResult(violationManager.getLimitViolations()), networkResult, Double.NaN))));
+                if (applied) {
+                    run.networkState().restore();
+                }
+            } finally {
+                if (applied) {
+                    run.networkLock().unlock();
+                }
+            }
+        }
+    }
+
+    private static void printPipelineDiagnostics(Run run, long t0) {
+        PipelineStats stats = run.stats();
+        List<long[]> timeline = new ArrayList<>(stats.timeline);
+        int step = Math.max(1, timeline.size() / 16);
+        for (int c = 0; c < timeline.size(); c += step) {
+            long[] t = timeline.get(c);
+            System.err.printf("DC_WOODBURY_TIMELINE chunk %d (%s) prepare %.0f-%.0f device %.0f-%.0f ms%n", c, t[0] == 0 ? "contingencies" : "strategies",
+                    t[1] / 1e6, t[2] / 1e6, t[3] / 1e6, t[4] / 1e6);
+        }
+        System.err.printf("DC_WOODBURY_PIPELINE %d chunks (%d of strategies) in %.0f ms: contingencies prepare=%.0f device=%.0f answer=%.0f ms,"
+                        + " strategies prepare=%.0f device=%.0f answer=%.0f ms, answers waiting %.0f ms%n", timeline.size(), stats.strategyChunkCount,
+                (System.nanoTime() - t0) / 1e6, stats.ctgPrepareNanos / 1e6, stats.ctgDeviceNanos / 1e6, stats.ctgAnswerNanos / 1e6,
+                stats.strategyPrepareNanos / 1e6, stats.strategyDeviceNanos / 1e6, stats.strategyAnswerNanos / 1e6, stats.waitNanos / 1e6);
+        if (stats.strategyCount > 0) {
+            System.err.printf("DC_WOODBURY_APPLIED %d strategies answered on OLF's network%n", stats.applied);
+            int graphChecks = stats.graphCheckCount[0];
             System.err.printf("DC_WOODBURY_STRATEGIES %d strategies in %d chunks: prepare=%.0f ms (%d graph checks, %.1f lost buses per check) "
-                            + "device=%.0f ms answer=%.0f ms (waiting %.0f ms), setup=%.0f ms, pipelined total=%.0f ms%n", scenarios.size(), chunkCount,
-                    stageNanos[0] / 1e6, graphChecks, graphChecks > 0 ? graphCheckCount[1] / (double) graphChecks : 0.0, stageNanos[1] / 1e6,
-                    stageNanos[2] / 1e6, stageNanos[4] / 1e6, stageNanos[3] / 1e6, (System.nanoTime() - t0) / 1e6);
+                            + "device=%.0f ms answer=%.0f ms%n", stats.strategyCount, stats.strategyChunkCount, stats.strategyPrepareNanos / 1e6, graphChecks,
+                    graphChecks > 0 ? stats.graphCheckCount[1] / (double) graphChecks : 0.0, stats.strategyDeviceNanos / 1e6, stats.strategyAnswerNanos / 1e6);
             if (graphChecks > 0) {
-                // a large loss is the slack bus's component kept as the network (fast DC does not relocate the slack)
                 System.err.printf("DC_WOODBURY_GRAPH_CHECKS largest loss %d buses (contingency %s), the contingencies' own %.1f per check, slack %s%n",
-                        graphCheckCount[2], LARGEST_LOSS_CONTINGENCY.get(), graphCheckCount[3] / (double) graphChecks,
-                        lfNetwork.getBuses().stream().filter(LfBus::isSlack).map(LfBus::getId).toList());
+                        stats.graphCheckCount[2], LARGEST_LOSS_CONTINGENCY.get(), stats.graphCheckCount[3] / (double) graphChecks,
+                        run.lfNetwork().getBuses().stream().filter(LfBus::isSlack).map(LfBus::getId).toList());
             }
         }
     }
@@ -1069,6 +1231,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * milliseconds), so it runs as far ahead as it can: a prepared chunk is index lists, and the answers keep up.
      */
     private static final int PIPELINE_DEPTH = 1024;
+
+    /** The depth when the chunks copy their whole states back (n doubles per scenario): a few chunks' worth of memory. */
+    private static final int HELD_STATES_DEPTH = 3;
+
+    /** Contingency chunks in flight at once: their host-built target columns (n doubles per column) stay bounded. */
+    private static final int CONTINGENCY_DEPTH = 8;
 
     /** The contingency whose strategies lost the most buses in a graph check (OLF_GPU_PHASE_TIME diagnostics only). */
     private static final java.util.concurrent.atomic.AtomicReference<String> LARGEST_LOSS_CONTINGENCY = new java.util.concurrent.atomic.AtomicReference<>();
@@ -1616,9 +1784,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * threshold condition in their strategies): their values gathered on the device; the others' whole states copied
      * into {@code states} (already there under the check hook).
      */
-    private static boolean[] readChunk(GpuDcSolver solver, ChunkReads reads, List<DeviceCandidate> chunk, int[] records,
-                                       double[] states, boolean statesCopied, GpuMonitoredBranchResults monitoredBranchResults,
-                                       StrategySetup strategySetup, GpuLimitTable table) {
+    private static ContingencyChunkReads readChunk(GpuDcSolver solver, ChunkReads reads, List<DeviceCandidate> chunk, int[] records,
+                                                   double[] statesIn, boolean statesCopied, int n, GpuMonitoredBranchResults monitoredBranchResults,
+                                                   StrategySetup strategySetup, GpuLimitTable table) {
         int count = chunk.size();
         boolean[] fromStateOf = new boolean[count];
         List<Integer> load = new ArrayList<>();
@@ -1630,20 +1798,28 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 load.add(i);
             }
         }
+        double[] states = statesIn;
         if (!statesCopied && !load.isEmpty()) {
+            if (states == null) {
+                states = new double[n * count];             // only the loaded ones' columns are read
+            }
             solver.readChunkStates(load.stream().mapToInt(Integer::intValue).toArray(), states);
         }
         gatherChunkValues(solver, reads.gathered(), records, count, fromStateOf, reads.monitoredBranchNums(), reads.angleRows(), table, null);
-        return fromStateOf;
+        return new ContingencyChunkReads(fromStateOf, states);
+    }
+
+    /** A contingency chunk's reads: which contingencies are answered from their state, and the others' states. */
+    private record ContingencyChunkReads(boolean[] fromStateOf, double[] states) {
     }
 
     /**
      * The chunk's columns built on the device, each base index ({@code -1}: the pre-contingency state, kept) mapped to its
      * distinct column's: columns equal in every respect are built and solved once.
      */
-    private static void buildOnDevice(GpuDcSolver solver, ChunkChanges changes, boolean distributed, int participationType, boolean useActiveLimits,
-                                      int referenceGenerator, double[] built, int[] bases) {
-        int[] distinctOf = solver.buildChunkTargets(changes.build(), distributed, participationType, useActiveLimits, referenceGenerator, built);
+    private static void buildOnDevice(GpuDcSolver solver, GpuDcSolver.ChunkTargetChanges changes, boolean distributed, int participationType,
+                                      boolean useActiveLimits, int referenceGenerator, double[] built, int[] bases) {
+        int[] distinctOf = solver.buildChunkTargets(changes, distributed, participationType, useActiveLimits, referenceGenerator, built);
         for (int i = 0; i < bases.length; i++) {
             if (bases[i] >= 0) {
                 bases[i] = distinctOf[bases[i]];

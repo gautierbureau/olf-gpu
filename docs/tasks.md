@@ -126,6 +126,16 @@ factors (`GpuLodfCalculator`).
   condition) gets it alone (readChunkStates). GpuDcStateValues: the whole state or the gathered values. Check hook:
   the reader on the gathered values vs OLF's model (all 9959 of network.xiidm: 0). network.xiidm warm, GPU free:
   4.1 -> 3.4-3.7 s; device chunks 0.31 -> 0.16-0.20 s; host loop -> 0.17 s.
+- DONE 2026-11-14, continuous batching: the contingency chunks and their operator strategies' chunks in ONE pipeline
+  (prepare on the host under the network lock, device, answers in order on the caller's thread). A contingency chunk's
+  answers queue its strategies; their chunks (cut as one list would be: the same chunks, the same columns, results bit
+  for bit the previous ones) enter while later contingency chunks are in flight. Before, each contingency chunk ran
+  columns -> device -> answers serially and the strategies started after the last one. Depth bounded when the chunks
+  copy whole states back (3) and for contingency chunks (8: host-built columns). The strategies' host apply/restore
+  was already gone on the default path (DC_WOODBURY_APPLIED 0); it stays the fallback (overflow, threshold condition,
+  monitored buses, check hooks). network.xiidm GPU-only: full N-1 loop ~600 -> 430-490 ms (wall 3.23-3.26 -> 2.61-2.75 s),
+  500x20 loop ~710 -> 580-625 ms (wall 3.05-3.20 -> 2.67-2.69 s), 200x20 unchanged (~2.1 s). The device stage is now the
+  bottleneck (answers wait 200-250 ms). Diagnostic DC_WOODBURY_PIPELINE (OLF_GPU_PHASE_TIME).
 - Next for speed (warm, network.xiidm 4.1 s): columns 0.95 s, results 0.6 s (now ~0.3 s), base + diagnostic 0.8 s (0.25 s is the probe's diagnostic), GPU chunks 0.3 s,
   connectivity 0.2-0.3 s, S 0.12 s; ~0.8 s outside the timed phases (LfNetwork load, contingency propagation).
 - Earlier list, by size (GPU-only cold run, 9.5 s): (a) the device context's 2.1 s is mostly CUDA start-up (one-off

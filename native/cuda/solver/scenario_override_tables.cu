@@ -40,36 +40,36 @@ void elementControllers(int nElements, const std::vector<int>& controllerElement
 void ensureTapControllers(BatchSolverContext* ctx) {
     std::vector<int> counts = {ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches, ctx->phaseControl.nPhaseControlControllerBranches,
                                ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches, ctx->transformerVoltageControl.nTransformerVoltageControlMembers};
-    if (counts == ctx->hClosedBranchParameterOverrideControllerCounts) return;
-    ctx->hClosedBranchParameterOverrideControllerCounts = counts;
+    if (counts == ctx->scenarioOverrides.hClosedBranchParameterOverrideControllerCounts) return;
+    ctx->scenarioOverrides.hClosedBranchParameterOverrideControllerCounts = counts;
     const std::vector<int>* elements[4] = {&ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement, &ctx->phaseControl.hPhaseControlElement,
                                            &ctx->incrementalFlowControl.hIncrementalFlowControlElement, &ctx->transformerVoltageControl.hTransformerVoltageControlMemberElement};
     std::vector<int> controllerElement;
     for (int l = 0; l < 4; l++) {
         controllerElement.insert(controllerElement.end(), elements[l]->begin(), elements[l]->begin() + counts[l]);
     }
-    ctx->nClosedBranchParameterOverrideControllers = static_cast<int>(controllerElement.size());
+    ctx->scenarioOverrides.nClosedBranchParameterOverrideControllers = static_cast<int>(controllerElement.size());
     if (controllerElement.empty()) return;
     std::vector<int> start, controller;
     elementControllers(ctx->structure->closedBranch.elementCount, controllerElement, start, controller);
-    ctx->dClosedBranchParameterOverrideElementControllerStart.upload(start.data(), start.size() * sizeof(int));
-    ctx->dClosedBranchParameterOverrideElementController.upload(controller.data(), controller.size() * sizeof(int));
+    ctx->scenarioOverrides.dClosedBranchParameterOverrideElementControllerStart.upload(start.data(), start.size() * sizeof(int));
+    ctx->scenarioOverrides.dClosedBranchParameterOverrideElementController.upload(controller.data(), controller.size() * sizeof(int));
 }
 
 // The incremental shunt loop's controllers that have a PACK shunt element (the others act through SHUNT_B only).
 void ensureShuntControllers(BatchSolverContext* ctx) {
     std::vector<int> counts = {ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts};
-    if (counts == ctx->hShuntAdmittanceOverrideControllerCounts) return;
-    ctx->hShuntAdmittanceOverrideControllerCounts = counts;
+    if (counts == ctx->scenarioOverrides.hShuntAdmittanceOverrideControllerCounts) return;
+    ctx->scenarioOverrides.hShuntAdmittanceOverrideControllerCounts = counts;
     int nControllers = counts[0];
-    ctx->nShuntAdmittanceOverrideControllers = nControllers;
+    ctx->scenarioOverrides.nShuntAdmittanceOverrideControllers = nControllers;
     if (nControllers == 0) return;
     std::vector<int> controllerElement(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin(),
                                        ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin() + nControllers);
     std::vector<int> start, controller;
     elementControllers(ctx->structure->shunt.elementCount, controllerElement, start, controller);
-    ctx->dShuntAdmittanceOverrideElementControllerStart.upload(start.data(), start.size() * sizeof(int));
-    ctx->dShuntAdmittanceOverrideElementController.upload(controller.data(), controller.size() * sizeof(int));
+    ctx->scenarioOverrides.dShuntAdmittanceOverrideElementControllerStart.upload(start.data(), start.size() * sizeof(int));
+    ctx->scenarioOverrides.dShuntAdmittanceOverrideElementController.upload(controller.data(), controller.size() * sizeof(int));
 }
 
 // One thread per (slot, controller) of one tap loop: a tap off its base tap overrides its transformer's row with the
@@ -119,39 +119,39 @@ __global__ void publishSectionMovesBatch(int nScenarios, int nControllers, int n
 void installClosedBranchParameterOverrides(BatchSolverContext* ctx, int nOverrides, const int* scenarioElement,
                                            const double* values) {
     int nS = ctx->nScenarios;
-    ctx->closedBranchParameterOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, values);
+    ctx->scenarioOverrides.closedBranchParameterOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, values);
     ensureTapControllers(ctx);
-    size_t nsc = static_cast<size_t>(nS) * ctx->nClosedBranchParameterOverrideControllers;
+    size_t nsc = static_cast<size_t>(nS) * ctx->scenarioOverrides.nClosedBranchParameterOverrideControllers;
     if (nsc > 0) {
-        ctx->dClosedBranchParameterOverrideTapMoved.ensure(nsc);
-        ctx->dClosedBranchParameterOverridePiModel.ensure(nsc * GpuPiModelColumn::COUNT * sizeof(double));
+        ctx->scenarioOverrides.dClosedBranchParameterOverrideTapMoved.ensure(nsc);
+        ctx->scenarioOverrides.dClosedBranchParameterOverridePiModel.ensure(nsc * GpuPiModelColumn::COUNT * sizeof(double));
         // the installed slots' taps start where their scenarios put them; a slot still solving keeps the ones its loops moved
-        memsetInstalledRows(ctx, ctx->dClosedBranchParameterOverrideTapMoved.p, ctx->nClosedBranchParameterOverrideControllers, 0);
+        memsetInstalledRows(ctx, ctx->scenarioOverrides.dClosedBranchParameterOverrideTapMoved.p, ctx->scenarioOverrides.nClosedBranchParameterOverrideControllers, 0);
     }
 }
 
 void installShuntAdmittanceOverrides(BatchSolverContext* ctx, int nOverrides, const int* scenarioElement,
                                      const double* delta) {
     int nS = ctx->nScenarios;
-    ctx->shuntAdmittanceOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, delta);
+    ctx->scenarioOverrides.shuntAdmittanceOverrides.install(nS, ctx->installSlots, nOverrides, scenarioElement, delta);
     ensureShuntControllers(ctx);
-    size_t nsc = static_cast<size_t>(nS) * ctx->nShuntAdmittanceOverrideControllers;
+    size_t nsc = static_cast<size_t>(nS) * ctx->scenarioOverrides.nShuntAdmittanceOverrideControllers;
     if (nsc > 0) {
-        ctx->dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
-        ctx->dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
+        ctx->scenarioOverrides.dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
+        ctx->scenarioOverrides.dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
         // the installed slots' sections start where their scenarios put them; a slot still solving keeps its loop's moves
-        memsetInstalledRows(ctx, ctx->dShuntAdmittanceOverrideSectionsMoved.p, ctx->nShuntAdmittanceOverrideControllers, 0);
+        memsetInstalledRows(ctx, ctx->scenarioOverrides.dShuntAdmittanceOverrideSectionsMoved.p, ctx->scenarioOverrides.nShuntAdmittanceOverrideControllers, 0);
     }
 }
 
 void publishClosedBranchParameterOverrides(BatchSolverContext* ctx) {
     ensureTapControllers(ctx);
-    int nControllers = ctx->nClosedBranchParameterOverrideControllers;
+    int nControllers = ctx->scenarioOverrides.nClosedBranchParameterOverrideControllers;
     if (nControllers == 0) return;
     int nS = ctx->nScenarios;
     size_t nsc = static_cast<size_t>(nS) * nControllers;
-    ctx->dClosedBranchParameterOverrideTapMoved.ensure(nsc);
-    ctx->dClosedBranchParameterOverridePiModel.ensure(nsc * GpuPiModelColumn::COUNT * sizeof(double));
+    ctx->scenarioOverrides.dClosedBranchParameterOverrideTapMoved.ensure(nsc);
+    ctx->scenarioOverrides.dClosedBranchParameterOverridePiModel.ensure(nsc * GpuPiModelColumn::COUNT * sizeof(double));
     struct Loop {
         int nControllers;
         DeviceBuf* currentTap;
@@ -175,8 +175,8 @@ void publishClosedBranchParameterOverrides(BatchSolverContext* ctx) {
         if (l.nControllers > 0) {
             publishTapMovesBatch<<<grid(l.nControllers * nS), BLOCK, 0, ctx->stream>>>(nS, l.nControllers, firstController, nControllers,
                     l.currentTap->as<int>(), l.memberState != nullptr ? l.memberState->as<int>() : nullptr, l.baseTap->as<int>(),
-                    l.tapStart->as<int>(), l.tapRows->as<double>(), ctx->dClosedBranchParameterOverrideTapMoved.as<char>(),
-                    ctx->dClosedBranchParameterOverridePiModel.as<double>());
+                    l.tapStart->as<int>(), l.tapRows->as<double>(), ctx->scenarioOverrides.dClosedBranchParameterOverrideTapMoved.as<char>(),
+                    ctx->scenarioOverrides.dClosedBranchParameterOverridePiModel.as<double>());
         }
         firstController += l.nControllers;
     }
@@ -184,38 +184,38 @@ void publishClosedBranchParameterOverrides(BatchSolverContext* ctx) {
 
 void publishShuntAdmittanceOverrides(BatchSolverContext* ctx) {
     ensureShuntControllers(ctx);
-    int nControllers = ctx->nShuntAdmittanceOverrideControllers;
+    int nControllers = ctx->scenarioOverrides.nShuntAdmittanceOverrideControllers;
     if (nControllers == 0) return;
     int nS = ctx->nScenarios;
     size_t nsc = static_cast<size_t>(nS) * nControllers;
-    ctx->dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
-    ctx->dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
+    ctx->scenarioOverrides.dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
+    ctx->scenarioOverrides.dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
     publishSectionMovesBatch<<<grid(nControllers * nS), BLOCK, 0, ctx->stream>>>(nS, nControllers, ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators,
             ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionStart.as<int>(),
             ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionG.as<double>(),
             ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.as<int>(),
-            ctx->dShuntAdmittanceOverrideSectionsMoved.as<char>(), ctx->dShuntAdmittanceOverrideControllerDelta.as<double>());
+            ctx->scenarioOverrides.dShuntAdmittanceOverrideSectionsMoved.as<char>(), ctx->scenarioOverrides.dShuntAdmittanceOverrideControllerDelta.as<double>());
 }
 
 ClosedBranchParameterOverrides closedBranchParameterOverrides(BatchSolverContext* ctx) {
     ClosedBranchParameterOverrides o;
-    o.nControllers = ctx->nClosedBranchParameterOverrideControllers;
-    o.elementControllerStart = ctx->dClosedBranchParameterOverrideElementControllerStart.as<int>();
-    o.elementController = ctx->dClosedBranchParameterOverrideElementController.as<int>();
-    o.tapMoved = ctx->dClosedBranchParameterOverrideTapMoved.as<char>();
-    o.piModel = ctx->dClosedBranchParameterOverridePiModel.as<double>();
-    o.caller = ctx->closedBranchParameterOverrides.view();
+    o.nControllers = ctx->scenarioOverrides.nClosedBranchParameterOverrideControllers;
+    o.elementControllerStart = ctx->scenarioOverrides.dClosedBranchParameterOverrideElementControllerStart.as<int>();
+    o.elementController = ctx->scenarioOverrides.dClosedBranchParameterOverrideElementController.as<int>();
+    o.tapMoved = ctx->scenarioOverrides.dClosedBranchParameterOverrideTapMoved.as<char>();
+    o.piModel = ctx->scenarioOverrides.dClosedBranchParameterOverridePiModel.as<double>();
+    o.caller = ctx->scenarioOverrides.closedBranchParameterOverrides.view();
     return o;
 }
 
 ShuntAdmittanceOverrides shuntAdmittanceOverrides(BatchSolverContext* ctx) {
     ShuntAdmittanceOverrides o;
-    o.nControllers = ctx->nShuntAdmittanceOverrideControllers;
-    o.elementControllerStart = ctx->dShuntAdmittanceOverrideElementControllerStart.as<int>();
-    o.elementController = ctx->dShuntAdmittanceOverrideElementController.as<int>();
-    o.sectionsMoved = ctx->dShuntAdmittanceOverrideSectionsMoved.as<char>();
-    o.controllerDelta = ctx->dShuntAdmittanceOverrideControllerDelta.as<double>();
-    o.caller = ctx->shuntAdmittanceOverrides.view();
+    o.nControllers = ctx->scenarioOverrides.nShuntAdmittanceOverrideControllers;
+    o.elementControllerStart = ctx->scenarioOverrides.dShuntAdmittanceOverrideElementControllerStart.as<int>();
+    o.elementController = ctx->scenarioOverrides.dShuntAdmittanceOverrideElementController.as<int>();
+    o.sectionsMoved = ctx->scenarioOverrides.dShuntAdmittanceOverrideSectionsMoved.as<char>();
+    o.controllerDelta = ctx->scenarioOverrides.dShuntAdmittanceOverrideControllerDelta.as<double>();
+    o.caller = ctx->scenarioOverrides.shuntAdmittanceOverrides.view();
     return o;
 }
 

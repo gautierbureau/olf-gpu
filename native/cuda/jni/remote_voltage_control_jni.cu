@@ -137,6 +137,6 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrRhoCoe
         JNIEnv* env, jclass, jlong handle, jintArray jScenarioTerm, jdoubleArray jCoefficient) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distrRhoCoefficientOverrides, jScenarioTerm, jCoefficient);
+        installSlotTable(env, ctx, ctx->scenarioOverrides.distrRhoCoefficientOverrides, jScenarioTerm, jCoefficient);
     }
 }

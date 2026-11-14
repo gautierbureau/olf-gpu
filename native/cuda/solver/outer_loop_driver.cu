@@ -273,7 +273,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.reactiveLimitsAuditLog.assign(drv.reactiveLimitsAuditOn ? nS : 0, {});
     if (traceOn(Trace::BATCH_TRACE) && nS == 1) {
         std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d fullLoadflow=%d\n",
-                     ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->remoteVoltageControl.hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
+                     ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->remoteVoltageControl.hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches, ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.

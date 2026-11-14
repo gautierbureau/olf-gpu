@@ -33,6 +33,36 @@ using namespace powsybl::openloadflow;
 
 namespace olfgpu {
 
+namespace {
+
+// A shunt's inputs in one scenario, handed to update: its conductance and susceptance (the scenario's admittance override
+// applied; a voltage-controlling shunt's susceptance read from the state, a fixed one's kept) and the voltage of its bus.
+template <typename Update>
+__device__ __forceinline__ void withShuntInputs(int e, int s, int n, const double* in, const int* ix, const double* x,
+                                                ShuntAdmittanceOverrides shuntAdmittanceOverrides, Update update) {
+    const double* p = in + e * 2;                            // g b
+    double g = p[0];
+    double b = p[1];
+    applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
+    int bcol = ix[e * 5 + 3];
+    if (bcol >= 0) b = x[(size_t) s * n + bcol];
+    double v = x[(size_t) s * n + ix[e * 5 + 2]];
+    update(g, b, v);
+}
+
+// An HVDC line in AC emulation in one scenario, handed to update: its parameters (p0 k lf1 lf2 r) and the angles of its
+// two converter buses.
+template <typename Update>
+__device__ __forceinline__ void withHvdcInputs(int e, int s, int n, const double* in, const int* ix, const double* x, Update update) {
+    const double* p = in + e * 5;                            // p0 k lf1 lf2 r
+    const int* q = ix + e * 4;
+    const double* xs = x + (size_t) s * n;
+    double ph1 = xs[q[2]], ph2 = xs[q[3]];
+    update(p, ph1, ph2);
+}
+
+}  // namespace
+
 __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
@@ -45,17 +75,10 @@ __global__ void fillShuntBatch(int elementCount, int nScenarios, int n, int nnz,
     int e, s;
     itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 2;                            // g b
-    double g = p[0];
-    double b = p[1];
-    applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
-    // A voltage-controlling shunt (bcol >= 0) reads its susceptance from the per-scenario state vector; a
-    // fixed shunt keeps the packed value (+ any contingency shunt-shift override).
-    int bcol = ix[e * 5 + 3];
-    if (bcol >= 0) b = x[(size_t) s * n + bcol];
-    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[SHUNT_OUTPUT_COUNT];
-    updateShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    withShuntInputs(e, s, n, in, ix, x, shuntAdmittanceOverrides, [&](double g, double b, double v) {
+        updateShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    });
     if (dynamicRelocation) {
         scatterAddRelocated(SHUNT_OUTPUT_COUNT, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout),
@@ -72,12 +95,10 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
     int e, s;
     if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
-    const double* p = in + e * 5;                            // p0 k lf1 lf2 r
-    const int* q = ix + e * 4;
-    const double* xs = x + (size_t) s * n;
-    double ph1 = xs[q[2]], ph2 = xs[q[3]];
     double o[HVDC_AC_EMULATION_OUTPUT_COUNT];
-    updateHvdcAcEmulation(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
+    withHvdcInputs(e, s, n, in, ix, x, [&](const double* p, double ph1, double ph2) {
+        updateHvdcAcEmulation(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
+    });
     if (dynamicRelocation) {
         scatterAddRelocated(HVDC_AC_EMULATION_OUTPUT_COUNT, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout), ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);
@@ -134,15 +155,10 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                ReactiveRelocationTables rt, BatchLayout layout) {
     int e, s;
     if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
-    const double* p = in + e * 2;                            // g b
-    double g = p[0];
-    double b = p[1];
-    applyShuntOverride(shuntAdmittanceOverrides, s, e, g, b);
-    int bcol = ix[e * 5 + 3];
-    if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
-    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[2];
-    updateShuntWithoutDerivatives(v, g, b, 0, o + 0, o + 1);
+    withShuntInputs(e, s, n, in, ix, x, shuntAdmittanceOverrides, [&](double g, double b, double v) {
+        updateShuntWithoutDerivatives(v, g, b, 0, o + 0, o + 1);
+    });
     const int pos[2] = {0, 2};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
@@ -159,12 +175,10 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
                                const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
     int e, s;
     if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
-    const double* p = in + e * 5;                            // p0 k lf1 lf2 r
-    const int* q = ix + e * 4;
-    const double* xs = x + (size_t) s * n;
-    double ph1 = xs[q[2]], ph2 = xs[q[3]];
     double o[2];
-    updateHvdcAcEmulationWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
+    withHvdcInputs(e, s, n, in, ix, x, [&](const double* p, double ph1, double ph2) {
+        updateHvdcAcEmulationWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
+    });
     const int pos[2] = {0, 3};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,

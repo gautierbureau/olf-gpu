@@ -352,15 +352,15 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
     // Per-scenario shunt admittance overrides (section shifts / reconnection), PACK-indexed elements (shunt family
     // index, not the global element index).
     installShuntAdmittanceOverrides(ctx, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta);
-    ctx->nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
+    ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
     if (ctx->nZeroImpedanceBranch > 0) {                                      // the dense (slot, element) forms (see zeroImpedanceBranchOpenMask)
         const size_t width = static_cast<size_t>(ctx->nZeroImpedanceBranch);
-        ctx->zeroImpedanceBranchOpenMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchOpenOverrides,
+        ctx->scenarioOverrides.zeroImpedanceBranchOpenMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchOpenOverrides,
                                                         zeroImpedanceBranchOpenScenarioElement, nullptr, 1);
-        ctx->zeroImpedanceBranchCloseMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchCloseOverrides,
+        ctx->scenarioOverrides.zeroImpedanceBranchCloseMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchCloseOverrides,
                                                          zeroImpedanceBranchCloseScenarioElement, nullptr, 1);
-        if (ctx->spanningTreeOverrideMask.width() != width) {   // no tree override installed yet: the extraction's tree
-            ctx->spanningTreeOverrideMask.installEntries(nS, {}, width, 0, nullptr, nullptr);
+        if (ctx->scenarioOverrides.spanningTreeOverrideMask.width() != width) {   // no tree override installed yet: the extraction's tree
+            ctx->scenarioOverrides.spanningTreeOverrideMask.installEntries(nS, {}, width, 0, nullptr, nullptr);
         }
         if (traceOn(Trace::PHASE_TIME)) {
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);

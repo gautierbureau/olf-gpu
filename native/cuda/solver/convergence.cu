@@ -89,13 +89,13 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
 void readNormsBatch(BatchSolverContext* ctx, DriverPass& drv, std::vector<double>& hn) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
-            ctx->perRowCriteria ? ctx->dFixedVariableRowMaxMismatch.as<double>() : nullptr,
-            ctx->perRowCriteria ? ctx->dEquationRowMaxMismatch.as<double>() : nullptr, ctx->dMode.as<int>(),
-            ctx->perRowCriteria && ctx->perRowAlternateCriteria ? ctx->dAlternateRowMaxMismatch.as<double>() : nullptr,
-            ctx->perRowCriteria && ctx->perRowAlternateCriteria ? ctx->dAlternateRowMaxMismatchSelector.as<int>() : nullptr);
+    residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->newtonRaphson.dNorms.as<double>(),
+            ctx->newtonRaphson.perRowCriteria ? ctx->newtonRaphson.dFixedVariableRowMaxMismatch.as<double>() : nullptr,
+            ctx->newtonRaphson.perRowCriteria ? ctx->newtonRaphson.dEquationRowMaxMismatch.as<double>() : nullptr, ctx->dMode.as<int>(),
+            ctx->newtonRaphson.perRowCriteria && ctx->newtonRaphson.perRowAlternateCriteria ? ctx->newtonRaphson.dAlternateRowMaxMismatch.as<double>() : nullptr,
+            ctx->newtonRaphson.perRowCriteria && ctx->newtonRaphson.perRowAlternateCriteria ? ctx->newtonRaphson.dAlternateRowMaxMismatchSelector.as<int>() : nullptr);
     hn.resize(static_cast<size_t>(nS) * 4);
-    CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hn.data(), ctx->newtonRaphson.dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
 }
 
 }  // namespace olfgpu

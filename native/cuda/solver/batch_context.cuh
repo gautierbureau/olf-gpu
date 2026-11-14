@@ -39,6 +39,7 @@
 #include "context/monitoring_voltage_context.cuh"
 #include "context/generator_voltage_control_freeze_context.cuh"
 #include "context/forced_target_q_context.cuh"
+#include "context/hvdc_ac_emulation_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -260,18 +261,7 @@ struct BatchSolverContext {
     // main's own).
     SlotTable reMergedVoltageTargets{3, 1, {{sizeof(int), 0xFF}}};
     SlotTable reMergedVoltageTargetControllers{1, 0};
-    // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
-    // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
-    // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
-    // what put the device's last DS check on a state before the PV -> PQ switches.
-    int nHvdcAcEmulation = 0;                                             // AC-emulation HVDCs in the loop tables
-    int hvdcAcEmulationLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
-    DeviceBuf dHvdcElement, dHvdcBus1PRow, dHvdcBus2PRow;               // per hvdc: the rows the P TARGETS are written to
-    DeviceBuf dHvdcBus1PhiColumn, dHvdcBus2PhiColumn;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
-    DeviceBuf dHvdcAcEmulationParameters;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
-    SlotRows<char> hvdcContingencyOutage{0};                              // per (slot, hvdc): outaged BY the contingency
-    SlotRows<int> hvdcAcEmulationStatus{0};                               // per (slot, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
-    SlotRows<double> hvdcAppliedDelta1{0.0}, hvdcAppliedDelta2{0.0};     // the converter-row delta currently APPLIED
+    HvdcAcEmulationContext hvdcAcEmulation;
     CudssCtx solver;
     bool analyzed = false;
     int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,

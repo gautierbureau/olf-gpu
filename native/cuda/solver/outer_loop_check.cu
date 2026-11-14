@@ -110,12 +110,12 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
                 shuntAdmittanceOverrides(ctx));
     }
     // a link on the slack bus, as OLF's slack mismatch sees it: read by the DistributedSlack check alone
-    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->distributedSlack.slackBusPhiRow >= 0) {
-        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->distributedSlack.slackBusPhiRow,
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->hvdcAcEmulation.nHvdcAcEmulation > 0 && ctx->distributedSlack.slackBusPhiRow >= 0) {
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->hvdcAcEmulation.nHvdcAcEmulation, n, ctx->nElements, ctx->distributedSlack.slackBusPhiRow,
                 ctx->distributedSlack.slackBusRowOverride.deviceOrNull(),
-                ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
-                ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulationStatus.device(),
-                ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(), ctx->hvdcContingencyOutage.device(),
+                ctx->hvdcAcEmulation.dHvdcBus1PRow.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PRow.as<int>(), ctx->hvdcAcEmulation.dHvdcBus1PhiColumn.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PhiColumn.as<int>(),
+                ctx->hvdcAcEmulation.dHvdcElement.as<int>(), ctx->hvdcAcEmulation.dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulation.hvdcAcEmulationStatus.device(),
+                ctx->hvdcAcEmulation.hvdcAppliedDelta1.device(), ctx->hvdcAcEmulation.hvdcAppliedDelta2.device(), ctx->hvdcAcEmulation.hvdcContingencyOutage.device(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS * sizeof(char), ctx->stream));

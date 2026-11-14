@@ -20,9 +20,9 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nIncrementalFlowControlControllerBranches = 0;
-    ctx->nIncrementalPhaseControlControllerBranches = 0;
-    ctx->nIncrementalTransformerReactivePowerControlControllerBranches = 0;
+    ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches = 0;
+    ctx->incrementalFlowControl.nIncrementalPhaseControlControllerBranches = 0;
+    ctx->incrementalFlowControl.nIncrementalTransformerReactivePowerControlControllerBranches = 0;
     if (jKind == nullptr || env->GetArrayLength(jKind) == 0) {
         return 0;
     }
@@ -36,49 +36,49 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchFlowControllers)(
     };
     std::vector<int> tapColumn, side, controlledElement, maxShift;
     std::vector<double> targetValue, halfTargetDeadband;
-    readI(jKind, ctx->hIncrementalFlowControlControlledFlow);
-    readI(jTargetRow, ctx->hIncrementalFlowControlTargetRow);
+    readI(jKind, ctx->incrementalFlowControl.hIncrementalFlowControlControlledFlow);
+    readI(jTargetRow, ctx->incrementalFlowControl.hIncrementalFlowControlTargetRow);
     readI(jTapColumn, tapColumn);
     readI(jSide, side);
     readD(jTargetValue, targetValue);
     readD(jHalfTargetDeadband, halfTargetDeadband);
-    readI(jElem, ctx->hIncrementalFlowControlElement);
+    readI(jElem, ctx->incrementalFlowControl.hIncrementalFlowControlElement);
     readI(jControlledElement, controlledElement);
-    readI(jTapStart, ctx->hIncrementalFlowControlTapStart);
-    readD(jTapRows, ctx->hIncrementalFlowControlTapRows);
-    readI(jBaseTap, ctx->hIncrementalFlowControlBaseTap);
+    readI(jTapStart, ctx->incrementalFlowControl.hIncrementalFlowControlTapStart);
+    readD(jTapRows, ctx->incrementalFlowControl.hIncrementalFlowControlTapRows);
+    readI(jBaseTap, ctx->incrementalFlowControl.hIncrementalFlowControlBaseTap);
     readI(jMaxTapShift, maxShift);
-    int nc = static_cast<int>(ctx->hIncrementalFlowControlControlledFlow.size());
+    int nc = static_cast<int>(ctx->incrementalFlowControl.hIncrementalFlowControlControlledFlow.size());
     std::vector<int> controlledClosedBranch(nc);
     for (int c = 0; c < nc; c++) {
         controlledClosedBranch[c] = controlledElement[c] - ctx->closedBranchOffset;             // the controlled branch's index in the closed-branch pack
         if (controlledClosedBranch[c] < 0 || controlledClosedBranch[c] >= ctx->structure->closedBranch.elementCount) {
             return 0;                                        // not a closed branch: the host orchestrator keeps it
         }
-        if (ctx->hIncrementalFlowControlControlledFlow[c] == GpuControlledFlow::REACTIVE_POWER) ctx->nIncrementalTransformerReactivePowerControlControllerBranches++; else ctx->nIncrementalPhaseControlControllerBranches++;
+        if (ctx->incrementalFlowControl.hIncrementalFlowControlControlledFlow[c] == GpuControlledFlow::REACTIVE_POWER) ctx->incrementalFlowControl.nIncrementalTransformerReactivePowerControlControllerBranches++; else ctx->incrementalFlowControl.nIncrementalPhaseControlControllerBranches++;
     }
-    ctx->dIncrementalFlowControlControlledFlow.upload(ctx->hIncrementalFlowControlControlledFlow.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlTargetRow.upload(ctx->hIncrementalFlowControlTargetRow.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlTapColumn.upload(tapColumn.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlControlledSide.upload(side.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlTargetValue.upload(targetValue.data(), nc * sizeof(double));
-    ctx->dIncrementalFlowControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
-    ctx->dIncrementalFlowControlElement.upload(ctx->hIncrementalFlowControlElement.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlControlledClosedBranch.upload(controlledClosedBranch.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlTapStart.upload(ctx->hIncrementalFlowControlTapStart.data(), ctx->hIncrementalFlowControlTapStart.size() * sizeof(int));
-    ctx->dIncrementalFlowControlTapRows.upload(ctx->hIncrementalFlowControlTapRows.data(), ctx->hIncrementalFlowControlTapRows.size() * sizeof(double));
-    ctx->dIncrementalFlowControlBaseTap.upload(ctx->hIncrementalFlowControlBaseTap.data(), nc * sizeof(int));
-    ctx->dIncrementalFlowControlMaxTapShift.upload(maxShift.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlControlledFlow.upload(ctx->incrementalFlowControl.hIncrementalFlowControlControlledFlow.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlTargetRow.upload(ctx->incrementalFlowControl.hIncrementalFlowControlTargetRow.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlTapColumn.upload(tapColumn.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlControlledSide.upload(side.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlTargetValue.upload(targetValue.data(), nc * sizeof(double));
+    ctx->incrementalFlowControl.dIncrementalFlowControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
+    ctx->incrementalFlowControl.dIncrementalFlowControlElement.upload(ctx->incrementalFlowControl.hIncrementalFlowControlElement.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlControlledClosedBranch.upload(controlledClosedBranch.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlTapStart.upload(ctx->incrementalFlowControl.hIncrementalFlowControlTapStart.data(), ctx->incrementalFlowControl.hIncrementalFlowControlTapStart.size() * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlTapRows.upload(ctx->incrementalFlowControl.hIncrementalFlowControlTapRows.data(), ctx->incrementalFlowControl.hIncrementalFlowControlTapRows.size() * sizeof(double));
+    ctx->incrementalFlowControl.dIncrementalFlowControlBaseTap.upload(ctx->incrementalFlowControl.hIncrementalFlowControlBaseTap.data(), nc * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlMaxTapShift.upload(maxShift.data(), nc * sizeof(int));
     size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
-    ctx->dIncrementalFlowControlCurrentTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalFlowControlAppliedTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalFlowControlCurrentDirection.ensure(nst * sizeof(int));
-    ctx->dIncrementalFlowControlDirectionChangeCount.ensure(nst * sizeof(int));
-    ctx->dIncrementalFlowControlAllowedDirection.ensure(nst * sizeof(int));
-    ctx->dIncrementalFlowControlSensitivity.ensure(nst * sizeof(double));
-    ctx->dIncrementalFlowControlDiff.ensure(nst * sizeof(double));
-    ctx->dIncrementalFlowControlOutOfDeadband.ensure(nst * sizeof(char));
-    ctx->nIncrementalFlowControlControllerBranches = nc;
+    ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.ensure(nst * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlAppliedTap.ensure(nst * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlCurrentDirection.ensure(nst * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlDirectionChangeCount.ensure(nst * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlAllowedDirection.ensure(nst * sizeof(int));
+    ctx->incrementalFlowControl.dIncrementalFlowControlSensitivity.ensure(nst * sizeof(double));
+    ctx->incrementalFlowControl.dIncrementalFlowControlDiff.ensure(nst * sizeof(double));
+    ctx->incrementalFlowControl.dIncrementalFlowControlOutOfDeadband.ensure(nst * sizeof(char));
+    ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches = nc;
     return 1;
 }
 
@@ -86,11 +86,11 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, PhaseControlNative, readBatchFlowTaps)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nIncrementalFlowControlControllerBranches <= 0 || !ctx->dIncrementalFlowControlCurrentTap.p) {
+    if (ctx == nullptr || ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches <= 0 || !ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.p) {
         return nullptr;
     }
     std::vector<int> host;
-    readInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentTap.p, static_cast<size_t>(ctx->nIncrementalFlowControlControllerBranches), host);
+    readInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.p, static_cast<size_t>(ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches), host);
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

@@ -161,20 +161,20 @@ __global__ void incrementalFlowControlApplyBatch(int nIncrementalFlowControlCont
 
 // Per-solve reset. Incremental flow control: base taps, fresh ratchets.
 void incrementalFlowControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
-    const size_t nc = static_cast<size_t>(ctx->nIncrementalFlowControlControllerBranches);
-    const int* baseTap = ctx->hIncrementalFlowControlBaseTap.data();
-    resetInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentTap.as<int>(), nc, baseTap);
-    resetInstalledRows(ctx, ctx->dIncrementalFlowControlAppliedTap.as<int>(), nc, baseTap);
-    resetInstalledRows(ctx, ctx->dIncrementalFlowControlCurrentDirection.as<int>(), nc, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalFlowControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalFlowControlAllowedDirection.as<int>(), nc, nullptr, 0);
+    const size_t nc = static_cast<size_t>(ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches);
+    const int* baseTap = ctx->incrementalFlowControl.hIncrementalFlowControlBaseTap.data();
+    resetInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlAppliedTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlCurrentDirection.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalFlowControl.dIncrementalFlowControlAllowedDirection.as<int>(), nc, nullptr, 0);
 }
 
 void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int kindMask) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     std::vector<char>& active = drv.active;
-    int nF = ctx->nIncrementalFlowControlControllerBranches;
+    int nF = ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches;
     if (nF <= 0) return;
     if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
             && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
@@ -184,13 +184,13 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
     }
     size_t nst = static_cast<size_t>(nS) * nF;
     incrementalFlowControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->closedBranchOffset, kindMask,
-            ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlTargetValue.as<double>(), ctx->dIncrementalFlowControlHalfTargetDeadband.as<double>(),
-            ctx->dIncrementalFlowControlElement.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlControlledFlow.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlControlledSide.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTargetValue.as<double>(), ctx->incrementalFlowControl.dIncrementalFlowControlHalfTargetDeadband.as<double>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlElement.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlControlledClosedBranch.as<int>(),
             ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), closedBranchParameterOverrides(ctx),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-            ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>());
+            ctx->incrementalFlowControl.dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->incrementalFlowControl.dIncrementalFlowControlDiff.as<double>());
     std::vector<char> outOfDeadband(nst);
-    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->dIncrementalFlowControlOutOfDeadband.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->incrementalFlowControl.dIncrementalFlowControlOutOfDeadband.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> needC(nF, 0);
     bool any = false;
@@ -199,35 +199,35 @@ void incrementalFlowControlStep(BatchSolverContext* ctx, DriverPass& drv, int ki
     std::vector<char> ones(nS, 1);
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
     fillActiveBatch(ctx, drv, false);
-    CUDA_CHECK(cudaMemsetAsync(ctx->dIncrementalFlowControlSensitivity.p, 0, nst * sizeof(double), ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->incrementalFlowControl.dIncrementalFlowControlSensitivity.p, 0, nst * sizeof(double), ctx->stream));
     bool first = true;
     for (int c = 0; c < nF; c++) {
         if (!needC[c]) continue;
-        int row = ctx->structure->rowMap[ctx->hIncrementalFlowControlTargetRow[c]];
+        int row = ctx->structure->rowMap[ctx->incrementalFlowControl.hIncrementalFlowControlTargetRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
         incrementalFlowControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->closedBranchOffset,
-                ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlControlledSide.as<int>(), ctx->dIncrementalFlowControlControlledClosedBranch.as<int>(),
+                ctx->incrementalFlowControl.dIncrementalFlowControlControlledFlow.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlControlledSide.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlControlledClosedBranch.as<int>(),
                 ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), closedBranchParameterOverrides(ctx),
-                ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>());
+                ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->incrementalFlowControl.dIncrementalFlowControlSensitivity.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
     incrementalFlowControlDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
-            ctx->dIncrementalFlowControlControlledFlow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(), ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlMaxTapShift.as<int>(),
-            ctx->dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->dIncrementalFlowControlDiff.as<double>(), ctx->dIncrementalFlowControlSensitivity.as<double>(),
-            ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlCurrentDirection.as<int>(), ctx->dIncrementalFlowControlDirectionChangeCount.as<int>(), ctx->dIncrementalFlowControlAllowedDirection.as<int>(), ctx->dOuterLoopUnstable.as<char>());
-    incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dIncrementalFlowControlTargetRow.as<int>(), ctx->dIncrementalFlowControlTapColumn.as<int>(),
-            ctx->dIncrementalFlowControlTapStart.as<int>(), ctx->dIncrementalFlowControlTapRows.as<double>(), ctx->dIncrementalFlowControlCurrentTap.as<int>(), ctx->dIncrementalFlowControlAppliedTap.as<int>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlControlledFlow.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTapColumn.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTapStart.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTapRows.as<double>(), ctx->incrementalFlowControl.dIncrementalFlowControlMaxTapShift.as<int>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlOutOfDeadband.as<char>(), ctx->incrementalFlowControl.dIncrementalFlowControlDiff.as<double>(), ctx->incrementalFlowControl.dIncrementalFlowControlSensitivity.as<double>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlCurrentDirection.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlDirectionChangeCount.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlAllowedDirection.as<int>(), ctx->dOuterLoopUnstable.as<char>());
+    incrementalFlowControlApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->incrementalFlowControl.dIncrementalFlowControlTargetRow.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTapColumn.as<int>(),
+            ctx->incrementalFlowControl.dIncrementalFlowControlTapStart.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlTapRows.as<double>(), ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.as<int>(), ctx->incrementalFlowControl.dIncrementalFlowControlAppliedTap.as<int>(),
             ctx->dTarget.as<double>(), ctx->dX.as<double>());
     publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalFlowControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
         for (char c : outOfDeadband) nOut += c ? 1 : 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hIncrementalFlowControlBaseTap[c]) nMoved++;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->incrementalFlowControl.hIncrementalFlowControlBaseTap[c]) nMoved++;
         std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d\n", kindMask, nS, nF, nOut, nMoved);
     }
 }

@@ -263,7 +263,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0) {
         shuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nIncrementalFlowControlControllerBranches > 0) {
+    if (ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches > 0) {
         incrementalFlowControlResetSolve(ctx, drv);
     }
     if (ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0) {

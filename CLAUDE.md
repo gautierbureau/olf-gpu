@@ -16,7 +16,9 @@ needs (currently ONE 4-line `PropagatedContingency.getShuntIdsToShift()` commit,
 candidate upstream PR). Rebuild the dependency after changing it:
 `cd ../powsybl-open-loadflow-3 && mvn -s ~/Projects/powsybl/tmp/settings.xml
 -DskipTests -Dcheckstyle.skip -Dmaven.javadoc.skip -Dlicense.skip install`.
-It is also what `OLF_SRC` points at for the codegen parse. Never build the
+It is also what `OLF_SRC` points at for the codegen parse. **Since the core 7.4.0 port** the dependency is
+`2.4.1-SNAPSHOT` instead, built from the fork's `gb/release-2.4.1-gpu-api` (2.4.0 release + the
+extension points only); point `OLF_SRC` at that branch. Never build the
 dependency from `olf_gpu` — its jar would duplicate this project's classes. GPU classes live in
 `com.powsybl.openloadflow.*` SPLIT packages (classpath access to OLF internals);
 `CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's
@@ -167,9 +169,10 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   explicit ask. **Never `origin`** (upstream powsybl). `test6` was the earlier target. This repo's code calls
   fork-only API (setValuesOnly, getSortedVariablesToFindOnly, ...), so push the fork with it.
 - powsybl-math-native (`~/Projects/powsybl/powsybl-math-native-1`, branch
-  `cudss_solver_1`) holds only the cuDSS JNI bindings (libmathcudss); powsybl-core
-  (`~/Projects/powsybl/powsybl-core-1`, branch `cudss_factory`) holds
-  CuDssMatrixFactory. Everything GPU/codegen lives HERE.
+  `cudss_solver_1`) holds only the cuDSS JNI bindings (libmathcudss). cuDSS is never in
+  powsybl-core: this project builds on the released core 7.4.0 and carries
+  `CuDssMatrixFactory`/`CuDssLUDecomposition` itself, in the `com.powsybl.math.matrix` split
+  package (the JNI symbols name it). Everything GPU/codegen lives HERE.
 - Builds use the isolated repo: `mvn -s ~/Projects/powsybl/tmp/settings.xml ...`
   (never the shared ~/.m2; do not use `-o`).
 

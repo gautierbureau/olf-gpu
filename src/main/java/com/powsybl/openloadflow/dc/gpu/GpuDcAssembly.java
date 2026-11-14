@@ -225,6 +225,22 @@ public final class GpuDcAssembly {
     }
 
     /** The reference generator's index in {@link #generators()}, or -1. */
+    /**
+     * The buses whose P target is an exact +0.0 that no contingency or action changes the value of: no generator, no load,
+     * not slack, no right-hand side term (DcTargetVector.init: 0.0 - 0.0 - 0.0). Zeroing their row changes nothing.
+     */
+    public boolean[] busesWithZeroPTarget() {
+        boolean[] zero = new boolean[busFlags.length];
+        for (int c = 0; c < targetKind.length; c++) {
+            if (targetKind[c] == TARGET_BUS_P) {
+                int b = targetElem[c];
+                zero[b] = rhsPtr[c] == rhsPtr[c + 1] && busGenStart[b] == busGenStart[b + 1] && busLoadTargetP[b] == 0
+                        && (busFlags[b] & BUS_SLACK) == 0;
+            }
+        }
+        return zero;
+    }
+
     public int referenceGeneratorIndex() {
         return referenceGenerator;
     }

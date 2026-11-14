@@ -197,7 +197,7 @@ struct DcContext {
     Buf genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, genPart;
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf ctTargets, ctWsDouble, ctWsInt, ctDsOut;                   // modified target columns of a chunk and their workspace
-    Buf ctCompact, ctMap;                                           // the distinct columns built, and each column's one
+    Buf ctInjection, ctInjOf;                                       // the distinct injection columns, each distinct column's one
     Buf genBus;                                                     // each generator's bus (the warp kernels walk generators)
     int genBusBuilt = -1;
     Buf ctExPtr, ctExBus, ctLdPtr, ctLdBus, ctLdVal, ctLgPtr, ctLgGen, ctHzPtr, ctHzGen, ctZrPtr, ctZrCol;
@@ -448,6 +448,10 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
         int bi = elemBranch[ei];
         int p1 = ph1Row[bi];
         int p2 = ph2Row[bi];
+        if (p1 < 0 || p2 < 0) {
+            bad[c] = 2;                                      // an element on a bus without an angle row: never read x[-1]
+            return;
+        }
         rhs[i] = x[p1] - x[p2] + elemNewAlpha[ei];           // getAlphaRhsValue: ph1 - ph2 + the tap action's new alpha
         for (int j = 0; j < k; j++) {
             int ej = ctgElem[start + j];
@@ -1011,6 +1015,10 @@ constexpr unsigned FULL_WARP = 0xffffffffu;
  * An ordered fold by one warp: term(i) for i in [0, count) computed by the lanes 32 at a time (coalesced), then folded
  * by lane 0 in index order through shuffles (fold(acc, x) on the valid terms only): the sequential loop's operations, in
  * its order. The result is broadcast to the warp.
+ *
+ * A plain sum (fold = __dadd_rn) may drop its zero terms: a + (+-0.0) == a for every a, but the sign of a zero a, and
+ * the accumulator starting at +0.0 is never -0.0 (an exact zero sum of non-zero terms rounds to +0.0, -0.0 + -0.0 needs
+ * a -0.0 already). The terms below say so by returning false for a zero (most buses carry no injection).
  */
 template <typename Acc, typename Term, typename Fold>
 __device__ Acc warpOrderedFold(int count, Acc acc, Term term, Fold fold) {
@@ -1085,7 +1093,7 @@ __device__ void distributeSlackWarp(int nBuses, int nGen, const int* busFlags, c
         }
         x = -__dadd_rn(w.genInit[g], -w.genTarget[g]);
         w.genTarget[g] = w.genInit[g];
-        return true;
+        return x != 0.0;                                     // a generator back at its initial target adds nothing
     }, [](double acc, double x) { return __dadd_rn(acc, x); });
     __syncwarp();
     double remaining = warpBroadcast(lane == 0 ? __dadd_rn(mismatch, __dadd_rn(stepPrevious, refPrevious)) : 0.0);
@@ -1267,7 +1275,7 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
                 s = __dadd_rn(s, w.genTarget[g]);
             }
             x = __dadd_rn(s, -w.loadP[b]);
-            return true;
+            return x != 0.0;                                 // a bus without injection adds nothing
         }, [](double acc, double x) { return __dadd_rn(acc, x); });
         double mismatch = warpBroadcast(lane == 0 ? -sum : 0.0);
         distributeSlackWarp(nBuses, nGen, busFlags, genBus, w, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, refGen, type,
@@ -1291,7 +1299,7 @@ __global__ void ctgTargetsPrepare(int cols, int nBuses, int nGen, int nSc, const
                 return false;
             }
             x = __dadd_rn(w.genP[b], -w.loadP[b]);
-            return true;
+            return x != 0.0;
         }, [](double acc, double x) { return __dadd_rn(acc, x); });
         if (lane == 0) {
             w.scMismatch[sc] = -sum;
@@ -1318,7 +1326,7 @@ __global__ void ctgFillTargets(int n, int cols, int nBuses, int nGen, int nSc, c
 
 /** The rows the stock zeroes (islanded buses' P, disabled branches' alpha), then an operator strategy's edits in the
  *  stock's order (WoodburyEngine.runDcLoadFlowWithModifiedTargetVector's actions part): kind 0 sets the row, 1 adds. */
-/** Each column from its distinct one (columns with no injection change share the plain column). */
+/** Each column from its injection column (the columns sharing their injection changes share its targets). */
 __global__ void ctgExpand(int n, int cols, const int* map, const double* compact, double* out) {
     long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= (long) n * cols) {
@@ -2121,7 +2129,7 @@ void uploadVec(Buf& buf, const void* p, size_t bytes) {
  * jOutTargets, when non-null, receives the built targets (n x nBases, column-major): the bitwise check
  * against the host build.
  */
-JNIEXPORT void JNICALL
+JNIEXPORT jintArray JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, jclass, jlong handle, jint nBases,
                                                                    jintArray jExPtr, jintArray jExBus, jintArray jLdPtr, jintArray jLdBus,
                                                                    jdoubleArray jLdVal, jintArray jLgPtr, jintArray jLgGen,
@@ -2133,9 +2141,9 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                                                                    jint referenceGenerator, jdoubleArray jOutTargets) {
     DcContext* ctx = ctxOf(handle);
     try {
-        ctx->nBases = nBases;
+        ctx->nBases = 0;
         if (nBases == 0) {
-            return;
+            return env->NewIntArray(0);
         }
         requireBusesAndGenerators(ctx);
         if (ctx->power.p == nullptr) {
@@ -2152,19 +2160,29 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         IntArray exPtr(env, jExPtr), exBus(env, jExBus), ldPtr(env, jLdPtr), ldBus(env, jLdBus), lgPtr(env, jLgPtr), lgGen(env, jLgGen),
                 hzPtr(env, jHzPtr), hzGen(env, jHzGen), goPtr(env, jGoPtr), goGen(env, jGoGen), goPart(env, jGoPart);
         DoubleArray ldVal(env, jLdVal), goTarget(env, jGoTarget), goInit(env, jGoInit);
-        for (IntArray* list : {&exPtr, &ldPtr, &lgPtr, &hzPtr, &goPtr}) {
+        IntArray zrPtr(env, jZrPtr), zrCol(env, jZrCol), edPtr(env, jEdPtr), edRow(env, jEdRow), edKind(env, jEdKind);
+        DoubleArray edVal(env, jEdVal);
+        for (IntArray* list : {&exPtr, &ldPtr, &lgPtr, &hzPtr, &goPtr, &zrPtr, &edPtr}) {
             if (list->len != cols + 1) {
                 throw std::runtime_error("malformed column list");
             }
         }
         std::vector<int> map(cols);
-        CompactCsr cEx, cLd, cLg, cHz, cGo;
+        CompactCsr cEx, cLd, cLg, cHz, cGo, cZr, cEd;
+        std::vector<int> cEdKind;
+        std::vector<double> cEdVal;
         std::vector<double> cLdVal, cGoTarget, cGoInit;
         std::vector<int> cGoPart;
         // columns with the same changes (none: a topological strategy; the same contingency's lost power and no
         // injection action: its strategies) share their distinct column
+        // two levels: the injection changes key the slack distribution and the target vector (prepared and filled
+        // once per distinct injection set), the zeroed rows and edits on top key the solved column (copied from its
+        // injection column, edited, solved once per distinct full column)
         std::map<std::vector<int64_t>, int> distinctOf;
+        std::map<std::vector<int64_t>, int> injectionOf;
+        std::vector<int> injectionOfDistinct;
         int distinct = 0;
+        int injections = 0;
         for (int j = 0; j < cols; j++) {
             std::vector<int64_t> key;
             auto addInts = [&key, j](const IntArray& ptr, const IntArray& val) {
@@ -2191,6 +2209,14 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
             for (int k = goPtr.p[j]; k < goPtr.p[j + 1]; k++) {
                 key.push_back(goPart.p[k]);
             }
+            std::vector<int64_t> injectionKey = key;
+            // and the rows the column zeroes or edits: columns equal in every respect are built and solved once
+            addInts(zrPtr, zrCol);
+            addInts(edPtr, edRow);
+            for (int k = edPtr.p[j]; k < edPtr.p[j + 1]; k++) {
+                key.push_back(edKind.p[k]);
+            }
+            addDoubles(edPtr, edVal);
             auto found = distinctOf.find(key);
             if (found != distinctOf.end()) {
                 map[j] = found->second;
@@ -2198,6 +2224,19 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
             }
             map[j] = distinct++;
             distinctOf.emplace(std::move(key), map[j]);
+            cZr.addFrom(zrPtr.p, zrCol.p, j);
+            cEd.addFrom(edPtr.p, edRow.p, j);
+            for (int k = edPtr.p[j]; k < edPtr.p[j + 1]; k++) {
+                cEdKind.push_back(edKind.p[k]);
+                cEdVal.push_back(edVal.p[k]);
+            }
+            auto foundInjection = injectionOf.find(injectionKey);
+            if (foundInjection != injectionOf.end()) {
+                injectionOfDistinct.push_back(foundInjection->second);
+                continue;
+            }
+            injectionOfDistinct.push_back(injections);
+            injectionOf.emplace(std::move(injectionKey), injections++);
             cEx.addFrom(exPtr.p, exBus.p, j);
             cLd.addFrom(ldPtr.p, ldBus.p, j);
             for (int k = ldPtr.p[j]; k < ldPtr.p[j + 1]; k++) {
@@ -2212,6 +2251,20 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 cGoPart.push_back(goPart.p[k]);
             }
         }
+        auto check = [](const std::vector<int>& v, int bound, const char* what) {
+            for (int x : v) {
+                if (x < 0 || x >= bound) {
+                    throw std::runtime_error(std::string(what) + " out of range: " + std::to_string(x) + " (bound " + std::to_string(bound) + ")");
+                }
+            }
+        };
+        check(cEx.val, ctx->nBuses, "excluded bus");
+        check(cLd.val, ctx->nBuses, "load bus");
+        check(cLg.val, ctx->nGen, "lost generator");
+        check(cHz.val, ctx->nGen, "HVDC station");
+        check(cGo.val, ctx->nGen, "generator action");
+        check(cZr.val, n, "zeroed row");
+        check(cEd.val, n, "edited row");
         uploadVec(ctx->ctExPtr, cEx.ptr.data(), cEx.ptr.size() * sizeof(int));
         uploadVec(ctx->ctExBus, cEx.val.data(), cEx.val.size() * sizeof(int));
         uploadVec(ctx->ctLdPtr, cLd.ptr.data(), cLd.ptr.size() * sizeof(int));
@@ -2226,27 +2279,26 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
         uploadVec(ctx->ctGoTarget, cGoTarget.data(), cGoTarget.size() * sizeof(double));
         uploadVec(ctx->ctGoInit, cGoInit.data(), cGoInit.size() * sizeof(double));
         uploadVec(ctx->ctGoPart, cGoPart.data(), cGoPart.size() * sizeof(int));
-        uploadVec(ctx->ctMap, map.data(), map.size() * sizeof(int));
-        uploadCsr(env, ctx->ctZrPtr, ctx->ctZrCol, jZrPtr, jZrCol, cols, "zeroed rows");
-        uploadCsr(env, ctx->ctEdPtr, ctx->ctEdRow, jEdPtr, jEdRow, cols, "row edits");
-        {
-            IntArray edKind(env, jEdKind);
-            DoubleArray edVal(env, jEdVal);
-            ctx->ctEdKind.uploadInto(edKind.p, (size_t) std::max<jsize>(edKind.len, 1) * sizeof(int));
-            ctx->ctEdVal.uploadInto(edVal.p, (size_t) std::max<jsize>(edVal.len, 1) * sizeof(double));
-        }
+        uploadVec(ctx->ctInjOf, injectionOfDistinct.data(), injectionOfDistinct.size() * sizeof(int));
+        uploadVec(ctx->ctZrPtr, cZr.ptr.data(), cZr.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctZrCol, cZr.val.data(), cZr.val.size() * sizeof(int));
+        uploadVec(ctx->ctEdPtr, cEd.ptr.data(), cEd.ptr.size() * sizeof(int));
+        uploadVec(ctx->ctEdRow, cEd.val.data(), cEd.val.size() * sizeof(int));
+        uploadVec(ctx->ctEdKind, cEdKind.data(), cEdKind.size() * sizeof(int));
+        uploadVec(ctx->ctEdVal, cEdVal.data(), cEdVal.size() * sizeof(double));
         int scWidth = ctx->nSc > 0 ? ctx->nSc : 1;
         size_t dStride = (size_t) 3 * ctx->nGen + 2 * (size_t) ctx->nBuses + scWidth;
         size_t iStride = (size_t) 2 * ctx->nGen + ctx->nBuses;
-        bool compacted = distinct < cols;
-        ctx->ctWsDouble.ensure(dStride * distinct * sizeof(double));
-        ctx->ctWsInt.ensure(std::max<size_t>(iStride * distinct, 1) * sizeof(int));
-        ctx->ctDsOut.ensure((size_t) 2 * distinct * sizeof(double));
-        ctx->ctTargets.ensure((size_t) n * cols * sizeof(double));
-        if (compacted) {
-            ctx->ctCompact.ensure((size_t) n * distinct * sizeof(double));
+
+        ctx->ctWsDouble.ensure(dStride * injections * sizeof(double));
+        ctx->ctWsInt.ensure(std::max<size_t>(iStride * injections, 1) * sizeof(int));
+        ctx->ctDsOut.ensure((size_t) 2 * injections * sizeof(double));
+        ctx->ctTargets.ensure((size_t) n * distinct * sizeof(double));
+        bool shared = injections < distinct;
+        if (shared) {
+            ctx->ctInjection.ensure((size_t) n * injections * sizeof(double));
         }
-        double* built = compacted ? ctx->ctCompact.as<double>() : ctx->ctTargets.as<double>();
+        double* built = shared ? ctx->ctInjection.as<double>() : ctx->ctTargets.as<double>();
         double t0 = 0;
         if (dcTiming()) {
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -2258,7 +2310,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
             DC_CUDA_CHECK(cudaGetLastError());
             ctx->genBusBuilt = ctx->nGen;
         }
-        ctgTargetsPrepare<<<grid((long) distinct * 32), BLOCK, 0, ctx->stream>>>(distinct, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
+        ctgTargetsPrepare<<<grid((long) injections * 32), BLOCK, 0, ctx->stream>>>(injections, ctx->nBuses, ctx->nGen, ctx->nSc, ctx->busFlags.as<int>(),
                 ctx->busGenStart.as<int>(), ctx->genBus.as<int>(), ctx->busLoadP.as<double>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(),
                 ctx->genPart.as<int>(), ctx->genMinT.as<double>(), ctx->genMaxT.as<double>(), ctx->genMinP.as<double>(),
                 ctx->genMaxP.as<double>(), ctx->genDroop.as<double>(), ctx->genPf.as<double>(),
@@ -2269,34 +2321,38 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                 distributed ? 1 : 0, referenceGenerator, participationType, useActiveLimits ? 1 : 0,
                 ctx->ctWsDouble.as<double>(), ctx->ctWsInt.as<int>(), ctx->ctDsOut.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
-        ctgFillTargets<<<grid((long) n * distinct), BLOCK, 0, ctx->stream>>>(n, distinct, ctx->nBuses, ctx->nGen, ctx->nSc,
+        ctgFillTargets<<<grid((long) n * injections), BLOCK, 0, ctx->stream>>>(n, injections, ctx->nBuses, ctx->nGen, ctx->nSc,
                 ctx->targetKind.as<int>(), ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(), ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(),
                 ctx->rhsCoef.as<double>(), ctx->busFlags.as<int>(), ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(),
                 ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->ctWsDouble.as<double>(),
                 ctx->ctWsInt.as<int>(), built);
         DC_CUDA_CHECK(cudaGetLastError());
-        if (compacted) {
-            ctgExpand<<<grid((long) n * cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctMap.as<int>(), built, ctx->ctTargets.as<double>());
+        if (shared) {
+            ctgExpand<<<grid((long) n * distinct), BLOCK, 0, ctx->stream>>>(n, distinct, ctx->ctInjOf.as<int>(), built, ctx->ctTargets.as<double>());
             DC_CUDA_CHECK(cudaGetLastError());
         }
-        ctgZeroRows<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctEdPtr.as<int>(),
+        ctgZeroRows<<<grid(distinct), BLOCK, 0, ctx->stream>>>(n, distinct, ctx->ctZrPtr.as<int>(), ctx->ctZrCol.as<int>(), ctx->ctEdPtr.as<int>(),
                 ctx->ctEdRow.as<int>(), ctx->ctEdKind.as<int>(), ctx->ctEdVal.as<double>(), ctx->ctTargets.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         if (dcTiming()) {
             DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            std::fprintf(stderr, "DC_TIMING modified targets cols=%d distinct=%d %.2f ms\n", cols, distinct, dcNowMs() - t0);
+            std::fprintf(stderr, "DC_TIMING modified targets cols=%d distinct=%d injections=%d %.2f ms\n", cols, distinct, injections, dcNowMs() - t0);
         }
         if (jOutTargets != nullptr) {
+            // the check hook: every column, expanded from its distinct one
             if (env->GetArrayLength(jOutTargets) < (jsize) ((size_t) n * cols)) {
                 throw std::runtime_error("outTargets too small");
             }
-            std::vector<double> host((size_t) n * cols);
-            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->ctTargets.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
-            env->SetDoubleArrayRegion(jOutTargets, 0, (jsize) host.size(), host.data());
+            std::vector<double> distinctHost((size_t) n * distinct);
+            DC_CUDA_CHECK(cudaMemcpy(distinctHost.data(), ctx->ctTargets.p, distinctHost.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int j = 0; j < cols; j++) {
+                env->SetDoubleArrayRegion(jOutTargets, (jsize) ((size_t) j * n), n, distinctHost.data() + (size_t) map[j] * n);
+            }
         }
-        ctx->bases.ensure((size_t) n * cols * sizeof(double));
-        for (int col0 = 0; col0 < cols; col0 += S_SOLVE_COLS) {
-            int c = std::min(S_SOLVE_COLS, cols - col0);
+        // only the distinct columns solved: a column's base is its distinct one's (the map returned)
+        ctx->bases.ensure((size_t) n * distinct * sizeof(double));
+        for (int col0 = 0; col0 < distinct; col0 += S_SOLVE_COLS) {
+            int c = std::min(S_SOLVE_COLS, distinct - col0);
             ctx->ensureRhs(c);
             DC_CUDA_CHECK(cudaMemcpyAsync(ctx->b.p, ctx->ctTargets.as<double>() + (size_t) col0 * n, (size_t) n * c * sizeof(double),
                                           cudaMemcpyDeviceToDevice, ctx->stream));
@@ -2305,8 +2361,13 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_buildChunkTargets(JNIEnv* env, 
                                           cudaMemcpyDeviceToDevice, ctx->stream));
         }
         DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        ctx->nBases = distinct;
+        jintArray out = env->NewIntArray(cols);
+        env->SetIntArrayRegion(out, 0, cols, map.data());
+        return out;
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.buildChunkTargets: ") + e.what());
+        return nullptr;
     }
 }
 
@@ -2345,6 +2406,11 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         int n = ctx->n;
         int nb = ctx->nBranches;
         ctx->ctgPtr.upload(ctgPtr.p, (size_t) ctgPtr.len * sizeof(int));
+        for (int k = 0; k < ctgElem.len; k++) {
+            if (ctgElem.p[k] < 0 || ctgElem.p[k] >= ctx->nElem) {
+                throw std::runtime_error("element out of range: " + std::to_string(ctgElem.p[k]) + " (nElem " + std::to_string(ctx->nElem) + ")");
+            }
+        }
         ctx->ctgElem.upload(ctgElem.p, (size_t) std::max<jsize>(ctgElem.len, 1) * sizeof(int));
         ctx->ctgBase.upload(ctgBase.p, (size_t) nCtg * sizeof(int));
         ctx->alpha.ensure((size_t) nCtg * MAX_K * sizeof(double));
@@ -2387,7 +2453,9 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         DC_CUDA_CHECK(cudaMemcpy(badHost.data(), bad.p, (size_t) nCtg * sizeof(int), cudaMemcpyDeviceToHost));
         for (int c = 0; c < nCtg; c++) {
             if (badHost[c]) {
-                throw std::runtime_error("contingency " + std::to_string(c) + " has more than " + std::to_string(MAX_K) + " elements");
+                throw std::runtime_error("contingency " + std::to_string(c) + (badHost[c] == 2
+                        ? std::string(" has an element on a bus without an angle row")
+                        : " has more than " + std::to_string(MAX_K) + " elements"));
             }
         }
         // states out, unless the caller reads the chunk sparsely (gatherChunk / readChunkStates): they stay on the device

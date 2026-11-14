@@ -14,6 +14,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,22 +58,6 @@ bool hasAlternateRows(const int* a, int len) {
     return false;
 }
 
-bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShunt, const int* shuntIndices) {
-    for (int e = 0; e < nClosedBranch; e++) {
-        if (closedBranchIndices[static_cast<size_t>(e) * 12 + 10] >= 0 || closedBranchIndices[static_cast<size_t>(e) * 12 + 10] <= -2
-                || closedBranchIndices[static_cast<size_t>(e) * 12 + 11] >= 0 || closedBranchIndices[static_cast<size_t>(e) * 12 + 11] <= -2) {
-            return true;                                     // plain alt row, or the -2-groupId encoding (plan-A6)
-        }
-    }
-    for (int e = 0; e < nShunt; e++) {
-        if (shuntIndices[static_cast<size_t>(e) * 5 + 4] >= 0 || shuntIndices[static_cast<size_t>(e) * 5 + 4] <= -2) {
-            return true;
-        }
-    }
-    return false;
-}
-
-
 // ---- The three families whose reactive outputs relocate: closed branch, shunt, open branch ----------------------
 // Each family's term outputs resolve to a (row, column) through its generated scatter table, and the role-1
 // outputs of a Q-balance row (rowEq == 1) carry an ALTERNATE row the extractor packed: closed branches at
@@ -89,6 +74,7 @@ struct ClosedBranchFamily {
     static const Scatter& scatter(int k) { return CLOSED_BRANCH_SCATTER[k]; }
     static RC resolve(const Scatter& s, const int* ix) { return resolveClosedBranch(s, ix); }
     int alternateRow(const Scatter& s, const int* ix, int) const { return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1; }
+    bool hasAlternate(const int* ix, int) const { return ix[10] != -1 || ix[11] != -1; }
 };
 
 struct ShuntFamily {
@@ -98,6 +84,7 @@ struct ShuntFamily {
     static const Scatter& scatter(int k) { return SHUNT_SCATTER[k]; }
     static RC resolve(const Scatter& s, const int* ix) { return resolveShunt(s, ix); }
     int alternateRow(const Scatter& s, const int* ix, int) const { return s.rowEq == 1 ? ix[4] : -1; }
+    bool hasAlternate(const int* ix, int) const { return ix[4] != -1; }
 };
 
 // The connected side's half-open charging q follows the BUS_TARGET_Q row of a remote member switched to PQ or a
@@ -112,14 +99,9 @@ struct OpenBranchFamily {
     int alternateRow(const Scatter& s, const int*, int e) const {
         return s.rowEq == 1 ? alternateReactiveDestination[e * 2 + s.rowEnd] : -1;
     }
-};
-
-// The structure-wide tables an output's placement reads.
-struct RelocationTables {
-    const int* relocatedChildOwnRow;                         // per row: a coupler DUMMY row's relocated child's own row, -1 elsewhere
-    const int* groupStart;                                   // per relocation group: its first candidate
-    const int* candidateRows;                                // [fallback row, member rows...] per group
-    const int* dependentGroupOfRow;                          // per row: the dependent group of its owner bus (nullptr: none)
+    bool hasAlternate(const int*, int e) const {
+        return alternateReactiveDestination[e * 2] != -1 || alternateReactiveDestination[e * 2 + 1] != -1;
+    }
 };
 
 enum class Placement {
@@ -279,43 +261,83 @@ void buildRelocationDestination(const F& family, int count, const int* indices, 
     }
 }
 
-RelocationTables relocationTables(const int* relocatedChildOwnRow, const int* groupStart, const int* candidateRows,
-                                  const int* dependentGroupOfRow) {
-    return RelocationTables{relocatedChildOwnRow, groupStart, candidateRows, dependentGroupOfRow};
+// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
+// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
+// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
+// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
+// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
+template <typename F>
+void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
+                                  const std::vector<int>& relocationCandidateOffset, const RelocationTables& t) {
+    for (size_t o = 0; o < relocationGroup.size(); o++) {
+        int g = relocationGroup[o];
+        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
+        // t.groupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // used: "CUDA error: an illegal memory access" out of createBatchContext.
+        if (g >= 0 && relocationCandidateOffset[o] < 0) {
+            continue;
+        }
+        if (g >= 0 && F::scatter(static_cast<int>(o % F::OUTPUT_COUNT)).role == 0) {
+            int v = -2 - t.candidateRows[t.groupStart[g]];
+            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
+        }
+    }
+}
+
+// Calls fn with the traits of the elements' family.
+template <typename Fn>
+auto withFamily(const RelocatedElements& elements, Fn fn) {
+    switch (elements.family) {
+        case RelocatedFamily::CLOSED_BRANCH:
+            return fn(ClosedBranchFamily{});
+        case RelocatedFamily::SHUNT:
+            return fn(ShuntFamily{});
+        case RelocatedFamily::OPEN_BRANCH:
+        default:
+            return fn(OpenBranchFamily{elements.alternateReactiveDestination});
+    }
 }
 
 }  // namespace
 
-void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    collectRelocationPattern(ClosedBranchFamily{}, nClosedBranch, closedBranchIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pat);
+bool hasRelocatableOutput(const RelocatedElements& elements) {
+    return withFamily(elements, [&](const auto& family) {
+        for (int e = 0; e < elements.count; e++) {
+            if (family.hasAlternate(elements.indices + static_cast<size_t>(e) * family.INDEX_STRIDE, e)) {
+                return true;                                 // a plain alternate row, or the -2-groupId encoding (plan-A6)
+            }
+        }
+        return false;
+    });
 }
 
-void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    buildRelocationDestination(ClosedBranchFamily{}, nClosedBranch, closedBranchIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pos,
-            alternateDestination, selectorRow, relocationGroup, relocationCandidateOffset, relocationCandidateDestinations, relocationDependentPilot);
+void collectRelocationPattern(const RelocatedElements& elements, const RelocationTables& tables, std::vector<std::pair<int, int>>& pat) {
+    withFamily(elements, [&](const auto& family) {
+        collectRelocationPattern(family, elements.count, elements.indices, tables, pat);
+    });
 }
 
-void collectShuntRelocationPattern(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    collectRelocationPattern(ShuntFamily{}, nShunt, shuntIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pat);
-}
-
-void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    buildRelocationDestination(ShuntFamily{}, nShunt, shuntIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pos,
-            alternateDestination, selectorRow, relocationGroup, relocationCandidateOffset, relocationCandidateDestinations, relocationDependentPilot);
+RelocationDestinations installRelocationDestinations(const RelocatedElements& elements, const RelocationTables& tables,
+                                                     const CsrPattern& pos, Family& target) {
+    RelocationDestinations d;
+    withFamily(elements, [&](const auto& family) {
+        using F = std::decay_t<decltype(family)>;
+        buildRelocationDestination(family, elements.count, elements.indices, tables, pos, d.alternateDestination, d.selectorRow,
+                                   d.relocationGroup, d.relocationCandidateOffset, d.relocationCandidateDestinations,
+                                   d.relocationDependentPilot);
+        target.alternateDestination.upload(d.alternateDestination.data(), d.alternateDestination.size() * sizeof(int));
+        target.selectorRow.upload(d.selectorRow.data(), d.selectorRow.size() * sizeof(int));
+        if (!d.relocationCandidateDestinations.empty()) {
+            target.relocationGroup.upload(d.relocationGroup.data(), d.relocationGroup.size() * sizeof(int));
+            target.relocationCandidateOffset.upload(d.relocationCandidateOffset.data(), d.relocationCandidateOffset.size() * sizeof(int));
+            target.relocationCandidateDestinations.upload(d.relocationCandidateDestinations.data(),
+                                                          d.relocationCandidateDestinations.size() * sizeof(int));
+            target.relocationDependentPilot.upload(d.relocationDependentPilot.data(), d.relocationDependentPilot.size());
+            patchGroupFrozenDestinations<F>(target.destination, d.relocationGroup, d.relocationCandidateOffset, tables);
+        }
+        target.dynamicRelocation = true;
+    });
+    return d;
 }
 
 // HVDC analogue of the stock placement. An AC-emulation converter bus that is a coupler-tree child keeps its P
@@ -362,45 +384,6 @@ void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* 
                 alternateDestination[o] = -2 - own;
                 selectorRow[o] = stockPlacementSelectorRow(rc.row, -1, relocatedChildOwnRow);
             }
-        }
-    }
-}
-
-void collectOpenBranchRelocationPattern(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    collectRelocationPattern(OpenBranchFamily{openBranchAlternateReactiveDestination}, nOpenBranch, openBranchIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pat);
-}
-
-void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    buildRelocationDestination(OpenBranchFamily{openBranchAlternateReactiveDestination}, nOpenBranch, openBranchIndices,
-            relocationTables(relocatedChildOwnRow, reactiveRelocationGroupStart, reactiveRelocationCandidateRows, reactiveRelocationDependentGroupOfRow), pos,
-            alternateDestination, selectorRow, relocationGroup, relocationCandidateOffset, relocationCandidateDestinations, relocationDependentPilot);
-}
-
-// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
-// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
-// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
-// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
-// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
-                           const std::vector<int>& relocationCandidateOffset, int outputCount,
-                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
-    for (size_t o = 0; o < relocationGroup.size(); o++) {
-        int g = relocationGroup[o];
-        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
-        // reactiveRelocationGroupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
-        // used: "CUDA error: an illegal memory access" out of createBatchContext.
-        if (g >= 0 && relocationCandidateOffset[o] < 0) {
-            continue;
-        }
-        if (g >= 0 && scatterRole[o % outputCount] == 0) {
-            int v = -2 - reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
-            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }
     }
 }

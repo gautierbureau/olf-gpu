@@ -13,7 +13,7 @@ import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.sa.LimitReductionManager;
+import com.powsybl.openloadflow.sa.LimitScalingManager;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 
@@ -36,7 +36,7 @@ import java.util.List;
  *   <li><b>The thresholds are static for the run.</b> {@code AbstractLfBranch} builds each side's
  *       {@code List<LfLimitsGroup>} lazily and CACHES it keyed only by limit type, with the
  *       reductions already applied — OLF's comment in {@code createLimits} gives the reason it may
- *       do so: <i>"the only supported ContingencyContext for LimitReduction is ALL"</i>. So a
+ *       do so: <i>"the only supported ContingencyContext for LimitScaling is ALL"</i>. So a
  *       contingency cannot change a threshold, and building this table also warms exactly the cache
  *       the stock path would have built.</li>
  *   <li><b>Only the VALUE varies.</b> {@code createLimitViolation} takes every other field from the
@@ -73,7 +73,7 @@ final class GpuLimitTable {
     private final int[] groupLimitEnd;
 
     // --- the sorted limits of each group, most severe first (OLF's order, kept verbatim) ---
-    private final double[] limitThreshold;                   // LfLimit.getReducedValue(), per unit
+    private final double[] limitThreshold;                   // LfLimit.getScaledValue(), per unit
     private final LfBranch.LfLimit[] limits;
     private final int[] limitGroup;                          // back-pointer: a screen emits limit indices
     private final int[] groupBranch;                         // the branch a group belongs to
@@ -200,7 +200,7 @@ final class GpuLimitTable {
      * {@code LfLimitsGroup} lists it forces are the same ones the stock detection would have built,
      * and they outlive every contingency.
      */
-    static GpuLimitTable build(LfNetwork network, LimitReductionManager limitReductionManager) {
+    static GpuLimitTable build(LfNetwork network, LimitScalingManager limitScalingManager) {
         List<LfBranch> networkBranches = network.getBranches();
         LfBranch[] branches = networkBranches.toArray(new LfBranch[0]);
         int[] groupStart = new int[branches.length];
@@ -220,11 +220,11 @@ final class GpuLimitTable {
             groupStart[b] = sides.size();
             // The stock detection tests getBus1()/getBus2() for null and skips the side entirely.
             if (branch.getBus1() != null) {
-                addSide(branch, branch.getBus1(), TwoSides.ONE, limitReductionManager,
+                addSide(branch, branch.getBus1(), TwoSides.ONE, limitScalingManager,
                         sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
             }
             if (branch.getBus2() != null) {
-                addSide(branch, branch.getBus2(), TwoSides.TWO, limitReductionManager,
+                addSide(branch, branch.getBus2(), TwoSides.TWO, limitScalingManager,
                         sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
             }
             groupEnd[b] = sides.size();
@@ -259,7 +259,7 @@ final class GpuLimitTable {
         return table;
     }
 
-    private static void addSide(LfBranch branch, LfBus bus, TwoSides side, LimitReductionManager limitReductionManager,
+    private static void addSide(LfBranch branch, LfBus bus, TwoSides side, LimitScalingManager limitScalingManager,
                                 List<Byte> sides, List<Byte> quantities, List<Double> scales, List<String> ids,
                                 List<Integer> limitStarts, List<Integer> limitEnds,
                                 List<Double> thresholds, List<LfBranch.LfLimit> flatLimits) {
@@ -267,21 +267,21 @@ final class GpuLimitTable {
         // The order decides nothing about WHICH violations are found (each group keys its own entry
         // in the manager), but keeping it makes a table-vs-stock diff line up group by group.
         addGroups(branch, side, LimitType.CURRENT, QTY_I, PerUnit.ib(bus.getNominalV()),
-                limitReductionManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
+                limitScalingManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
         addGroups(branch, side, LimitType.ACTIVE_POWER, QTY_P, PerUnit.SB,
-                limitReductionManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
+                limitScalingManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
         addGroups(branch, side, LimitType.APPARENT_POWER, QTY_S, PerUnit.SB,
-                limitReductionManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
+                limitScalingManager, sides, quantities, scales, ids, limitStarts, limitEnds, thresholds, flatLimits);
     }
 
     private static void addGroups(LfBranch branch, TwoSides side, LimitType type, byte quantity, double scale,
-                                  LimitReductionManager limitReductionManager,
+                                  LimitScalingManager limitScalingManager,
                                   List<Byte> sides, List<Byte> quantities, List<Double> scales, List<String> ids,
                                   List<Integer> limitStarts, List<Integer> limitEnds,
                                   List<Double> thresholds, List<LfBranch.LfLimit> flatLimits) {
         List<LfBranch.LfLimitsGroup> groups = side == TwoSides.ONE
-                ? branch.getLimits1(type, limitReductionManager)
-                : branch.getLimits2(type, limitReductionManager);
+                ? branch.getLimits1(type, limitScalingManager)
+                : branch.getLimits2(type, limitScalingManager);
         for (LfBranch.LfLimitsGroup group : groups) {
             List<LfBranch.LfLimit> sortedLimits = group.getSortedLimits();
             if (sortedLimits.isEmpty()) {
@@ -293,7 +293,7 @@ final class GpuLimitTable {
             ids.add(group.getOperationalLimitsGroupId());
             limitStarts.add(thresholds.size());
             for (LfBranch.LfLimit limit : sortedLimits) {
-                thresholds.add(limit.getReducedValue());
+                thresholds.add(limit.getScaledValue());
                 flatLimits.add(limit);
             }
             limitEnds.add(thresholds.size());

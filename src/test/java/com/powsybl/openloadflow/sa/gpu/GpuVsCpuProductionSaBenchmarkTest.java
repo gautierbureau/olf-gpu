@@ -437,7 +437,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
     /** @return true when the violation is a border flip (relative margin under 1e-3). */
     private static boolean tally(com.powsybl.contingency.violations.LimitViolation v, String ctg,
                                  Map<String, Integer> ctgHisto, List<String> worst, String sideTag) {
-        double margin = Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()) / Math.max(1e-9, Math.abs(v.getLimit()));
+        double margin = Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()) / Math.max(1e-9, Math.abs(v.getLimit()));
         ctgHisto.merge(ctg, 1, Integer::sum);
         worst.add(String.format("%.6f rel | %s | %s %s %s | value=%.4f limit=%.4f | ctg=%s",
                 margin, sideTag, v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(), v.getLimit(), ctg));

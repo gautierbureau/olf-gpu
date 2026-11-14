@@ -48,7 +48,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
             for (String id : List.of("svc1", "svc2")) {
                 vl.newStaticVarCompensator().setId(id).setBus("B9").setConnectableBus("B9")
                         .setBmin(-0.06).setBmax(0.06).setVoltageSetpoint(n.getBusBreakerView().getBus("B9").getV() * 1.03)
-                        .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE).setRegulating(true).add();
+                        .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE).setRegulating(true).add();
             }
             return n;
         };
@@ -142,7 +142,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
         com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
-        svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+        svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulating(true);
         svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
@@ -206,7 +206,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         n.getGenerator("g1").setTargetP(n.getGenerator("g1").getTargetP() + 20);   // feeds ld3 as well
         com.powsybl.iidm.network.StaticVarCompensator svc1 = n.getStaticVarCompensator("svc1");
         svc1.setBmin(-svc1Bmax).setBmax(svc1Bmax)
-                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulating(true);
         svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
@@ -219,7 +219,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         vl3.newLoad().setId("ld3").setBus("b3").setConnectableBus("b3").setP0(20).setQ0(10).add();
         vl3.newStaticVarCompensator().setId("svc2").setBus("b3").setConnectableBus("b3")
                 .setBmin(-0.008).setBmax(0.008)
-                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulating(true).add()
                 .newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
@@ -243,11 +243,12 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
         network.getLoad("ld1").setQ0(50);
         com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
-        svc1.setBmin(-0.004).setBmax(0.004)
-                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
-                .setRegulating(true);
-        svc1.newExtension(com.powsybl.iidm.network.extensions.VoltagePerReactivePowerControlAdder.class)
-                .withSlope(0.0001).add();
+        svc1.setBmin(-0.004).setBmax(0.004).setLocalTargetV(385);
+        svc1.newVoltageRegulation()
+                .withMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE_PER_REACTIVE_POWER)
+                .withSlope(0.0001)
+                .withRegulating(true)
+                .build();
         com.powsybl.iidm.network.Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
@@ -270,10 +271,12 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
         com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
-        svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
-                .setRegulating(true);
-        svc1.newExtension(com.powsybl.iidm.network.extensions.VoltagePerReactivePowerControlAdder.class)
-                .withSlope(0.03).add();
+        svc1.setLocalTargetV(385);
+        svc1.newVoltageRegulation()
+                .withMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE_PER_REACTIVE_POWER)
+                .withSlope(0.03)
+                .withRegulating(true)
+                .build();
         com.powsybl.iidm.network.Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
@@ -297,7 +300,7 @@ class GpuSaVoltageMonitoringTest extends AbstractGpuSaTest {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
         network.getStaticVarCompensator("svc1")
                 .setVoltageSetpoint(385)
-                .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE);
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE);
         com.powsybl.iidm.network.Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())

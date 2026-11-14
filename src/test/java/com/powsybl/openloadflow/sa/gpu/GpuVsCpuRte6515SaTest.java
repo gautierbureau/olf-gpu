@@ -653,7 +653,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             return new PostContingencyResult(p.getContingency(), p.getStatus(), p.getLimitViolationsResult(),
                     new com.powsybl.security.results.NetworkResult(p.getNetworkResult().getBranchResults(), List.of(),
                             p.getNetworkResult().getThreeWindingsTransformerResults()),
-                    p.getConnectivityResult(), p.getDistributedActivePower());
+                    p.getConnectivityResult(), p.getDistributedActivePower(), p.getChangedPhaseTapChangers().stream().toList());
         }
 
         /** Drop an arm's post-contingency bus objects without keeping them anywhere (the warm arm). */
@@ -1460,8 +1460,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         Double base = preKeys.get(key);
                         System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e pre=%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
-                                v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                v.getLimit() * v.getLimitScaling(),
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()),
                                 base == null ? "NEW" : String.format("pre-existing base=%.6f", base));
                     }
                 }
@@ -1471,8 +1471,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         var subj = network.getIdentifiable(v.getSubjectId());   // the KIND of the element, not its data
                         System.out.printf("    GPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e kind=%s%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
-                                v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                v.getLimit() * v.getLimitScaling(),
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()),
                                 subj == null ? "?" : subj.getType(),
                                 subj instanceof com.powsybl.iidm.network.TwoWindingsTransformer t
                                         ? " rtc=" + t.hasRatioTapChanger() + " ptc=" + t.hasPhaseTapChanger()
@@ -1744,13 +1744,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 cByKey.forEach((k, v) -> {
                     if (!gByKey.containsKey(k)) {
                         System.out.printf("      CPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
-                                v.getLimitReduction());
+                                v.getLimitScaling());
                     }
                 });
                 gByKey.forEach((k, v) -> {
                     if (!cByKey.containsKey(k)) {
                         System.out.printf("      GPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
-                                v.getLimitReduction());
+                                v.getLimitScaling());
                     }
                 });
             }

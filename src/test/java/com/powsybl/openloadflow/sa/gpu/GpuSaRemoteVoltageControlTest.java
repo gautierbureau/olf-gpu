@@ -1048,7 +1048,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         for (String id : new String[] {"T2wT", "T2wT2"}) {
             com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
             t.getRatioTapChanger().setTargetDeadband(0).setTapPosition(0)
-                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setRegulating(true);
         }
         List<Contingency> ctgs = List.of(

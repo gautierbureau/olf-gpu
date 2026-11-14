@@ -830,8 +830,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 strategyContingency = sc.candidate().lfContingency();
                 if (GpuTrace.PHASE_TIME.isOn()) {
                     graphChecks[1] += connectivity.getDisabledBuses().size();
-                    graphChecks[2] = Math.max(graphChecks[2], connectivity.getDisabledBuses().size());
                     graphChecks[3] += postContingency.getDisabledBuses().size();
+                    if (connectivity.getDisabledBuses().size() > graphChecks[2]) {
+                        graphChecks[2] = connectivity.getDisabledBuses().size();
+                        LARGEST_LOSS_CONTINGENCY.set(postContingency.getPropagatedContingency().getContingency().getId());
+                    }
                 }
             }
             Set<String> toReconnect = connectivity.getElementsToReconnect();
@@ -1040,6 +1043,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             + "device=%.0f ms answer=%.0f ms (waiting %.0f ms), setup=%.0f ms, pipelined total=%.0f ms%n", scenarios.size(), chunkCount,
                     stageNanos[0] / 1e6, graphChecks, graphChecks > 0 ? graphCheckCount[1] / (double) graphChecks : 0.0, stageNanos[1] / 1e6,
                     stageNanos[2] / 1e6, stageNanos[4] / 1e6, stageNanos[3] / 1e6, (System.nanoTime() - t0) / 1e6);
+            if (graphChecks > 0) {
+                // a large loss is the slack bus's component kept as the network (fast DC does not relocate the slack)
+                System.err.printf("DC_WOODBURY_GRAPH_CHECKS largest loss %d buses (contingency %s), the contingencies' own %.1f per check, slack %s%n",
+                        graphCheckCount[2], LARGEST_LOSS_CONTINGENCY.get(), graphCheckCount[3] / (double) graphChecks,
+                        lfNetwork.getBuses().stream().filter(LfBus::isSlack).map(LfBus::getId).toList());
+            }
         }
     }
 
@@ -1049,6 +1058,9 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      * milliseconds), so it runs as far ahead as it can: a prepared chunk is index lists, and the answers keep up.
      */
     private static final int PIPELINE_DEPTH = 1024;
+
+    /** The contingency whose strategies lost the most buses in a graph check (OLF_GPU_PHASE_TIME diagnostics only). */
+    private static final java.util.concurrent.atomic.AtomicReference<String> LARGEST_LOSS_CONTINGENCY = new java.util.concurrent.atomic.AtomicReference<>();
 
     private static java.util.concurrent.ThreadFactory stageThreads(String name) {
         return r -> {

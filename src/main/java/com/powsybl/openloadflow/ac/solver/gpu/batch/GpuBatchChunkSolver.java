@@ -1313,35 +1313,8 @@ final class GpuBatchChunkSolver {
             // mismatch during the solve, at a different point inside the slack band).
             int ci = group.get(chunkStart + s);
             int[] frozen = frozenRowsByIndex[ci];
-            boolean[] islandedDistributedSlackMask = null;
-            // The PLAN's mask first (islandedDistributedSlackParticipants): it matches a participant on its BUS
-            // as well as on its row, which the row test below cannot do for a participant whose P
-            // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
-            // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
-            // alone repeated exactly the defect that comment describes: measured on the
-            // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
-            // share of -0.894 pu, and the device's slack loop then chased its own tail for five
-            // passes and retired 0.837 pu away from OLF.
-            if (islandedDistributedSlackByIndex != null && islandedDistributedSlackByIndex[ci] != null) {
-                for (int participant : islandedDistributedSlackByIndex[ci]) {
-                    if (participant >= 0 && participant < nDistributedSlackBuses) {
-                        if (islandedDistributedSlackMask == null) {
-                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
-                        }
-                        islandedDistributedSlackMask[participant] = true;
-                    }
-                }
-            }
-            for (int i = 0; i < nDistributedSlackBuses; i++) {
-                for (int fr : frozen) {
-                    if (fr == gpuData.distributedSlack().busPhiRow()[i]) {
-                        if (islandedDistributedSlackMask == null) {
-                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
-                        }
-                        islandedDistributedSlackMask[i] = true;
-                    }
-                }
-            }
+            boolean[] islandedDistributedSlackMask = islandedParticipants(gpuData, nDistributedSlackBuses,
+                    islandedDistributedSlackByIndex == null ? null : islandedDistributedSlackByIndex[ci], frozen);
             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, cl.preLossBySlot[s],
                     rs.distributedSlackOverrideBus.length > 0 ? rs.distributedSlackOverrideBus[s] : -1,
                     rs.distributedSlackOverrideFactorDelta.length > 0 ? rs.distributedSlackOverrideFactorDelta[s] : 0,
@@ -1356,45 +1329,11 @@ final class GpuBatchChunkSolver {
             // split is what the first solve sees — so the mismatch the DS loop then
             // measures, and everything after it, inherits the difference.
             if (GpuTrace.SEED_DUMP.isOn() && shares != null) {
-                try (java.io.PrintWriter w = new java.io.PrintWriter(
-                        new java.io.FileWriter(GpuTrace.SEED_DUMP.value(), true))) {
-                    w.printf("# SEED ctg=%s%n",
-                            contingencies.get(group.get(chunkStart + s)).contingencyId());
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        if (shares[i] != 0) {
-                            w.printf("%d %.12f%n", i, shares[i]);
-                        }
-                    }
-                } catch (java.io.IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
+                dumpSeed(contingencies.get(group.get(chunkStart + s)).contingencyId(), shares, nDistributedSlackBuses);
             }
             if (GpuTrace.PRELOSS_TRACE.isOn()) {
-                double absorbed = 0;
-                if (shares != null) {
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        absorbed += shares[i];
-                    }
-                }
-                double fsAll = 0;
-                double fsIslanded = 0;
-                for (int i = 0; i < nDistributedSlackBuses; i++) {
-                    fsAll += gpuData.distributedSlack().busFactor()[i];
-                    if (islandedDistributedSlackMask != null && islandedDistributedSlackMask[i]) {
-                        fsIslanded += gpuData.distributedSlack().busFactor()[i];
-                    }
-                }
-                System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
-                        contingencies.get(ci).contingencyId(), ChunkArrays.countTrue(islandedDistributedSlackMask));
-                System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
-                        + "(%.2f%% of the participation is in the island)%n",
-                        contingencies.get(ci).contingencyId(), fsAll, fsIslanded,
-                        fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
-                System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
-                        + "islandedDistributedSlackParticipants=%d%n",
-                        contingencies.get(ci).contingencyId(), cl.preLossBySlot[s], absorbed,
-                        shares == null ? 0.0 : shares[nDistributedSlackBuses],
-                        ChunkArrays.countTrue(islandedDistributedSlackMask));
+                tracePreLoss(gpuData, contingencies.get(ci).contingencyId(), cl.preLossBySlot[s], shares, islandedDistributedSlackMask,
+                        nDistributedSlackBuses);
             }
             if (shares == null) {
                 preDistributedByIndex[preIdx] = 0.0;
@@ -1432,24 +1371,126 @@ final class GpuBatchChunkSolver {
             // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
             // starts at the same operating point) while leaving the anchor alone is what
             // makes the kernel's reset pick the shares back up as absorbedNow.
-            for (int i = 0; i < nDistributedSlackBuses; i++) {
-                if (shares[i] == 0) {
-                    continue;
-                }
-                // The row this scenario actually solves the bus's P balance on: the
-                // coupler-tree relocation's dummy row unless this scenario opened that
-                // coupler, in which case the balance — and so the share — is on the bus's
-                // own phi row. The ANCHOR stays the participant's own distributedSlackBusBaseTargetP, which
-                // the device carried to the new row with the equation.
-                int distributedSlackBusRow = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
-                        ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
-                int flat = s * n + distributedSlackBusRow;
-                // compose with a gen-outage override on the same row
-                rs.overrides.compose(flat, baseTargets[gpuData.distributedSlack().busPhiRow()[i]], shares[i]);
-            }
+            composeShareOverrides(n, gpuData, baseTargets, cl, rs, s, shares, nDistributedSlackBuses);
         }
         seeds.slackBusAnchorShift = slackBusAnchorShift;
         seeds.preSlackSeed = preSlackSeed;
+    }
+
+    /**
+     * The participants a fragmenting contingency puts in another synchronous component: OLF distributes over
+     * getSynchronousNetworks().getFirst(), so they take no share (null: none).
+     */
+    private static boolean[] islandedParticipants(GpuAcData gpuData, int nDistributedSlackBuses, int[] planIslanded, int[] frozen) {
+        boolean[] islandedDistributedSlackMask = null;
+        // The PLAN's mask first (islandedDistributedSlackParticipants): it matches a participant on its BUS
+        // as well as on its row, which the row test below cannot do for a participant whose P
+        // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
+        // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
+        // alone repeated exactly the defect that comment describes: measured on the
+        // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
+        // share of -0.894 pu, and the device's slack loop then chased its own tail for five
+        // passes and retired 0.837 pu away from OLF.
+        if (planIslanded != null) {
+            for (int participant : planIslanded) {
+                if (participant >= 0 && participant < nDistributedSlackBuses) {
+                    if (islandedDistributedSlackMask == null) {
+                        islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
+                    }
+                    islandedDistributedSlackMask[participant] = true;
+                }
+            }
+        }
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            for (int fr : frozen) {
+                if (fr == gpuData.distributedSlack().busPhiRow()[i]) {
+                    if (islandedDistributedSlackMask == null) {
+                        islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
+                    }
+                    islandedDistributedSlackMask[i] = true;
+                }
+            }
+        }
+        return islandedDistributedSlackMask;
+    }
+
+    // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
+    // pre-distribution seeds, against OLF's own pre-distribution section in
+    // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
+    // split is what the first solve sees — so the mismatch the DS loop then
+    // measures, and everything after it, inherits the difference.
+    private static void dumpSeed(String contingencyId, double[] shares, int nDistributedSlackBuses) {
+        try (java.io.PrintWriter w = new java.io.PrintWriter(
+                new java.io.FileWriter(GpuTrace.SEED_DUMP.value(), true))) {
+            w.printf("# SEED ctg=%s%n",
+                    contingencyId);
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                if (shares[i] != 0) {
+                    w.printf("%d %.12f%n", i, shares[i]);
+                }
+            }
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private static void tracePreLoss(GpuAcData gpuData, String contingencyId, double preLoss, double[] shares,
+                                     boolean[] islandedDistributedSlackMask, int nDistributedSlackBuses) {
+        double absorbed = 0;
+        if (shares != null) {
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                absorbed += shares[i];
+            }
+        }
+        double fsAll = 0;
+        double fsIslanded = 0;
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            fsAll += gpuData.distributedSlack().busFactor()[i];
+            if (islandedDistributedSlackMask != null && islandedDistributedSlackMask[i]) {
+                fsIslanded += gpuData.distributedSlack().busFactor()[i];
+            }
+        }
+        System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
+                contingencyId, ChunkArrays.countTrue(islandedDistributedSlackMask));
+        System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
+                + "(%.2f%% of the participation is in the island)%n",
+                contingencyId, fsAll, fsIslanded,
+                fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
+        System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
+                + "islandedDistributedSlackParticipants=%d%n",
+                contingencyId, preLoss, absorbed,
+                shares == null ? 0.0 : shares[nDistributedSlackBuses],
+                ChunkArrays.countTrue(islandedDistributedSlackMask));
+    }
+
+    /** Each participant's share of a scenario's pre-distribution, composed into the target of the row it solves its balance on. */
+    private static void composeShareOverrides(int n, GpuAcData gpuData, double[] baseTargets, ChunkLists cl, RunScratch rs, int s,
+                                              double[] shares, int nDistributedSlackBuses) {
+        // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
+        // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
+        // returns it as previousMismatch, then water-fills
+        // (preLoss + slackMismatch) ONCE from the anchor. Moving the anchor here
+        // instead made the device fill only the slack mismatch, and a clamped
+        // water-fill does not compose: on rte6515/LINE-6180-6074 OLF fills +4.639661
+        // in one pass and saturates 10 generators at max, while the device filled
+        // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
+        // starts at the same operating point) while leaving the anchor alone is what
+        // makes the kernel's reset pick the shares back up as absorbedNow.
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            if (shares[i] == 0) {
+                continue;
+            }
+            // The row this scenario actually solves the bus's P balance on: the
+            // coupler-tree relocation's dummy row unless this scenario opened that
+            // coupler, in which case the balance — and so the share — is on the bus's
+            // own phi row. The ANCHOR stays the participant's own distributedSlackBusBaseTargetP, which
+            // the device carried to the new row with the equation.
+            int distributedSlackBusRow = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
+                    ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
+            int flat = s * n + distributedSlackBusRow;
+            // compose with a gen-outage override on the same row
+            rs.overrides.compose(flat, baseTargets[gpuData.distributedSlack().busPhiRow()[i]], shares[i]);
+        }
     }
 
     /**

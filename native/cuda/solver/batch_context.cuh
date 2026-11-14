@@ -32,6 +32,7 @@
 #include "context/incremental_transformer_voltage_control_context.cuh"
 #include "context/shunt_voltage_control_context.cuh"
 #include "context/incremental_shunt_voltage_control_context.cuh"
+#include "context/secondary_voltage_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -270,20 +271,7 @@ struct BatchSolverContext {
     std::vector<int> hPhaseControlElement, hPhaseControlTapStart, hPhaseControlBaseTap;
     std::vector<double> hPhaseControlTapRows;
     TransformerVoltageControlContext transformerVoltageControl;
-    // SECONDARY VOLTAGE CONTROL — GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL (OLF order 4). Zones of controller buses regulating a
-    // pilot point: run entirely on the device, the small dense zone system included.
-    int nSecondaryVoltageControlControllerBuses = 0, nSecondaryVoltageControlZones = 0;
-    DeviceBuf dSecondaryVoltageControlControlledBusVRow, dSecondaryVoltageControlControllerBusVRow, dSecondaryVoltageControlReactiveLimitEntry, dSecondaryVoltageControlBaseTargetV, dSecondaryVoltageControlMinQ, dSecondaryVoltageControlMaxQ, dSecondaryVoltageControlLoadTargetQ;
-    DeviceBuf dSecondaryVoltageControlReactiveTermStart, dSecondaryVoltageControlReactiveTermKind, dSecondaryVoltageControlReactiveTermSide, dSecondaryVoltageControlReactiveTermElement, dSecondaryVoltageControlReactiveTermShuntBRow;
-    DeviceBuf dSecondaryVoltageControlZoneStart, dSecondaryVoltageControlZoneControllerBus, dSecondaryVoltageControlZonePilotBusVRow, dSecondaryVoltageControlZoneTargetV;
-    DeviceBuf dSecondaryVoltageControlTargetV, dSecondaryVoltageControlK0, dSecondaryVoltageControlJk, dSecondaryVoltageControlJvpp, dSecondaryVoltageControlControllerBusEnabled, dSecondaryVoltageControlNeedsAdjustment, dSecondaryVoltageControlRejected, dSecondaryVoltageControlReactiveLimitTargetV;
-    // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
-    // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
-    DeviceBuf dSecondaryVoltageControlZoneMatrix, dSecondaryVoltageControlZoneRightHandSide, dSecondaryVoltageControlZoneMatrixPointers, dSecondaryVoltageControlZoneRightHandSidePointers, dSecondaryVoltageControlZonePivots, dSecondaryVoltageControlZoneFactorizationInfo, dSecondaryVoltageControlControllerBusZone;
-    cublasHandle_t secondaryVoltageControlBlasHandle = nullptr;
-    std::vector<int> hSecondaryVoltageControlControlledBusVRow;
-    std::vector<double> hSecondaryVoltageControlBaseTargetV;
-    double secondaryVoltageControlMinPlausibleTargetV = 0.8, secondaryVoltageControlMaxPlausibleTargetV = 1.2;
+    SecondaryVoltageControlContext secondaryVoltageControl;
 
     // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
     // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
@@ -353,9 +341,9 @@ struct BatchSolverContext {
     // whatever this conversion misses.
     cudaStream_t stream = nullptr;
     ~BatchSolverContext() {
-        if (secondaryVoltageControlBlasHandle != nullptr) {
-            cublasDestroy(secondaryVoltageControlBlasHandle);
-            secondaryVoltageControlBlasHandle = nullptr;
+        if (secondaryVoltageControl.secondaryVoltageControlBlasHandle != nullptr) {
+            cublasDestroy(secondaryVoltageControl.secondaryVoltageControlBlasHandle);
+            secondaryVoltageControl.secondaryVoltageControlBlasHandle = nullptr;
         }
         if (stream) cudaStreamDestroy(stream);
         if (uniformBatchResidualMatrix) cudssMatrixDestroy(uniformBatchResidualMatrix);

@@ -520,7 +520,7 @@ void launchReactiveLimitBounds(BatchSolverContext* ctx, int nS, int n, const cha
 // remaining-PV counter and the switched rows the forced-PV election reads (the loop), nullptr for the audit.
 void launchReactiveLimitsKernel(BatchSolverContext* ctx, const DriverPass& drv, int passId, bool tracksSwitches) {
     reactiveLimitsBatch<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * drv.nS), BLOCK, 0, ctx->stream>>>(
-            ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+            ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0 ? ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
             ctx->reactiveLimits.nReactiveLimitEntries, drv.nS, drv.n, drv.reactiveLimitTol, drv.maxPqPvSwitch,
             ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
             ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr,

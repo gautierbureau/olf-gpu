@@ -98,11 +98,11 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
-    if (ctx->nRemoteMemberReactiveTerms > 0) {
-        fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
+    if (ctx->remoteVoltageControl.nRemoteMemberReactiveTerms > 0) {
+        fillRemoteMemberQBatch<<<grid(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, nS, n,
                 ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
-                ctx->dRemoteMemberReactiveTermRow.as<int>(), ctx->dRemoteMemberReactiveTermElement.as<int>(), ctx->dRemoteMemberReactiveTermSide.as<int>(),
-                ctx->dRemoteMemberReactiveTermKind.as<int>(), ctx->dRemoteMemberReactiveTermWeight.as<double>(),
+                ctx->remoteVoltageControl.dRemoteMemberReactiveTermRow.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermElement.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermSide.as<int>(),
+                ctx->remoteVoltageControl.dRemoteMemberReactiveTermKind.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermWeight.as<double>(),
                 ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
                 ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(),
                 ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(),

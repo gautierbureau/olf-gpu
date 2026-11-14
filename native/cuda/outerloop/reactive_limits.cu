@@ -547,8 +547,8 @@ void launchReactiveLimitsKernel(BatchSolverContext* ctx, const DriverPass& drv, 
             ctx->reactiveLimits.reactiveLimitLocalTargetV.deviceOrNull(),
             ctx->reactiveLimits.dReactiveLimitFlags.p ? ctx->reactiveLimits.dReactiveLimitFlags.as<char>() : nullptr,
             ctx->reactiveLimits.reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
-            ctx->reMergedVoltageTargets.entries() > 0 ? ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
-            ctx->reMergedVoltageTargets.entries() > 0 ? ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
+            ctx->remoteVoltageControl.reMergedVoltageTargets.entries() > 0 ? ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
+            ctx->remoteVoltageControl.reMergedVoltageTargets.entries() > 0 ? ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
             tracksSwitches ? ctx->reactiveLimits.dReactiveLimitRemainingPvBusCount.as<int>() : nullptr,
             tracksSwitches ? ctx->reactiveLimits.dReactiveLimitSwitchedRow.as<int>() : nullptr);
 }
@@ -581,7 +581,7 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
                     ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->reactiveLimits.dPilotSelfMixedPvPqRejected.as<char>(),
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                ctx->nDistrQMembers, ctx->dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->distrQSubgroup.deviceOrNull());
+                ctx->remoteVoltageControl.nDistrQMembers, ctx->remoteVoltageControl.dDistrQMemberReactiveLimitEntry.p != nullptr ? ctx->remoteVoltageControl.dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->remoteVoltageControl.distrQSubgroup.deviceOrNull());
             std::vector<char> mixed(nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             CUDA_CHECK(cudaMemcpy(mixed.data(), ctx->reactiveLimits.dPilotSelfMixedPvPqRejected.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
@@ -625,18 +625,18 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
         // A re-merged control's voltage target follows its first enabled controller first: the DISTR_Q targets below
         // are then written on the sharing rows that are left.
         launchReMergedVoltageTargetRowUpdate(ctx, drv, false);
-        if (ctx->pilotFlips.entries() > 0) {             // pilot stopped controlling AND every survivor switched to PQ
-            SlotEntries flips = ctx->pilotFlips.view();
+        if (ctx->remoteVoltageControl.pilotFlips.entries() > 0) {             // pilot stopped controlling AND every survivor switched to PQ
+            SlotEntries flips = ctx->remoteVoltageControl.pilotFlips.view();
             pilotRowWithoutEnabledControllerBatch<<<grid(nS * flips.capacity), BLOCK, 0, ctx->stream>>>(
-                    nS, n, ctx->reactiveLimits.nReactiveLimitEntries, flips, ctx->pilotFlipSurvivors.view(),
+                    nS, n, ctx->reactiveLimits.nReactiveLimitEntries, flips, ctx->remoteVoltageControl.pilotFlipSurvivors.view(),
                     ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                    ctx->pilotFlips.state<char>(0), ctx->pilotFlips.state<double>(1),
+                    ctx->remoteVoltageControl.pilotFlips.state<char>(0), ctx->remoteVoltageControl.pilotFlips.state<double>(1),
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
         }
-        if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {    // no-enabled-controller corner: pilot vEq flip/restore
+        if (ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {    // no-enabled-controller corner: pilot vEq flip/restore
             launchPilotTargetVEquationUpdate(ctx, drv);
         }
-        if (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
+        if (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 && ctx->remoteVoltageControl.nDistrQMembers > 0) {
             // keep the survivors' DISTR_Q row targets in step with their PV/PQ states (plan-B3)
             launchDistrQTargetsInner(ctx, drv);
         }

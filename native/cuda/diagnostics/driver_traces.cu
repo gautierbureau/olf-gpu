@@ -234,13 +234,13 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         // PSG: every pilot-self group's layout this pass — the pilot's PV/PQ state, its own row's mode/target,
         // whether updatePilotTargetVEquationBatch flipped it (pilotTargetVDeactivated), and every candidate row with its mode, so a
         // "control lost" verdict can be checked against the members it was taken over.
-        if (ctx->hasPilotSelf && ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
+        if (ctx->remoteVoltageControl.hasPilotSelf && ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
                 && traceOn(Trace::BATCH_TRACE)) {
             std::vector<int> pilotSelfEntry(ctx->structure->nReactiveRelocationGroups, -1);
             std::vector<char> hPilotTargetVDeactivated(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS, 0);
             CUDA_CHECK(cudaMemcpy(pilotSelfEntry.data(), ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p, pilotSelfEntry.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            if (ctx->dReactiveRelocationPilotTargetVDeactivated.p) {
-                CUDA_CHECK(cudaMemcpy(hPilotTargetVDeactivated.data(), ctx->dReactiveRelocationPilotTargetVDeactivated.p, hPilotTargetVDeactivated.size(), cudaMemcpyDeviceToHost));
+            if (ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p) {
+                CUDA_CHECK(cudaMemcpy(hPilotTargetVDeactivated.data(), ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p, hPilotTargetVDeactivated.size(), cudaMemcpyDeviceToHost));
             }
             for (int s = 0; s < nS; s++) {
                 for (int g = 0; g < ctx->structure->nReactiveRelocationGroups; g++) {
@@ -336,11 +336,11 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         if (ctx->structure->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, scenarioMajorLayout(nS));
         if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
         CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
-        if (ctx->nRemoteMemberReactiveTerms > 0) {
-            fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
+        if (ctx->remoteVoltageControl.nRemoteMemberReactiveTerms > 0) {
+            fillRemoteMemberQBatch<<<grid(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, nS, n,
                     ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
-                    ctx->dRemoteMemberReactiveTermRow.as<int>(), ctx->dRemoteMemberReactiveTermElement.as<int>(), ctx->dRemoteMemberReactiveTermSide.as<int>(),
-                    ctx->dRemoteMemberReactiveTermKind.as<int>(), ctx->dRemoteMemberReactiveTermWeight.as<double>(),
+                    ctx->remoteVoltageControl.dRemoteMemberReactiveTermRow.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermElement.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermSide.as<int>(),
+                    ctx->remoteVoltageControl.dRemoteMemberReactiveTermKind.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermWeight.as<double>(),
                     ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
                     ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(),
                     ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(),

@@ -318,9 +318,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (distributionInLoopOrder && !ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
-    if (ctx->nHvdcAcEmulation > 0) {
+    if (ctx->hvdcAcEmulation.nHvdcAcEmulation > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION;  // OLF: FreezingHvdcACEmulation
-        if (ctx->hvdcAcEmulationLimitsActive) {
+        if (ctx->hvdcAcEmulation.hvdcAcEmulationLimitsActive) {
             loopOrder[nLoops++] = GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS;  // OLF: AcHvdcAcEmulationLimits
         }
     }

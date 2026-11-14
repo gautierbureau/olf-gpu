@@ -158,18 +158,18 @@ CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx) {
         return c;
     }
     c.hvdcStation = ctx->reactiveLimits.dReactiveCapabilityCurveHvdcStation.as<int>();
-    c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
-    if (ctx->nHvdcAcEmulation > 0) {
-        c.status = ctx->hvdcAcEmulationStatus.device();
-        c.appliedDelta1 = ctx->hvdcAppliedDelta1.device();
-        c.appliedDelta2 = ctx->hvdcAppliedDelta2.device();
-        c.hvdcAcEmulationParameters = ctx->dHvdcAcEmulationParameters.as<double>();
-        c.bus1PhiColumn = ctx->dHvdcBus1PhiColumn.as<int>();
-        c.bus2PhiColumn = ctx->dHvdcBus2PhiColumn.as<int>();
-        c.hvdcElement = ctx->dHvdcElement.as<int>();
+    c.nHvdcAcEmulation = ctx->hvdcAcEmulation.nHvdcAcEmulation;
+    if (ctx->hvdcAcEmulation.nHvdcAcEmulation > 0) {
+        c.status = ctx->hvdcAcEmulation.hvdcAcEmulationStatus.device();
+        c.appliedDelta1 = ctx->hvdcAcEmulation.hvdcAppliedDelta1.device();
+        c.appliedDelta2 = ctx->hvdcAcEmulation.hvdcAppliedDelta2.device();
+        c.hvdcAcEmulationParameters = ctx->hvdcAcEmulation.dHvdcAcEmulationParameters.as<double>();
+        c.bus1PhiColumn = ctx->hvdcAcEmulation.dHvdcBus1PhiColumn.as<int>();
+        c.bus2PhiColumn = ctx->hvdcAcEmulation.dHvdcBus2PhiColumn.as<int>();
+        c.hvdcElement = ctx->hvdcAcEmulation.dHvdcElement.as<int>();
         c.disabled = ctx->dDisabled.as<char>();
         c.nElements = ctx->nElements;
-        c.contingencyOutage = ctx->hvdcContingencyOutage.device();
+        c.contingencyOutage = ctx->hvdcAcEmulation.hvdcContingencyOutage.device();
         c.x = ctx->dX.as<double>();
     }
     return c;

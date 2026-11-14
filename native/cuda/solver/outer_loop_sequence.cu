@@ -39,7 +39,7 @@ void initOuterLoopSequence(OuterLoopSequence& seq, BatchSolverContext* ctx, cons
                 ? drv.loopOrder[i] == GpuOuterLoopKind::REACTIVE_LIMITS
                 : (ctx->realisticFixingLoop == GpuRealisticVoltageFixingLoop::TRANSFORMER_VOLTAGE_CONTROL
                         && drv.loopOrder[i] == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL
-                        && ctx->transformerVoltageControlMode != GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL);
+                        && ctx->transformerVoltageControl.transformerVoltageControlMode != GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL);
         if (isFixing) {
             seq.realisticFixingIdx = i;
         }

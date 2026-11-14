@@ -28,6 +28,7 @@
 #include "context/reactive_limits_context.cuh"
 #include "context/area_interchange_control_context.cuh"
 #include "context/distributed_slack_context.cuh"
+#include "context/transformer_voltage_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -296,17 +297,7 @@ struct BatchSolverContext {
     DeviceBuf dPhaseControlTap, dPhaseControlAppliedTap, dPhaseControlCheckCount;                // per (scenario, controller) tap; per scenario check count
     std::vector<int> hPhaseControlElement, hPhaseControlTapStart, hPhaseControlBaseTap;
     std::vector<double> hPhaseControlTapRows;
-    // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL (OLF order 8): OLF's
-    // TransformerVoltageControlOuterLoop (AFTER_GENERATOR_VOLTAGE_CONTROL: INITIAL/CONTROL/COMPLETE) or
-    // SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR_VOLTAGE_CONTROL). One group per controlled bus
-    // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
-    int nTransformerVoltageControlMembers = 0, nTransformerVoltageControlGroups = 0, nTransformerVoltageControlDeltaRows = 0, transformerVoltageControlMode = GpuTransformerVoltageControlMode::AFTER_GENERATOR_VOLTAGE_CONTROL, transformerVoltageControlEntryOn = 0;
-    DeviceBuf dTransformerVoltageControlGroupMemberStart, dTransformerVoltageControlGroupControlledBusVRow, dTransformerVoltageControlGroupTargetV, dTransformerVoltageControlGroupHalfTargetDeadband, dTransformerVoltageControlGroupUseInitialTapPosition;
-    DeviceBuf dTransformerVoltageControlDeltaStart, dTransformerVoltageControlDeltaRow, dTransformerVoltageControlDeltaModeOn, dTransformerVoltageControlDeltaModeOff, dTransformerVoltageControlDeltaTargetOn, dTransformerVoltageControlDeltaTargetOff;
-    DeviceBuf dTransformerVoltageControlMemberRhoRow, dTransformerVoltageControlMemberElement, dTransformerVoltageControlMemberBaseTap, dTransformerVoltageControlMemberTapStart, dTransformerVoltageControlMemberMinR1, dTransformerVoltageControlMemberMaxR1, dTransformerVoltageControlMemberInitialR1, dTransformerVoltageControlTapRows;
-    DeviceBuf dTransformerVoltageControlStep, dTransformerVoltageControlGroupStep, dTransformerVoltageControlGroupSharedMinR1, dTransformerVoltageControlGroupSharedMaxR1, dTransformerVoltageControlGroupSharedInitialR1;   // per scenario / per (scenario, group)
-    DeviceBuf dTransformerVoltageControlMemberState, dTransformerVoltageControlMemberTap, dTransformerVoltageControlMemberRoundingR1;                          // per (scenario, member)
-    DeviceBuf dTransformerVoltageControlSavedDeltaTarget, dTransformerVoltageControlRejected;                                               // per (scenario, delta row) / per scenario
+    TransformerVoltageControlContext transformerVoltageControl;
     // SECONDARY VOLTAGE CONTROL — GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL (OLF order 4). Zones of controller buses regulating a
     // pilot point: run entirely on the device, the small dense zone system included.
     int nSecondaryVoltageControlControllerBuses = 0, nSecondaryVoltageControlZones = 0;
@@ -322,8 +313,6 @@ struct BatchSolverContext {
     std::vector<double> hSecondaryVoltageControlBaseTargetV;
     double secondaryVoltageControlMinPlausibleTargetV = 0.8, secondaryVoltageControlMaxPlausibleTargetV = 1.2;
 
-    std::vector<int> hTransformerVoltageControlMemberElement, hTransformerVoltageControlMemberBaseTap, hTransformerVoltageControlMemberTapStart;
-    std::vector<double> hTransformerVoltageControlTapRows;
     // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
     // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
     // (freezeGenerationTargetQAndDisableGeneratorVoltageControl(q.eval()) — OLF's generation target is
@@ -333,9 +322,6 @@ struct BatchSolverContext {
     DeviceBuf dGeneratorVoltageControlFreezeVRow, dGeneratorVoltageControlFreezeLoadTargetQ;                       // per candidate
     DeviceBuf dGeneratorVoltageControlFrozen, dGeneratorVoltageControlFreezeSavedMode, dGeneratorVoltageControlFreezeSavedTarget;   // per (scenario, candidate)
     DeviceBuf dGeneratorVoltageControlFreezeReactiveLimitEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
-    DeviceBuf dTransformerVoltageControlFixPvRow;                                  // the fix universe: every gen-VC bus's V row
-    SlotRows<int> transformerVoltageControlFixMinMask{0}, transformerVoltageControlFixMaxMask{0};   // per (slot, member): fixWords ints each
-    int transformerVoltageControlFixWords = 0;
     // DISCRETE SHUNT VOLTAGE CONTROL — GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
     int nShuntVoltageControlMembers = 0, nShuntVoltageControlGroups = 0, nShuntVoltageControlDeltaRows = 0, nShuntVoltageControlShuntCompensators = 0, shuntVoltageControlEntryOn = 0;

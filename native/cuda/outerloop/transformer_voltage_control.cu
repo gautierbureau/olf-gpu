@@ -377,25 +377,25 @@ __global__ void transformerVoltageControlCheckBatch(TransformerVoltageControlTab
 
 static TransformerVoltageControlTables transformerVoltageControlTables(BatchSolverContext* ctx) {
     TransformerVoltageControlTables T;
-    T.nGroups = ctx->nTransformerVoltageControlGroups; T.nMembers = ctx->nTransformerVoltageControlMembers; T.nDeltaRows = ctx->nTransformerVoltageControlDeltaRows; T.mode = ctx->transformerVoltageControlMode;
-    T.groupMemberStart = ctx->dTransformerVoltageControlGroupMemberStart.as<int>(); T.groupControlledBusVRow = ctx->dTransformerVoltageControlGroupControlledBusVRow.as<int>();
-    T.groupTargetV = ctx->dTransformerVoltageControlGroupTargetV.as<double>(); T.groupHalfTargetDeadband = ctx->dTransformerVoltageControlGroupHalfTargetDeadband.as<double>(); T.groupUseInitialTapPosition = ctx->dTransformerVoltageControlGroupUseInitialTapPosition.as<int>();
-    T.deltaStart = ctx->dTransformerVoltageControlDeltaStart.as<int>(); T.deltaRow = ctx->dTransformerVoltageControlDeltaRow.as<int>();
-    T.deltaModeOn = ctx->dTransformerVoltageControlDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dTransformerVoltageControlDeltaModeOff.as<int>();
-    T.deltaTargetOn = ctx->dTransformerVoltageControlDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dTransformerVoltageControlDeltaTargetOff.as<double>();
-    T.memberRhoRow = ctx->dTransformerVoltageControlMemberRhoRow.as<int>(); T.memberElement = ctx->dTransformerVoltageControlMemberElement.as<int>();
-    T.memberBaseTap = ctx->dTransformerVoltageControlMemberBaseTap.as<int>(); T.memberTapStart = ctx->dTransformerVoltageControlMemberTapStart.as<int>();
-    T.memberMinR1 = ctx->dTransformerVoltageControlMemberMinR1.as<double>(); T.memberMaxR1 = ctx->dTransformerVoltageControlMemberMaxR1.as<double>(); T.memberInitialR1 = ctx->dTransformerVoltageControlMemberInitialR1.as<double>();
-    T.tapRows = ctx->dTransformerVoltageControlTapRows.as<double>();
-    T.scenarioStep = ctx->dTransformerVoltageControlStep.as<int>(); T.groupStep = ctx->dTransformerVoltageControlGroupStep.as<int>();
-    T.groupSharedMinR1 = ctx->dTransformerVoltageControlGroupSharedMinR1.as<double>(); T.groupSharedMaxR1 = ctx->dTransformerVoltageControlGroupSharedMaxR1.as<double>(); T.groupSharedInitialR1 = ctx->dTransformerVoltageControlGroupSharedInitialR1.as<double>();
-    T.memberState = ctx->dTransformerVoltageControlMemberState.as<int>(); T.memberTap = ctx->dTransformerVoltageControlMemberTap.as<int>(); T.memberRoundingR1 = ctx->dTransformerVoltageControlMemberRoundingR1.as<double>();
-    T.savedDeltaTarget = ctx->dTransformerVoltageControlSavedDeltaTarget.as<double>(); T.rejected = ctx->dTransformerVoltageControlRejected.as<char>();
-    T.nGeneratorVoltageControlFreezeCandidates = ctx->nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->transformerVoltageControlFixMinMask.on() ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControlFixWords;
+    T.nGroups = ctx->transformerVoltageControl.nTransformerVoltageControlGroups; T.nMembers = ctx->transformerVoltageControl.nTransformerVoltageControlMembers; T.nDeltaRows = ctx->transformerVoltageControl.nTransformerVoltageControlDeltaRows; T.mode = ctx->transformerVoltageControl.transformerVoltageControlMode;
+    T.groupMemberStart = ctx->transformerVoltageControl.dTransformerVoltageControlGroupMemberStart.as<int>(); T.groupControlledBusVRow = ctx->transformerVoltageControl.dTransformerVoltageControlGroupControlledBusVRow.as<int>();
+    T.groupTargetV = ctx->transformerVoltageControl.dTransformerVoltageControlGroupTargetV.as<double>(); T.groupHalfTargetDeadband = ctx->transformerVoltageControl.dTransformerVoltageControlGroupHalfTargetDeadband.as<double>(); T.groupUseInitialTapPosition = ctx->transformerVoltageControl.dTransformerVoltageControlGroupUseInitialTapPosition.as<int>();
+    T.deltaStart = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaStart.as<int>(); T.deltaRow = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaRow.as<int>();
+    T.deltaModeOn = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaModeOn.as<int>(); T.deltaModeOff = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaModeOff.as<int>();
+    T.deltaTargetOn = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->transformerVoltageControl.dTransformerVoltageControlDeltaTargetOff.as<double>();
+    T.memberRhoRow = ctx->transformerVoltageControl.dTransformerVoltageControlMemberRhoRow.as<int>(); T.memberElement = ctx->transformerVoltageControl.dTransformerVoltageControlMemberElement.as<int>();
+    T.memberBaseTap = ctx->transformerVoltageControl.dTransformerVoltageControlMemberBaseTap.as<int>(); T.memberTapStart = ctx->transformerVoltageControl.dTransformerVoltageControlMemberTapStart.as<int>();
+    T.memberMinR1 = ctx->transformerVoltageControl.dTransformerVoltageControlMemberMinR1.as<double>(); T.memberMaxR1 = ctx->transformerVoltageControl.dTransformerVoltageControlMemberMaxR1.as<double>(); T.memberInitialR1 = ctx->transformerVoltageControl.dTransformerVoltageControlMemberInitialR1.as<double>();
+    T.tapRows = ctx->transformerVoltageControl.dTransformerVoltageControlTapRows.as<double>();
+    T.scenarioStep = ctx->transformerVoltageControl.dTransformerVoltageControlStep.as<int>(); T.groupStep = ctx->transformerVoltageControl.dTransformerVoltageControlGroupStep.as<int>();
+    T.groupSharedMinR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMinR1.as<double>(); T.groupSharedMaxR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMaxR1.as<double>(); T.groupSharedInitialR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedInitialR1.as<double>();
+    T.memberState = ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.as<int>(); T.memberTap = ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap.as<int>(); T.memberRoundingR1 = ctx->transformerVoltageControl.dTransformerVoltageControlMemberRoundingR1.as<double>();
+    T.savedDeltaTarget = ctx->transformerVoltageControl.dTransformerVoltageControlSavedDeltaTarget.as<double>(); T.rejected = ctx->transformerVoltageControl.dTransformerVoltageControlRejected.as<char>();
+    T.nGeneratorVoltageControlFreezeCandidates = ctx->nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.on() ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControl.transformerVoltageControlFixWords;
     T.generatorVoltageControlFreezeVRow = ctx->dGeneratorVoltageControlFreezeVRow.as<int>(); T.generatorVoltageControlFreezeLoadTargetQ = ctx->dGeneratorVoltageControlFreezeLoadTargetQ.as<double>();
     T.generatorVoltageControlFreezeReactiveLimitEntry = ctx->dGeneratorVoltageControlFreezeReactiveLimitEntry.as<int>(); T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries; T.reactiveLimitQLimitType = ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>();
-    T.fixPvRow = ctx->dTransformerVoltageControlFixPvRow.as<int>();
-    T.fixMinMask = ctx->transformerVoltageControlFixMinMask.device(); T.fixMaxMask = ctx->transformerVoltageControlFixMaxMask.device();
+    T.fixPvRow = ctx->transformerVoltageControl.dTransformerVoltageControlFixPvRow.as<int>();
+    T.fixMinMask = ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.device(); T.fixMaxMask = ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.device();
     T.generatorVoltageControlFrozen = ctx->dGeneratorVoltageControlFrozen.as<int>(); T.generatorVoltageControlFreezeSavedMode = ctx->dGeneratorVoltageControlFreezeSavedMode.as<int>(); T.generatorVoltageControlFreezeSavedTarget = ctx->dGeneratorVoltageControlFreezeSavedTarget.as<double>();
     return T;
 }
@@ -405,7 +405,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     const int& outer = drv.outer;
     std::vector<char>& loopRejected = drv.loopRejected;
-    if (ctx->nTransformerVoltageControlMembers <= 0) return;
+    if (ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0) return;
     transformerVoltageControlCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(transformerVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
             ctx->dOuterLoopUnstable.as<char>());
@@ -420,19 +420,19 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> rej(nS);
-    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTransformerVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->transformerVoltageControl.dTransformerVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
     for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
     publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
-        size_t nsm = static_cast<size_t>(nS) * ctx->nTransformerVoltageControlMembers;
+        size_t nsm = static_cast<size_t>(nS) * ctx->transformerVoltageControl.nTransformerVoltageControlMembers;
         std::vector<int> memberState(nsm), step(nS);
-        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dTransformerVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTransformerVoltageControlStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(step.data(), ctx->transformerVoltageControl.dTransformerVoltageControlStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0, nRej = 0;
         for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
         for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
         std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d\n",
-                     ctx->transformerVoltageControlMode, nS, ctx->nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0]);
+                     ctx->transformerVoltageControl.transformerVoltageControlMode, nS, ctx->transformerVoltageControl.nTransformerVoltageControlMembers, nCont, nFixed, nRej, step[0]);
     }
 }
 
@@ -441,24 +441,24 @@ void transformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& dr
     const int& n = drv.n;
     const int& nS = drv.nS;
     const double nan = std::nan("");
-    const size_t nm = static_cast<size_t>(ctx->nTransformerVoltageControlMembers);
-    const size_t ng = static_cast<size_t>(ctx->nTransformerVoltageControlGroups);
+    const size_t nm = static_cast<size_t>(ctx->transformerVoltageControl.nTransformerVoltageControlMembers);
+    const size_t ng = static_cast<size_t>(ctx->transformerVoltageControl.nTransformerVoltageControlGroups);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberTap.as<int>(), nm, ctx->hTransformerVoltageControlMemberBaseTap.data());
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberState.as<int>(), nm, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlMemberRoundingR1.as<double>(), nm, nullptr, nan);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlSavedDeltaTarget.as<double>(),
-                       static_cast<size_t>(std::max(ctx->nTransformerVoltageControlDeltaRows, 1)), nullptr, nan);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlStep.as<int>(), 1, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupStep.as<int>(), ng, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedMinR1.as<double>(), ng, nullptr, 0.0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedMaxR1.as<double>(), ng, nullptr, 0.0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlGroupSharedInitialR1.as<double>(), ng, nullptr, 0.0);
-    resetInstalledRows(ctx, ctx->dTransformerVoltageControlRejected.as<char>(), 1, nullptr, char(0));
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap.as<int>(), nm, ctx->transformerVoltageControl.hTransformerVoltageControlMemberBaseTap.data());
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.as<int>(), nm, nullptr, 0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberRoundingR1.as<double>(), nm, nullptr, nan);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlSavedDeltaTarget.as<double>(),
+                       static_cast<size_t>(std::max(ctx->transformerVoltageControl.nTransformerVoltageControlDeltaRows, 1)), nullptr, nan);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlStep.as<int>(), 1, nullptr, 0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupStep.as<int>(), ng, nullptr, 0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMinR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMaxR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedInitialR1.as<double>(), ng, nullptr, 0.0);
+    resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlRejected.as<char>(), 1, nullptr, char(0));
     if (ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
         resetInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.as<int>(), ctx->nGeneratorVoltageControlFreezeCandidates, nullptr, 0);
     }
-    transformerVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(transformerVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->transformerVoltageControlEntryOn,
+    transformerVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(transformerVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->transformerVoltageControl.transformerVoltageControlEntryOn,
             ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), installMaskOrNull(ctx));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }

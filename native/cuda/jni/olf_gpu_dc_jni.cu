@@ -461,6 +461,9 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
     }
     if (k == 1) {
         out[0] = rhs[0] / a[0][0];
+        if (!isfinite(out[0])) {
+            bad[c] = 3;                                      // a singular update: never NaN flows
+        }
         return;
     }
     // Gaussian elimination, partial pivoting
@@ -498,6 +501,9 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
             v -= a[r][j] * out[j];
         }
         out[r] = v / a[r][r];
+        if (!isfinite(out[r])) {
+            bad[c] = 3;                                      // a singular update: never NaN flows
+        }
     }
 }
 
@@ -2455,6 +2461,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
             if (badHost[c]) {
                 throw std::runtime_error("contingency " + std::to_string(c) + (badHost[c] == 2
                         ? std::string(" has an element on a bus without an angle row")
+                        : badHost[c] == 3 ? std::string(": its Woodbury update is singular (an element breaking the connectivity not reconnected)")
                         : " has more than " + std::to_string(MAX_K) + " elements"));
             }
         }

@@ -695,19 +695,26 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     private static final int CONNECTED_SEARCH_LIMIT = 4096;
 
     /**
-     * Whether the contingency and the strategy's actions provably leave every bus of the main component in it: in the
-     * connectivity graph after them (OLF's: every branch connected at both sides but the closable ones loaded open,
-     * without the contingency's branches and those the actions open, with those they close), the two ends of every
-     * removed edge still meet (a bounded search from both ends), and every closed branch joins buses live in the base
-     * case (no dead part re-energized). Exact when true; false only means unproven.
+     * Whether the strategy's actions provably leave the contingency's main component as it is: in OLF's connectivity graph
+     * after the contingency and the actions (every branch connected at both sides but the closable ones loaded open,
+     * without the contingency's branches and those the actions open, with those they close), every branch an action
+     * opens has its two ends in it meeting again (a bounded search from both ends) or lies in a part dead in the base
+     * case (apart from the contingency's lost part, whose inner structure OLF's elements to reconnect read), and
+     * every branch an action closes joins two of its buses. Then no bus leaves it (a path through an opened branch goes
+     * around it) and none joins it (no closed branch reaches out of it): the strategy's connectivity is the contingency's.
+     * Exact when true; false only means unproven.
      */
-    private static boolean provablyConnected(LfNetwork lfNetwork, PropagatedContingency contingency, LfOperatorStrategy los, StrategySetup strategySetup) {
+    private static boolean provablyUnchanged(LfNetwork lfNetwork, ConnectivityBreakAnalysis.ConnectivityAnalysisResult postContingency,
+                                             LfOperatorStrategy los, StrategySetup strategySetup) {
         if (strategySetup.loadedOpen() == null) {
             return false;
         }
+        Set<LfBus> lost = postContingency.getDisabledBuses();
+        java.util.function.Predicate<LfBus> inMain = bus -> !bus.isDisabled() && !lost.contains(bus);
         Set<LfBranch> removed = new HashSet<>();
+        Set<LfBranch> opened = new HashSet<>();
         Set<LfBranch> added = new HashSet<>();
-        for (String id : contingency.getBranchIdsToOpen().keySet()) {
+        for (String id : postContingency.getPropagatedContingency().getBranchIdsToOpen().keySet()) {
             LfBranch branch = lfNetwork.getBranchById(id);
             if (branch != null && branch.getBus1() != null && branch.getBus2() != null) {
                 removed.add(branch);
@@ -720,15 +727,18 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             }
             for (ComputedElement element : elements) {
                 if (element instanceof ComputedSwitchBranchElement sw && sw.getLfBranch().getBus1() != null && sw.getLfBranch().getBus2() != null) {
+                    LfBranch branch = sw.getLfBranch();
                     if (sw.isEnabled()) {
-                        if (sw.getLfBranch().getBus1().isDisabled() || sw.getLfBranch().getBus2().isDisabled()) {
+                        if (!inMain.test(branch.getBus1()) || !inMain.test(branch.getBus2())) {
                             return false;
                         }
-                        added.add(sw.getLfBranch());
-                        removed.remove(sw.getLfBranch());
+                        added.add(branch);
+                        removed.remove(branch);
+                        opened.remove(branch);
                     } else {
-                        removed.add(sw.getLfBranch());
-                        added.remove(sw.getLfBranch());
+                        removed.add(branch);
+                        opened.add(branch);
+                        added.remove(branch);
                     }
                 }
             }
@@ -736,8 +746,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         Set<LfBranch> loadedOpen = strategySetup.loadedOpen();
         java.util.function.Predicate<LfBranch> isEdge = b -> b.getBus1() != null && b.getBus2() != null && !removed.contains(b)
                 && (added.contains(b) || !loadedOpen.contains(b));
-        for (LfBranch edge : removed) {
-            if (!meet(edge.getBus1(), edge.getBus2(), isEdge)) {
+        for (LfBranch edge : opened) {
+            boolean in1 = inMain.test(edge.getBus1());
+            boolean in2 = inMain.test(edge.getBus2());
+            if (edge.getBus1().isDisabled() && edge.getBus2().isDisabled()) {
+                continue;                                    // in a part dead in the base case: apart from all the rest
+            }
+            if (!in1 || !in2 || !meet(edge.getBus1(), edge.getBus2(), isEdge)) {
                 return false;
             }
         }
@@ -798,11 +813,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             if (!topological || maxSum[i] <= 1d - CONNECTIVITY_LOSS_THRESHOLD) {
                 connectivity = postContingency.withOperatorStrategy(los);
                 strategyContingency = sc.candidate().lfContingency();    // the same disabled elements: the contingency's
-            } else if (provablyConnected(lfNetwork, postContingency.getPropagatedContingency(), los, strategySetup)) {
-                // every removed edge's ends still meet: nothing leaves the main component, which OLF's graph check
-                // would conclude (it is the costly part on a network with every breaker retained)
-                connectivity = ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
-                        postContingency.getPropagatedContingency(), los, lfNetwork);
+            } else if (provablyUnchanged(lfNetwork, postContingency, los, strategySetup)) {
+                // the actions leave the contingency's main component as it is: its connectivity, which OLF's graph check
+                // would rebuild (the contingency's whole lost part, per strategy, on a network with every breaker retained)
+                connectivity = postContingency.withOperatorStrategy(los);
                 strategyContingency = sc.candidate().lfContingency();
             } else {
                 graphChecks[0]++;
@@ -814,6 +828,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 // PropagatedContingency.toLfContingency takes from the contingency alone (whatever buses are lost): the
                 // contingency's (the disabled branches come from the connectivity result itself)
                 strategyContingency = sc.candidate().lfContingency();
+                if (GpuTrace.PHASE_TIME.isOn()) {
+                    graphChecks[1] += connectivity.getDisabledBuses().size();
+                    graphChecks[2] = Math.max(graphChecks[2], connectivity.getDisabledBuses().size());
+                    graphChecks[3] += postContingency.getDisabledBuses().size();
+                }
             }
             Set<String> toReconnect = connectivity.getElementsToReconnect();
             List<ComputedElement> elements = new ArrayList<>();
@@ -891,9 +910,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             ctgPtr[i + 1] = criterionElems.size();
         }
         double[] maxSum = solver.connectivityCriterion(ctgPtr, criterionElems.stream().mapToInt(Integer::intValue).toArray());
-        int[] graphCheckCount = new int[1];
+        int[] graphCheckCount = new int[4];
         List<StrategyScenario> resolved = resolveStrategies(scenarios, maxSum, lfNetwork, elementByBranch, strategySetup, graphCheckCount);
         graphChecks = graphCheckCount[0];
+        if (GpuTrace.PHASE_TIME.isOn() && graphChecks > 0) {
+            System.err.printf("DC_WOODBURY_GRAPH_CHECKS %d: lost buses per check %.1f (max %d), of which the contingency's %.1f%n", graphChecks,
+                    graphCheckCount[1] / (double) graphChecks, graphCheckCount[2], graphCheckCount[3] / (double) graphChecks);
+        }
         long tConnectivity = System.nanoTime() - t0;
         // --- chunks: every strategy scenario has a modified target (the stock re-solves whenever an action is present)
         double[] states = new double[n * DEVICE_CHUNK];

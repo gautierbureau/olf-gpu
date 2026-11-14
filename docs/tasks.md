@@ -601,7 +601,26 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
     OLF's own solves): every contingency's sensitivities are the "device's" values, OLF's to 1e-9, every function kind;
     a bus reactive injection function goes to the host path; a GLSK losing an element to the CPU.
     **Not verified:** the CUDA is syntax-checked only (clang 18's CUDA front end against stub runtime/cuDSS headers, host
-    and device passes, here no nvcc); the GPU-gated `deviceContractionGivesOlfsSensitivities` runs it.
+    and device passes, here no nvcc); the GPU-gated `deviceContractionGivesOlfsSensitivities` runs it. (Since run on an
+    RTX A1000, 2026-11-13: passes.)
+- **Measured on a GPU (2026-11-14, RTX A1000 laptop, cuDSS 0.8.0), `GpuVsCpuSensitivityBenchmarkTest`:** PEGASE 9241,
+  the 500 matched contingencies, RTE parameters (`rte-loadflow-default-parameters.json`), sparse factory on both sides,
+  4,500 factors (200 branches' P1 x the 20 largest generators' injections, 50 bus voltages x 10 target voltages),
+  2.25 million values a run.
+  - **Accuracy:** every value present on both sides, same statuses (499 SUCCESS, 1 FAILURE), no NaN mismatch. Largest
+    differences against OLF: active flow sensitivities 2.0e-8, bus voltage sensitivities 1.9e-9, flow references
+    3.1e-9 MW, voltage references 1.4e-13. 499 contingencies batched, all 499 valued on the device (none fell back).
+  - **Time:** GPU cold 15.1 s, warm 12.8 to 13.5 s; CPU 4 threads 15.5 to 16.3 s, 1 thread 48.5 s. So 3.7x the
+    single-threaded CPU and 1.2x the 4-thread CPU.
+  - **Where the GPU run's time goes** (JFR on the analysis thread, three GPU runs): the device batch about 7%, bringing
+    each state in about 8%, and the rest is host work. The host's single thread is the limit, not the device:
+    - `GpuSensitivityBasis.verifiedValues` 30%: per contingency the dense right-hand side (rows x groups) is turned into
+      boxed `HashMap`s on stable rows and compared with the device's combination. Plain arrays, and the stable-row map
+      computed once per equation-system shape, should take most of it away.
+    - OLF's per-contingency `NetworkState.restore` 28%. This is OLF's own loop and costs the same on the CPU.
+    - `participationByContingency` 18%: an extra apply and restore of every contingency, only to read its slack
+      participation. Could be taken from the precompute's scenarios, or computed without applying.
+    - `runPostContingencyLoadFlow` / `GpuNewtonRaphson` 5%: the base load flow plus the contingency that fails.
 - **Then post-action states:** after the move, the same batch over contingency + operator strategy pairs (the security
   analysis's batch already composes strategies, `GpuStrategyComposer`), on top of #1385.
 

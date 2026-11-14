@@ -125,7 +125,7 @@ from those two lists; add a channel there, then here.
 | `OLF_EQ_DUMP` | OLF patch, NewtonRaphson — writes the equation system OLF is about to solve as text (variable rows, column->equation map, `writeToString(true)`). The one question a residual cannot answer is WHICH equation sits on a row, and OLF will simply print it |
 | `OLF_RL_PROBE_BUS` | (OLF repo, branch olf-local-patches) src/main/java/com/powsybl/openloadflow/ac/outerloop/ReactiveLimitsOuterLoop.java |
 
-## Test scope selectors (8)
+## Test scope selectors (11)
 
 Choose which contingencies a validation run covers. They change what is measured, not how it is computed.
 
@@ -135,6 +135,9 @@ Choose which contingencies a validation run covers. They change what is measured
 | `OLF_GPU_SA_CPU_ARM_MODE` | see `OLF_GPU_SA_CPU_ARM_DIR` (`save` / `load`) |
 | `OLF_GPU_SA_GPU_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `1`: run the CPU arm on an EMPTY contingency list (debug lever: the GPU arm's own behaviour on a large scope in minutes; every comparison is then meaningless and the CPU base sits on a different bus decomposition). |
 | `OLF_GPU_CONT_FILE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:77 +4 |
+| `OLF_GPU_SENSI_BENCH` | src/test/java/com/powsybl/openloadflow/sensi/gpu/GpuVsCpuSensitivityBenchmarkTest.java — set: run the GPU against CPU sensitivity benchmark (with `OLF_GPU_CONT_FILE`); unset, it is skipped |
+| `OLF_GPU_SENSI_CASE` | src/test/java/com/powsybl/openloadflow/sensi/gpu/GpuVsCpuSensitivityBenchmarkTest.java — the case under `OLF_GPU_CASE_DIR` to run instead of case9241pegase |
+| `OLF_GPU_SENSI_NCTG` | src/test/java/com/powsybl/openloadflow/sensi/gpu/GpuVsCpuSensitivityBenchmarkTest.java — keep only the first N contingencies of `OLF_GPU_CONT_FILE` |
 | `OLF_GPU_SA_CTG_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:218 +1 |
 | `OLF_GPU_SA_MAX_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:233 |
 | `OLF_GPU_SA_CASE_FILE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — path of the case to run instead of rte6515 (e.g. `network.xiidm` at the repo root); the other selectors apply unchanged |

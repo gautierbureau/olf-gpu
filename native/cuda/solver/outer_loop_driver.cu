@@ -184,7 +184,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // that has the loop (distributedSlackOuterLoop / reactiveLimitsOuterLoop).
     bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0)
                                              || (ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution))
-                                             || ctx->nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
+                                             || ctx->nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
                                              || ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0 || ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0
                                              || ctx->nOverloadManagementSystems > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
@@ -348,7 +348,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->nIncrementalTransformerReactivePowerControlControllerBranches > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL;  // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
     }
-    if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
+    if (ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL;  // OLF order 10: ShuntVoltageControl, IN-KERNEL
     } else if (ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL;  // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL

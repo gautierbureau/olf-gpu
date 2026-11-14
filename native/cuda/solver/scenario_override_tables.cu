@@ -58,14 +58,14 @@ void ensureTapControllers(BatchSolverContext* ctx) {
 
 // The incremental shunt loop's controllers that have a PACK shunt element (the others act through SHUNT_B only).
 void ensureShuntControllers(BatchSolverContext* ctx) {
-    std::vector<int> counts = {ctx->nIncrementalShuntVoltageControlControllerShunts};
+    std::vector<int> counts = {ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts};
     if (counts == ctx->hShuntAdmittanceOverrideControllerCounts) return;
     ctx->hShuntAdmittanceOverrideControllerCounts = counts;
     int nControllers = counts[0];
     ctx->nShuntAdmittanceOverrideControllers = nControllers;
     if (nControllers == 0) return;
-    std::vector<int> controllerElement(ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin(),
-                                       ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin() + nControllers);
+    std::vector<int> controllerElement(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin(),
+                                       ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.begin() + nControllers);
     std::vector<int> start, controller;
     elementControllers(ctx->structure->shunt.elementCount, controllerElement, start, controller);
     ctx->dShuntAdmittanceOverrideElementControllerStart.upload(start.data(), start.size() * sizeof(int));
@@ -190,10 +190,10 @@ void publishShuntAdmittanceOverrides(BatchSolverContext* ctx) {
     size_t nsc = static_cast<size_t>(nS) * nControllers;
     ctx->dShuntAdmittanceOverrideSectionsMoved.ensure(nsc);
     ctx->dShuntAdmittanceOverrideControllerDelta.ensure(nsc * 2 * sizeof(double));
-    publishSectionMovesBatch<<<grid(nControllers * nS), BLOCK, 0, ctx->stream>>>(nS, nControllers, ctx->nIncrementalShuntVoltageControlShuntCompensators,
-            ctx->dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(), ctx->dIncrementalShuntVoltageControlSectionStart.as<int>(),
-            ctx->dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->dIncrementalShuntVoltageControlSectionG.as<double>(),
-            ctx->dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->dIncrementalShuntVoltageControlPosition.as<int>(),
+    publishSectionMovesBatch<<<grid(nControllers * nS), BLOCK, 0, ctx->stream>>>(nS, nControllers, ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators,
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionStart.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionG.as<double>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.as<int>(),
             ctx->dShuntAdmittanceOverrideSectionsMoved.as<char>(), ctx->dShuntAdmittanceOverrideControllerDelta.as<double>());
 }
 

@@ -16,8 +16,8 @@ OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, setBatchAutomationSystem)(
     if (ctx == nullptr) {
         return;
     }
-    ctx->nOverloadManagementSystems = 0;
-    ctx->nOverloadManagementSystemTrippings = 0;
+    ctx->automationSystem.nOverloadManagementSystems = 0;
+    ctx->automationSystem.nOverloadManagementSystemTrippings = 0;
     if (jMonitoredElement == nullptr || env->GetArrayLength(jMonitoredElement) == 0) {
         return;
     }
@@ -26,21 +26,21 @@ OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, setBatchAutomationSystem)(
         buf.upload(p, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(a))) * sizeof(int));
         env->ReleaseIntArrayElements(a, p, JNI_ABORT);
     };
-    upI(jMonitoredElement, ctx->dOverloadManagementSystemMonitoredElement);
-    upI(jMonitoredSide, ctx->dOverloadManagementSystemMonitoredSide);
-    upI(jTrippingStart, ctx->dOverloadManagementSystemTrippingStart);
-    upI(jOperatedMaskSlot, ctx->dOverloadManagementSystemOperatedMaskSlot);
+    upI(jMonitoredElement, ctx->automationSystem.dOverloadManagementSystemMonitoredElement);
+    upI(jMonitoredSide, ctx->automationSystem.dOverloadManagementSystemMonitoredSide);
+    upI(jTrippingStart, ctx->automationSystem.dOverloadManagementSystemTrippingStart);
+    upI(jOperatedMaskSlot, ctx->automationSystem.dOverloadManagementSystemOperatedMaskSlot);
     jbyte* open = env->GetByteArrayElements(jOpenAction, nullptr);
-    ctx->dOverloadManagementSystemOpenAction.upload(open, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jOpenAction))));
+    ctx->automationSystem.dOverloadManagementSystemOpenAction.upload(open, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jOpenAction))));
     env->ReleaseByteArrayElements(jOpenAction, open, JNI_ABORT);
     jdouble* threshold = env->GetDoubleArrayElements(jThreshold, nullptr);
-    ctx->dOverloadManagementSystemThreshold.upload(threshold, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jThreshold))) * sizeof(double));
+    ctx->automationSystem.dOverloadManagementSystemThreshold.upload(threshold, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jThreshold))) * sizeof(double));
     env->ReleaseDoubleArrayElements(jThreshold, threshold, JNI_ABORT);
     std::vector<int> operatedMaskSlot(static_cast<size_t>(env->GetArrayLength(jOperatedMaskSlot)));
     env->GetIntArrayRegion(jOperatedMaskSlot, 0, static_cast<jsize>(operatedMaskSlot.size()), operatedMaskSlot.data());
-    ctx->hOverloadManagementSystemOperatedMaskSlot = operatedMaskSlot;
-    ctx->nOverloadManagementSystems = env->GetArrayLength(jMonitoredElement);
-    ctx->nOverloadManagementSystemTrippings = static_cast<int>(operatedMaskSlot.size());
+    ctx->automationSystem.hOverloadManagementSystemOperatedMaskSlot = operatedMaskSlot;
+    ctx->automationSystem.nOverloadManagementSystems = env->GetArrayLength(jMonitoredElement);
+    ctx->automationSystem.nOverloadManagementSystemTrippings = static_cast<int>(operatedMaskSlot.size());
 }
 
 // Per scenario and tripping (s * nTrippings + t), whether the solve left the tripping's branch disabled (1) or enabled (0).
@@ -48,10 +48,10 @@ extern "C" JNIEXPORT jbyteArray JNICALL
 OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, readBatchAutomationSystemOperatedDisabled)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nOverloadManagementSystems <= 0) {
+    if (ctx == nullptr || ctx->automationSystem.nOverloadManagementSystems <= 0) {
         return nullptr;
     }
-    int nTrippings = ctx->nOverloadManagementSystemTrippings;
+    int nTrippings = ctx->automationSystem.nOverloadManagementSystemTrippings;
     std::vector<char> disabled;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(readInstalledRows(ctx, ctx->dDisabled.p, static_cast<size_t>(ctx->nElements), disabled));
@@ -59,7 +59,7 @@ OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, readBatchAutomationSystemOpera
     std::vector<jbyte> host(static_cast<size_t>(nRows) * nTrippings);
     for (int s = 0; s < nRows; s++) {
         for (int t = 0; t < nTrippings; t++) {
-            host[(size_t) s * nTrippings + t] = disabled[(size_t) s * ctx->nElements + ctx->hOverloadManagementSystemOperatedMaskSlot[t]];
+            host[(size_t) s * nTrippings + t] = disabled[(size_t) s * ctx->nElements + ctx->automationSystem.hOverloadManagementSystemOperatedMaskSlot[t]];
         }
     }
     jbyteArray out = env->NewByteArray(static_cast<jsize>(host.size()));

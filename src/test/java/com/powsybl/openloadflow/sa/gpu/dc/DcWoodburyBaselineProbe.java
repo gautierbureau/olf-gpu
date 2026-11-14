@@ -134,6 +134,11 @@ class DcWoodburyBaselineProbe {
             Arm gpu = run("GPU", new SparseMatrixFactory(), network, contingencies, monitoredBranches, 1, true);
             System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d (GPU-only run)%n",
                     gpu.name(), gpu.wallMs(), gpu.wallMs() / (double) contingencies.size(), statusCounts(gpu.result()), violationCount(gpu.result()));
+            if ("1".equals(System.getenv("OLF_DC_REFERENCE"))) {
+                // OLF_DC_REFERENCE=1 with OLF_DC_SKIP_KLU=1: the GPU against the (non-fast) DC security analysis only
+                Arm reference = run(REFERENCE, new SparseMatrixFactory(), network, contingencies, monitoredBranches, 1);
+                printBranches(List.of(reference, gpu));
+            }
             return;
         }
         if ("1".equals(System.getenv("OLF_DC_SKIP_KLU"))) {

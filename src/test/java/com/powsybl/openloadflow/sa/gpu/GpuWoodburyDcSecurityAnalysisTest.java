@@ -573,6 +573,57 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertEquals(0, GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get(), "device columns differing from the host's");
     }
 
+    /**
+     * A contingency stranding the slack bus (B8, behind L7-8-1 only): as the stock fast DC (and the AC) security analysis,
+     * the largest component is the main one, for the contingency and its operator strategy, on the device too.
+     */
+    @Test
+    void contingencyStrandingTheSlackBus() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevel("VL1").removeExtension(com.powsybl.iidm.network.extensions.SlackTerminal.class);
+        com.powsybl.iidm.network.extensions.SlackTerminal.attach(network.getGenerator("B8-G").getTerminal().getBusBreakerView().getBus());
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("g3Up").withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new com.powsybl.action.TerminalsConnectionAction("openL6-13", "L6-13-1", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategy", ContingencyContext.specificContingency("L7-8-1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("g2Down", "g3Up", "openL6-13")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        // the rest of the grid computed, not lost with the slack bus's corner
+        PostContingencyResult stranding = gpu.getPostContingencyResults().stream().filter(r -> r.getContingency().getId().equals("L7-8-1")).findFirst().orElseThrow();
+        assertTrue(stranding.getConnectivityResult().getDisconnectedLoadActivePower() < 1, "only the slack bus's corner (no load) lost");
+    }
+
+    /**
+     * Strategies opening a branch their contingency already disables: one it opens (L1-2-1), one inside the part it
+     * disconnects (L7-8-1 isolating bus 8, the strategy opening it again), and the CPU's answer (the contingency's state).
+     * Before the no-op filter the Woodbury update removed the branch twice: wrong flows, or a singular update and NaN.
+     */
+    @Test
+    void actionOpeningABranchTheContingencyDisables() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionAction("openL1-2", "L1-2-1", true),
+                new com.powsybl.action.TerminalsConnectionAction("openL7-8", "L7-8-1", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("again", ContingencyContext.specificContingency("L1-2-1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openL1-2")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("lost", ContingencyContext.specificContingency("L7-8-1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openL7-8")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+    }
+
     /** The security analysis on cuDSS too (GpuLoadFlowParameters.linearSolver = CUDSS): the default is our batched LU. */
     @Test
     void cudssLinearSolverMatchesStock() {

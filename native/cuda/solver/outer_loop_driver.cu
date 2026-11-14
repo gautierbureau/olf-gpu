@@ -186,7 +186,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                              || (ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches > 0 || ctx->phaseControl.nPhaseControlControllerBranches > 0
                                              || ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0 || ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0 || ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0
-                                             || ctx->nOverloadManagementSystems > 0);
+                                             || ctx->automationSystem.nOverloadManagementSystems > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
     // only a negative value (no cap given) takes OLF's default of 3.
@@ -353,7 +353,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else if (ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL;  // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
     }
-    if (ctx->nOverloadManagementSystems > 0) {
+    if (ctx->automationSystem.nOverloadManagementSystems > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::AUTOMATION_SYSTEM;  // OLF's last loop: AutomationSystem
     }
     if (nLoops == 0) {

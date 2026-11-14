@@ -35,6 +35,7 @@
 #include "context/secondary_voltage_control_context.cuh"
 #include "context/incremental_flow_control_context.cuh"
 #include "context/phase_control_context.cuh"
+#include "context/automation_system_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -234,15 +235,7 @@ struct BatchSolverContext {
                                                              // read-backs above describe the LAST solve only
     int newtonLoopIterations = 0;                            // the batched Newton iterations of the last solveBatchContext call
     AreaInterchangeControlContext areaInterchangeControl;
-    // AutomationSystem (setBatchAutomationSystem, GpuOuterLoopKind::AUTOMATION_SYSTEM): OLF's AutomationSystemOuterLoop, its
-    // last loop. Per overload management system: its monitored closed-branch element and side (GpuTwoSides) and the slice
-    // of its trippings (dOverloadManagementSystemTrippingStart, nSystems + 1). Per tripping: the disabled-mask slot of the
-    // closed branch it operates (also kept host-side for the read-back), whether it opens it, its current threshold (pu).
-    int nOverloadManagementSystems = 0, nOverloadManagementSystemTrippings = 0;
-    DeviceBuf dOverloadManagementSystemMonitoredElement, dOverloadManagementSystemMonitoredSide, dOverloadManagementSystemTrippingStart;
-    DeviceBuf dOverloadManagementSystemOperatedMaskSlot, dOverloadManagementSystemOpenAction, dOverloadManagementSystemThreshold;
-    std::vector<int> hOverloadManagementSystemOperatedMaskSlot;
-    DeviceBuf dAutomationSystemSwitched;                                            // per (scenario, tripping): a check's decisions
+    AutomationSystemContext automationSystem;
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses, outerLoopChecks;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
     // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:

@@ -23,7 +23,7 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchIncrementalTr
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nIncrementalTransformerVoltageControlControllerBranches = 0;
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches = 0;
     if (jRhoRow == nullptr || env->GetArrayLength(jRhoRow) == 0) {
         return 0;
     }
@@ -39,35 +39,35 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchIncrementalTr
     readI(jGroupControllerStart, groupControllerStart);                              // shared controlled buses run in-kernel too
     std::vector<int> vRow, groupController;
     std::vector<double> targetV, halfTargetDeadband;
-    readI(jRhoRow, ctx->hIncrementalTransformerVoltageControlRhoRow);
+    readI(jRhoRow, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow);
     readI(jVRow, vRow);
     readD(jTargetV, targetV);
     readD(jHalfTargetDeadband, halfTargetDeadband);
-    readI(jControllerElement, ctx->hIncrementalTransformerVoltageControlElement);
-    readI(jTapStart, ctx->hIncrementalTransformerVoltageControlTapStart);
-    readD(jTapRows, ctx->hIncrementalTransformerVoltageControlTapRows);
-    readI(jBaseTap, ctx->hIncrementalTransformerVoltageControlBaseTap);
+    readI(jControllerElement, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement);
+    readI(jTapStart, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart);
+    readD(jTapRows, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows);
+    readI(jBaseTap, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap);
     readI(jGroupController, groupController);
-    int nc = static_cast<int>(ctx->hIncrementalTransformerVoltageControlRhoRow.size());
-    ctx->dIncrementalTransformerVoltageControlRhoRow.upload(ctx->hIncrementalTransformerVoltageControlRhoRow.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlElement.upload(ctx->hIncrementalTransformerVoltageControlElement.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTapStart.upload(ctx->hIncrementalTransformerVoltageControlTapStart.data(), ctx->hIncrementalTransformerVoltageControlTapStart.size() * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTapRows.upload(ctx->hIncrementalTransformerVoltageControlTapRows.data(), ctx->hIncrementalTransformerVoltageControlTapRows.size() * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlBaseTap.upload(ctx->hIncrementalTransformerVoltageControlBaseTap.data(), nc * sizeof(int));
-    ctx->nIncrementalTransformerVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
-    ctx->dIncrementalTransformerVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
-    ctx->incrementalTransformerVoltageControlMaxTapShift = maxTapShift > 0 ? maxTapShift : 1;
+    int nc = static_cast<int>(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow.size());
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlRhoRow.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlElement.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapStart.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart.data(), ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapRows.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows.data(), ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows.size() * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlBaseTap.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.incrementalTransformerVoltageControlMaxTapShift = maxTapShift > 0 ? maxTapShift : 1;
     size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
-    ctx->dIncrementalTransformerVoltageControlCurrentTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlCurrentDirection.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlAllowedDirection.ensure(nst * sizeof(int));
-    ctx->nIncrementalTransformerVoltageControlControllerBranches = nc;
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentDirection.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDirectionChangeCount.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAllowedDirection.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches = nc;
     return 1;
 }
 
@@ -75,12 +75,12 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchIncrementalTransformerVoltageControlTaps)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->dIncrementalTransformerVoltageControlCurrentTap.p) {
+    if (ctx == nullptr || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.p) {
         return nullptr;
     }
     std::vector<int> host;
-    readInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentTap.p,
-                      static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches), host);
+    readInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.p,
+                      static_cast<size_t>(ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches), host);
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

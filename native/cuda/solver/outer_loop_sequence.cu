@@ -35,9 +35,9 @@ void initOuterLoopSequence(OuterLoopSequence& seq, BatchSolverContext* ctx, cons
     // conservative direction, since a check that fires too early only routes to the CPU.
     seq.realisticFixingIdx = -1;
     for (int i = 0; i < drv.nLoops; i++) {
-        bool isFixing = ctx->realisticFixingLoop == GpuRealisticVoltageFixingLoop::REACTIVE_LIMITS
+        bool isFixing = ctx->realisticVoltage.realisticFixingLoop == GpuRealisticVoltageFixingLoop::REACTIVE_LIMITS
                 ? drv.loopOrder[i] == GpuOuterLoopKind::REACTIVE_LIMITS
-                : (ctx->realisticFixingLoop == GpuRealisticVoltageFixingLoop::TRANSFORMER_VOLTAGE_CONTROL
+                : (ctx->realisticVoltage.realisticFixingLoop == GpuRealisticVoltageFixingLoop::TRANSFORMER_VOLTAGE_CONTROL
                         && drv.loopOrder[i] == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL
                         && ctx->transformerVoltageControl.transformerVoltageControlMode != GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL);
         if (isFixing) {
@@ -75,7 +75,7 @@ void checkSolvedScenarios(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSeq
     // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
-    if (ctx->realisticCheck) {
+    if (ctx->realisticVoltage.realisticCheck) {
         std::vector<char> gate(nS);
         bool anyGate = false;
         for (int s = 0; s < nS; s++) {
@@ -151,7 +151,7 @@ void checkSolvedScenarios(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSeq
         // state it leaves (runOuterLoop, after its do-while), whether or not the loop re-solved. The solve gate
         // above only sees the solves of the LATER loops, so with that loop last in the order (the discrete
         // TransformerVoltageControl under the validation parameters) only the final state was ever checked.
-        if (ctx->realisticCheck && i == seq.realisticFixingIdx) {
+        if (ctx->realisticVoltage.realisticCheck && i == seq.realisticFixingIdx) {
             std::vector<char> gate(nS);
             for (int s = 0; s < nS; s++) {
                 gate[s] = (outerLoopCheckActive[s] && !outerLoopUnstable[s] && res.status[s] == GpuAcSolverStatus::CONVERGED && live[s]) ? 1 : 0;

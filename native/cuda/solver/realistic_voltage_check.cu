@@ -52,23 +52,23 @@ void rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const std::vect
     int& loopIdx = drv.loopIdx;
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     BatchResult& res = drv.res;
-    if (!ctx->dRealisticGate.p) ctx->dRealisticGate.alloc(nS * sizeof(char));
-    if (!ctx->dRealisticBad.p) ctx->dRealisticBad.alloc(nS * sizeof(char));
-    CUDA_CHECK(cudaMemcpyAsync(ctx->dRealisticGate.p, gate.data(), nS * sizeof(char),
+    if (!ctx->realisticVoltage.dRealisticGate.p) ctx->realisticVoltage.dRealisticGate.alloc(nS * sizeof(char));
+    if (!ctx->realisticVoltage.dRealisticBad.p) ctx->realisticVoltage.dRealisticBad.alloc(nS * sizeof(char));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->realisticVoltage.dRealisticGate.p, gate.data(), nS * sizeof(char),
                                cudaMemcpyHostToDevice, ctx->stream));
-    CUDA_CHECK(cudaMemsetAsync(ctx->dRealisticBad.p, 0, nS * sizeof(char), ctx->stream));
-    realisticCheckBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dRealisticRow.as<char>(),
-            ctx->dX.as<double>(), ctx->dRealisticGate.as<char>(),
-            ctx->realisticMinV, ctx->realisticMaxV, ctx->dRealisticBad.as<char>());
+    CUDA_CHECK(cudaMemsetAsync(ctx->realisticVoltage.dRealisticBad.p, 0, nS * sizeof(char), ctx->stream));
+    realisticCheckBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->realisticVoltage.dRealisticRow.as<char>(),
+            ctx->dX.as<double>(), ctx->realisticVoltage.dRealisticGate.as<char>(),
+            ctx->realisticVoltage.realisticMinV, ctx->realisticVoltage.realisticMaxV, ctx->realisticVoltage.dRealisticBad.as<char>());
     std::vector<char> bad(nS);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(bad.data(), ctx->realisticVoltage.dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
     static const bool traceUnrealistic = traceOn(Trace::UNREALISTIC_TRACE);
     for (int s = 0; s < nS; s++) {
         if (bad[s]) {
             if (traceUnrealistic) {
                 std::fprintf(stderr, "GPU_UNREALISTIC_SWEEP slot=%d outer=%d loop=%d band=[%.4f, %.4f]\n",
-                             s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
+                             s, outer, loopOrder[loopIdx], ctx->realisticVoltage.realisticMinV, ctx->realisticVoltage.realisticMaxV);
             }
             traceReject(s, "unrealistic-state", outer, 0);
             res.status[s] = GpuAcSolverStatus::REJECTED;          // the CPU replays it

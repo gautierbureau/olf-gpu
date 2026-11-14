@@ -37,6 +37,7 @@
 #include "context/phase_control_context.cuh"
 #include "context/automation_system_context.cuh"
 #include "context/monitoring_voltage_context.cuh"
+#include "context/generator_voltage_control_freeze_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -247,15 +248,7 @@ struct BatchSolverContext {
     TransformerVoltageControlContext transformerVoltageControl;
     SecondaryVoltageControlContext secondaryVoltageControl;
 
-    // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
-    // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
-    // (freezeGenerationTargetQAndDisableGeneratorVoltageControl(q.eval()) — OLF's generation target is
-    // the NET injection, so the row target is eval − loadQ), re-enabled at COMPLETE; plus
-    // fixTransformerVoltageControls' PV-bus lists per member (the not-controlled side's component).
-    int nGeneratorVoltageControlFreezeCandidates = 0;
-    DeviceBuf dGeneratorVoltageControlFreezeVRow, dGeneratorVoltageControlFreezeLoadTargetQ;                       // per candidate
-    DeviceBuf dGeneratorVoltageControlFrozen, dGeneratorVoltageControlFreezeSavedMode, dGeneratorVoltageControlFreezeSavedTarget;   // per (scenario, candidate)
-    DeviceBuf dGeneratorVoltageControlFreezeReactiveLimitEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
+    GeneratorVoltageControlFreezeContext generatorVoltageControlFreeze;
     ShuntVoltageControlContext shuntVoltageControl;
 
     SlotTable frozenRows{1, 0};                            // per slot: the rows an islanding outage froze to a flat identity state

@@ -105,7 +105,7 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVo
         return 0;
     }
     ctx->transformerVoltageControl.nTransformerVoltageControlMembers = 0;
-    ctx->nGeneratorVoltageControlFreezeCandidates = 0;
+    ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates = 0;
     ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.clear();
     ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.clear();
     ctx->transformerVoltageControl.transformerVoltageControlFixWords = 0;
@@ -218,15 +218,15 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchGeneratorVolt
         if (static_cast<int>(reactiveLimitEntry.size()) != nGeneratorVoltageControlFreezeCandidates) {
             reactiveLimitEntry.assign(nGeneratorVoltageControlFreezeCandidates, -1);                         // no remote candidate
         }
-        ctx->dGeneratorVoltageControlFreezeVRow.upload(vRow.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeLoadTargetQ.upload(loadQ.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(double));
-        ctx->dGeneratorVoltageControlFreezeReactiveLimitEntry.upload(reactiveLimitEntry.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeVRow.upload(vRow.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeLoadTargetQ.upload(loadQ.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(double));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeReactiveLimitEntry.upload(reactiveLimitEntry.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
         size_t nsc = static_cast<size_t>(ctx->nScenarios) * nGeneratorVoltageControlFreezeCandidates;
-        ctx->dGeneratorVoltageControlFrozen.ensure(nsc * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeSavedMode.ensure(nsc * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeSavedTarget.ensure(nsc * sizeof(double));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.ensure(nsc * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedMode.ensure(nsc * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedTarget.ensure(nsc * sizeof(double));
     }
-    ctx->nGeneratorVoltageControlFreezeCandidates = nGeneratorVoltageControlFreezeCandidates;
+    ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates = nGeneratorVoltageControlFreezeCandidates;
     ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.clear();                               // armed by setBatchTransformerVoltageControlFixMasks
     ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.clear();
     ctx->transformerVoltageControl.transformerVoltageControlFixWords = 0;
@@ -265,20 +265,20 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchGeneratorVoltageControlFreeze)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0 || ctx->nGeneratorVoltageControlFreezeCandidates <= 0 || !ctx->dGeneratorVoltageControlFrozen.p) {
+    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0 || ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates <= 0 || !ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.p) {
         return nullptr;
     }
     int n = ctx->n;
     const int nRows = installedSlotCount(ctx);
-    size_t count = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * nRows;
-    std::vector<int> frozen, voltageRow(ctx->nGeneratorVoltageControlFreezeCandidates);
+    size_t count = static_cast<size_t>(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates) * nRows;
+    std::vector<int> frozen, voltageRow(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates);
     std::vector<double> target, out(count * 2);
-    readInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.p, static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates), frozen);
-    cudaMemcpy(voltageRow.data(), ctx->dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    readInstalledRows(ctx, ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.p, static_cast<size_t>(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates), frozen);
+    cudaMemcpy(voltageRow.data(), ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
     readInstalledRows(ctx, ctx->dTarget.p, static_cast<size_t>(n), target);
     for (int s = 0; s < nRows; s++) {
-        for (int c = 0; c < ctx->nGeneratorVoltageControlFreezeCandidates; c++) {
-            size_t i = static_cast<size_t>(s) * ctx->nGeneratorVoltageControlFreezeCandidates + c;
+        for (int c = 0; c < ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates; c++) {
+            size_t i = static_cast<size_t>(s) * ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates + c;
             out[i * 2] = frozen[i];
             out[i * 2 + 1] = target[static_cast<size_t>(s) * n + voltageRow[c]];
         }

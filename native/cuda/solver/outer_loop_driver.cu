@@ -184,7 +184,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // that has the loop (distributedSlackOuterLoop / reactiveLimitsOuterLoop).
     bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0)
                                              || (ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution))
-                                             || ctx->nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches > 0 || ctx->phaseControl.nPhaseControlControllerBranches > 0
+                                             || ctx->monitoringVoltage.nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches > 0 || ctx->phaseControl.nPhaseControlControllerBranches > 0
                                              || ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0 || ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0 || ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0
                                              || ctx->automationSystem.nOverloadManagementSystems > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
@@ -330,7 +330,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL;  // OLF order 4: SecondaryVoltageControl
     }
-    if (ctx->nMonitoringVoltageControllers > 0) {
+    if (ctx->monitoringVoltage.nMonitoringVoltageControllers > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::MONITORING_VOLTAGE;  // OLF order 5: MonitoringVoltage
     }
     // the run's loop, not the table alone: the table also holds the stand-by SVCs MonitoringVoltage activates

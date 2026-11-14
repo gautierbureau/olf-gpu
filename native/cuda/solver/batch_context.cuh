@@ -36,6 +36,7 @@
 #include "context/incremental_flow_control_context.cuh"
 #include "context/phase_control_context.cuh"
 #include "context/automation_system_context.cuh"
+#include "context/monitoring_voltage_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -238,12 +239,7 @@ struct BatchSolverContext {
     AutomationSystemContext automationSystem;
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses, outerLoopChecks;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
-    // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
-    // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
-    // activation writes. dMonitoringVoltageActivatedTargetV holds the chosen target per (controller, scenario), NaN until
-    // it fires — OLF never re-checks a controller it has already switched.
-    int nMonitoringVoltageControllers = 0;
-    DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;
+    MonitoringVoltageContext monitoringVoltage;
     IncrementalTransformerVoltageControlContext incrementalTransformerVoltageControl;
     IncrementalShuntVoltageControlContext incrementalShuntVoltageControl;
     IncrementalFlowControlContext incrementalFlowControl;

@@ -60,7 +60,7 @@ __global__ void monitoringVoltageLoopBatch(int nMonitoringVoltageControllers, in
 
 // Per-solve reset. MonitoringVoltage: nothing has fired yet in this solve.
 void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass&) {
-    resetInstalledRows(ctx, ctx->dMonitoringVoltageActivatedTargetV.as<double>(), ctx->nMonitoringVoltageControllers, nullptr,
+    resetInstalledRows(ctx, ctx->monitoringVoltage.dMonitoringVoltageActivatedTargetV.as<double>(), ctx->monitoringVoltage.nMonitoringVoltageControllers, nullptr,
                        std::nan(""));
 }
 
@@ -68,12 +68,12 @@ void monitoringVoltageResetSolve(BatchSolverContext* ctx, DriverPass&) {
 void monitoringVoltageStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    monitoringVoltageLoopBatch<<<grid(ctx->nMonitoringVoltageControllers * nS), BLOCK, 0, ctx->stream>>>(
-            ctx->nMonitoringVoltageControllers, nS, n, ctx->dMonitoringVoltageBusVRow.as<int>(), ctx->dMonitoringVoltageBand.as<double>(),
-            ctx->dMonitoringVoltageDeltaStart.as<int>(), ctx->dMonitoringVoltageDeltaRow.as<int>(),
-            ctx->dMonitoringVoltageDeltaMode.as<int>(), ctx->dMonitoringVoltageDeltaTarget.as<double>(),
+    monitoringVoltageLoopBatch<<<grid(ctx->monitoringVoltage.nMonitoringVoltageControllers * nS), BLOCK, 0, ctx->stream>>>(
+            ctx->monitoringVoltage.nMonitoringVoltageControllers, nS, n, ctx->monitoringVoltage.dMonitoringVoltageBusVRow.as<int>(), ctx->monitoringVoltage.dMonitoringVoltageBand.as<double>(),
+            ctx->monitoringVoltage.dMonitoringVoltageDeltaStart.as<int>(), ctx->monitoringVoltage.dMonitoringVoltageDeltaRow.as<int>(),
+            ctx->monitoringVoltage.dMonitoringVoltageDeltaMode.as<int>(), ctx->monitoringVoltage.dMonitoringVoltageDeltaTarget.as<double>(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
-            ctx->dMonitoringVoltageActivatedTargetV.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
+            ctx->monitoringVoltage.dMonitoringVoltageActivatedTargetV.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 
 }  // namespace olfgpu

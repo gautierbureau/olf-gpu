@@ -19,10 +19,10 @@ OLF_JNI(ac_outerloop_gpu, AreaInterchangeControlNative, setBatchAreaInterchangeC
     if (ctx == nullptr) {
         return;
     }
-    ctx->areaInterchangeControlOuterLoop = outerLoop == JNI_TRUE;
-    ctx->nAreas = 0;
-    ctx->nAreaBoundaries = 0;
-    if (!ctx->areaInterchangeControlOuterLoop || jInterchangeTarget == nullptr || env->GetArrayLength(jInterchangeTarget) == 0) {
+    ctx->areaInterchangeControl.areaInterchangeControlOuterLoop = outerLoop == JNI_TRUE;
+    ctx->areaInterchangeControl.nAreas = 0;
+    ctx->areaInterchangeControl.nAreaBoundaries = 0;
+    if (!ctx->areaInterchangeControl.areaInterchangeControlOuterLoop || jInterchangeTarget == nullptr || env->GetArrayLength(jInterchangeTarget) == 0) {
         return;                                                     // no area: the phase is OLF's DistributedSlackOuterLoop
     }
     auto upI = [&](jintArray a, DeviceBuf& buf) {
@@ -35,19 +35,19 @@ OLF_JNI(ac_outerloop_gpu, AreaInterchangeControlNative, setBatchAreaInterchangeC
         buf.upload(p, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(a))) * sizeof(double));
         env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
     };
-    upD(jInterchangeTarget, ctx->dAreaInterchangeTarget);
-    upD(jSlackDistributionFactor, ctx->dAreaSlackDistributionFactor);
-    upI(jBoundaryStart, ctx->dAreaBoundaryStart);
-    upI(jBoundaryKind, ctx->dAreaBoundaryKind);
-    upI(jBoundaryElement, ctx->dAreaBoundaryElement);
-    upI(jBoundaryMaskSlot, ctx->dAreaBoundaryMaskSlot);
-    upI(jBoundarySide, ctx->dAreaBoundarySide);
-    upD(jBoundaryTieLineHalf, ctx->dAreaBoundaryTieLineHalf);
-    upI(jBusArea, ctx->dDistributedSlackBusArea);
-    upI(jGeneratorArea, ctx->dDistributedSlackGeneratorArea);
-    ctx->areaInterchangePMaxMismatch = areaInterchangePMaxMismatch;
-    ctx->nAreas = env->GetArrayLength(jInterchangeTarget);
-    ctx->nAreaBoundaries = env->GetArrayLength(jBoundaryKind);
+    upD(jInterchangeTarget, ctx->areaInterchangeControl.dAreaInterchangeTarget);
+    upD(jSlackDistributionFactor, ctx->areaInterchangeControl.dAreaSlackDistributionFactor);
+    upI(jBoundaryStart, ctx->areaInterchangeControl.dAreaBoundaryStart);
+    upI(jBoundaryKind, ctx->areaInterchangeControl.dAreaBoundaryKind);
+    upI(jBoundaryElement, ctx->areaInterchangeControl.dAreaBoundaryElement);
+    upI(jBoundaryMaskSlot, ctx->areaInterchangeControl.dAreaBoundaryMaskSlot);
+    upI(jBoundarySide, ctx->areaInterchangeControl.dAreaBoundarySide);
+    upD(jBoundaryTieLineHalf, ctx->areaInterchangeControl.dAreaBoundaryTieLineHalf);
+    upI(jBusArea, ctx->areaInterchangeControl.dDistributedSlackBusArea);
+    upI(jGeneratorArea, ctx->areaInterchangeControl.dDistributedSlackGeneratorArea);
+    ctx->areaInterchangeControl.areaInterchangePMaxMismatch = areaInterchangePMaxMismatch;
+    ctx->areaInterchangeControl.nAreas = env->GetArrayLength(jInterchangeTarget);
+    ctx->areaInterchangeControl.nAreaBoundaries = env->GetArrayLength(jBoundaryKind);
 }
 
 // Per scenario, the active power the AreaInterchangeControl checks of the last solve distributed (pu), as OLF's context data
@@ -56,12 +56,12 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, AreaInterchangeControlNative, readBatchAreaInterchangeControlDistributedActivePower)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->dAreaInterchangeControlDistributedActivePower.p) {
+    if (ctx == nullptr || !ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.p) {
         return nullptr;
     }
     std::vector<double> host;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(readInstalledRows(ctx, ctx->dAreaInterchangeControlDistributedActivePower.p, 1, host));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.p, 1, host));
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

@@ -49,6 +49,13 @@ __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios
                                 int nDistrQMembers, const int* distrQMemberReactiveLimitEntry, const char* distrQSubgroup);
 
 
+// The capability-curve and forced-target-Q limits at the current targets, for the scenarios active marks (nullptr: all).
+void launchReactiveLimitBounds(BatchSolverContext* ctx, int nS, int n, const char* active);
+
+// reactiveLimitsBatch on every scenario dOuterLoopCheckActive marks. passId: the pass the decision log records;
+// tracksSwitches: whether it fills the remaining-PV counter and the switched rows (the loop) or not (the audit).
+void launchReactiveLimitsKernel(BatchSolverContext* ctx, const DriverPass& drv, int passId, bool tracksSwitches);
+
 // One check of ReactiveLimitsOuterLoop on every live scenario (loopKind GpuOuterLoopKind::REACTIVE_LIMITS).
 void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind);
 

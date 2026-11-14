@@ -14,6 +14,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,282 +58,286 @@ bool hasAlternateRows(const int* a, int len) {
     return false;
 }
 
-bool hasRelocatable(int nClosedBranch, const int* closedBranchIndices, int nShunt, const int* shuntIndices) {
-    for (int e = 0; e < nClosedBranch; e++) {
-        if (closedBranchIndices[static_cast<size_t>(e) * 12 + 10] >= 0 || closedBranchIndices[static_cast<size_t>(e) * 12 + 10] <= -2
-                || closedBranchIndices[static_cast<size_t>(e) * 12 + 11] >= 0 || closedBranchIndices[static_cast<size_t>(e) * 12 + 11] <= -2) {
-            return true;                                     // plain alt row, or the -2-groupId encoding (plan-A6)
-        }
+// ---- The three families whose reactive outputs relocate: closed branch, shunt, open branch ----------------------
+// Each family's term outputs resolve to a (row, column) through its generated scatter table, and the role-1
+// outputs of a Q-balance row (rowEq == 1) carry an ALTERNATE row the extractor packed: closed branches at
+// closedBranchIndices[10 + rowEnd], shunts at shuntIndices[4], open branches in their own array (two per element).
+// The traits below are the only family-specific part; the decision of where an output may land is shared
+// (placeOutput), so the union pattern (collect) contains every destination the tables (build) look up.
+
+namespace {
+
+struct ClosedBranchFamily {
+    using Scatter = ClosedBranchScatter;
+    static constexpr int INDEX_STRIDE = 12;
+    static constexpr int OUTPUT_COUNT = CLOSED_BRANCH_OUTPUT_COUNT;
+    static const Scatter& scatter(int k) { return CLOSED_BRANCH_SCATTER[k]; }
+    static RC resolve(const Scatter& s, const int* ix) { return resolveClosedBranch(s, ix); }
+    int alternateRow(const Scatter& s, const int* ix, int) const { return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1; }
+    bool hasAlternate(const int* ix, int) const { return ix[10] != -1 || ix[11] != -1; }
+};
+
+struct ShuntFamily {
+    using Scatter = ShuntScatter;
+    static constexpr int INDEX_STRIDE = 5;
+    static constexpr int OUTPUT_COUNT = SHUNT_OUTPUT_COUNT;
+    static const Scatter& scatter(int k) { return SHUNT_SCATTER[k]; }
+    static RC resolve(const Scatter& s, const int* ix) { return resolveShunt(s, ix); }
+    int alternateRow(const Scatter& s, const int* ix, int) const { return s.rowEq == 1 ? ix[4] : -1; }
+    bool hasAlternate(const int* ix, int) const { return ix[4] != -1; }
+};
+
+// The connected side's half-open charging q follows the BUS_TARGET_Q row of a remote member switched to PQ or a
+// relocation group's carrier exactly like its closed-branch terms.
+struct OpenBranchFamily {
+    using Scatter = OpenBranchScatter;
+    static constexpr int INDEX_STRIDE = 6;
+    static constexpr int OUTPUT_COUNT = OPEN_BRANCH_OUTPUT_COUNT;
+    static const Scatter& scatter(int k) { return OPEN_BRANCH_SCATTER[k]; }
+    static RC resolve(const Scatter& s, const int* ix) { return resolveOpenBranch(s, ix); }
+    const int* alternateReactiveDestination;                 // nOpenBranch * 2
+    int alternateRow(const Scatter& s, const int*, int e) const {
+        return s.rowEq == 1 ? alternateReactiveDestination[e * 2 + s.rowEnd] : -1;
     }
-    for (int e = 0; e < nShunt; e++) {
-        if (shuntIndices[static_cast<size_t>(e) * 5 + 4] >= 0 || shuntIndices[static_cast<size_t>(e) * 5 + 4] <= -2) {
-            return true;
-        }
+    bool hasAlternate(const int*, int e) const {
+        return alternateReactiveDestination[e * 2] != -1 || alternateReactiveDestination[e * 2 + 1] != -1;
     }
-    return false;
+};
+
+enum class Placement {
+    NONE,             // the output never relocates: the fill always uses its frozen destination
+    STOCK_PAIR,       // a coupler-tree child's output: the child's own row or the coupler's DUMMY_Q row (stockPairOut)
+    GROUP,            // GROUP relocation (plan-A6): one slot per candidate row, selected per scenario
+    DEPENDENT_PILOT,  // a dependent pilot's output (dependentPilotDestination): its group's candidates, plus the
+                      // two-way home row of a relocated child
+    ALTERNATE_ROW     // plain two-way relocation: the frozen row or the alternate row, selected per scenario
+};
+
+// Where one output may land. The cases are tested in this order, the order every table has always been built in.
+struct OutputPlacement {
+    Placement kind;
+    int alternateRow;       // after the stock placement (stockPlacementAlternateRow); <= -2 encodes a group
+    int stockSelectorRow;   // stockPlacementSelectorRow
+    int group;              // GROUP: the group; DEPENDENT_PILOT: the dependent group
+    int dependentGroup;     // the dependent group of the output's home row, whatever the case (-1: none)
+};
+
+OutputPlacement placeOutput(int frozenRow, int packedAlternateRow, const RelocationTables& t) {
+    OutputPlacement p;
+    p.alternateRow = stockPlacementAlternateRow(frozenRow, packedAlternateRow, t.relocatedChildOwnRow);
+    p.stockSelectorRow = stockPlacementSelectorRow(frozenRow, packedAlternateRow, t.relocatedChildOwnRow);
+    p.dependentGroup = dependentGroupOfHomeRow(frozenRow, p.alternateRow, t.relocatedChildOwnRow, t.dependentGroupOfRow);
+    p.group = -1;
+    if (stockPairOut(frozenRow, packedAlternateRow, t.relocatedChildOwnRow)) {
+        p.kind = Placement::STOCK_PAIR;
+    } else if (p.alternateRow <= -2) {
+        p.kind = Placement::GROUP;
+        p.group = -2 - p.alternateRow;
+    } else if (p.dependentGroup >= 0) {
+        p.kind = Placement::DEPENDENT_PILOT;
+        p.group = p.dependentGroup;
+    } else if (p.alternateRow < 0 || p.alternateRow == frozenRow) {
+        p.kind = Placement::NONE;
+    } else {
+        p.kind = Placement::ALTERNATE_ROW;
+    }
+    return p;
 }
 
-inline int closedBranchAlternateRow(const ClosedBranchScatter& s, const int* ix) {
-    return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
+bool hasTwoWayAlternate(const OutputPlacement& p, int frozenRow) {
+    return p.alternateRow >= 0 && p.alternateRow != frozenRow;
 }
 
-// Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
-// extra (alternateRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
-void collectClosedBranchRelocationPattern(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    for (int e = 0; e < nClosedBranch; e++) {
-        const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
-            const ClosedBranchScatter& s = CLOSED_BRANCH_SCATTER[k];
+// Union the rows a role-1 output may land on into the CSR pattern, so build can resolve a slot on each. Deduped by
+// the caller's sort and unique, so only the set matters. A dependent pilot's candidates are added whatever its case.
+template <typename F>
+void collectRelocationPattern(const F& family, int count, const int* indices, const RelocationTables& t,
+                              std::vector<std::pair<int, int>>& pat) {
+    auto addGroup = [&](int g, int col) {
+        for (int c = t.groupStart[g]; c < t.groupStart[g + 1]; c++) {
+            pat.emplace_back(t.candidateRows[c], col);
+        }
+    };
+    for (int e = 0; e < count; e++) {
+        const int* ix = indices + static_cast<size_t>(e) * F::INDEX_STRIDE;
+        for (int k = 0; k < F::OUTPUT_COUNT; k++) {
+            const typename F::Scatter& s = F::scatter(k);
             if (s.role != 1) {
                 continue;
             }
-            RC rc = resolveClosedBranch(s, ix);
-            int packedAlternateRow = closedBranchAlternateRow(s, ix);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
+            RC rc = F::resolve(s, ix);
             if (rc.col < 0) {
                 continue;
             }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
+            int packedAlternateRow = family.alternateRow(s, ix, e);
+            OutputPlacement p = placeOutput(rc.row, packedAlternateRow, t);
+            if (p.dependentGroup >= 0) {
+                addGroup(p.dependentGroup, rc.col);
             }
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {   // STOCK PAIR (see stockPairPick): both rows
-                pat.emplace_back(relocatedChildOwnRow[packedAlternateRow], rc.col);
+            if (p.kind == Placement::STOCK_PAIR) {
+                pat.emplace_back(t.relocatedChildOwnRow[packedAlternateRow], rc.col);
                 pat.emplace_back(packedAlternateRow, rc.col);
-                continue;
-            }
-            if (alternateRow <= -2) {                              // GROUP relocation (plan-A6): union EVERY
-                int g = -2 - alternateRow;                         // candidate row's slot for this column
-                for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
-            } else if (alternateRow >= 0 && alternateRow != rc.row) {
-                pat.emplace_back(alternateRow, rc.col);
+            } else if (p.kind == Placement::GROUP) {
+                addGroup(p.group, rc.col);
+            } else if (hasTwoWayAlternate(p, rc.row)) {
+                pat.emplace_back(p.alternateRow, rc.col);
             }
         }
     }
 }
 
-// Per (closed branch, output): the alternate destination (CSR slot for a role-1 J entry, -2-row for
-// a role-0 F residual) and the FROZEN row to test the per-scenario row-mode against. selectorRow == -1
-// marks an output that never relocates (the fill then always uses the frozen dest). Sized nClosedBranch*CLOSED_BRANCH_OUTPUT_COUNT
-// like the frozen dest, so the fill indexes all three arrays identically.
-void buildClosedBranchRelocationDestination(int nClosedBranch, const int* closedBranchIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
-    selectorRow.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
-    relocationGroup.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nClosedBranch) * CLOSED_BRANCH_OUTPUT_COUNT, 0);
-    for (int e = 0; e < nClosedBranch; e++) {
-        const int* ix = closedBranchIndices + static_cast<size_t>(e) * 12;
-        for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
-            const ClosedBranchScatter& s = CLOSED_BRANCH_SCATTER[k];
-            RC rc = resolveClosedBranch(s, ix);
-            int packedAlternateRow = closedBranchAlternateRow(s, ix);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * CLOSED_BRANCH_OUTPUT_COUNT + k;
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
-                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
-                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+// Per (element, output): the alternate destination and the row its per-scenario mode is tested on (selectorRow; -1:
+// never relocates, the fill uses the frozen destination), and for the outputs with more than two destinations the
+// relocation group, the offset of their candidate destinations in relocationCandidateDestinations (negative: a stock
+// pair, -offset - 1) and the dependent-pilot flag. A destination is a CSR slot for a role-1 Jacobian entry and
+// -2 - row for a role-0 residual. Sized count * OUTPUT_COUNT like the frozen destination, so the fill indexes them
+// alike; candidates are appended in output order, which the offsets index into.
+template <typename F>
+void buildRelocationDestination(const F& family, int count, const int* indices, const RelocationTables& t, const CsrPattern& pos,
+                                std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
+                                std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset,
+                                std::vector<int>& relocationCandidateDestinations, std::vector<char>& relocationDependentPilot) {
+    size_t outputs = static_cast<size_t>(count) * F::OUTPUT_COUNT;
+    alternateDestination.assign(outputs, -1);
+    selectorRow.assign(outputs, -1);
+    relocationGroup.assign(outputs, -1);
+    relocationCandidateOffset.assign(outputs, -1);
+    relocationDependentPilot.assign(outputs, 0);
+    for (int e = 0; e < count; e++) {
+        const int* ix = indices + static_cast<size_t>(e) * F::INDEX_STRIDE;
+        for (int k = 0; k < F::OUTPUT_COUNT; k++) {
+            const typename F::Scatter& s = F::scatter(k);
+            RC rc = F::resolve(s, ix);
+            // A Jacobian entry needs a column to land in; a residual needs only a row.
+            if (!((s.role == 1 && rc.col >= 0) || s.role == 0)) {
+                continue;
+            }
+            auto destination = [&](int row) { return s.role == 1 ? pos.at(row, rc.col) : -2 - row; };
+            auto addGroup = [&](int g) {
+                for (int c = t.groupStart[g]; c < t.groupStart[g + 1]; c++) {
+                    relocationCandidateDestinations.push_back(destination(t.candidateRows[c]));
+                }
+            };
+            int packedAlternateRow = family.alternateRow(s, ix, e);
+            OutputPlacement p = placeOutput(rc.row, packedAlternateRow, t);
+            size_t o = static_cast<size_t>(e) * F::OUTPUT_COUNT + k;
+            switch (p.kind) {
+                case Placement::NONE:
+                    break;
+                case Placement::STOCK_PAIR:
+                    // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
+                    // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                    // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                    // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                    // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
                     relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
                     relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;
-                    int own = relocatedChildOwnRow[packedAlternateRow];
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(packedAlternateRow, rc.col) : -2 - packedAlternateRow);
-                }
-                continue;
-            }
-            if (alternateRow <= -2) {                              // GROUP relocation (plan-A6): one slot per
-                int g = -2 - alternateRow;                         // candidate, selected per scenario by the
-                if (s.role == 1 && rc.col >= 0) {            // first-valid-member mode scan
-                    relocationGroup[o] = g;
+                    relocationCandidateDestinations.push_back(destination(t.relocatedChildOwnRow[packedAlternateRow]));
+                    relocationCandidateDestinations.push_back(destination(packedAlternateRow));
+                    break;
+                case Placement::GROUP:                                       // one slot per candidate, selected per
+                    relocationGroup[o] = p.group;                            // scenario by the first-valid-member mode scan
                     relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(pos.at(reactiveRelocationCandidateRows[c], rc.col));
-                    }
-                } else if (s.role == 0) {
-                    relocationGroup[o] = g;
+                    addGroup(p.group);
+                    break;
+                case Placement::DEPENDENT_PILOT:
+                    relocationGroup[o] = p.group;
                     relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(-2 - reactiveRelocationCandidateRows[c]);
-                    }
-                }
-                continue;
-            }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dependentGroup;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                        relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
-                    }
+                    addGroup(p.group);
                     relocationDependentPilot[o] = 1;
-                    if (alternateRow >= 0 && alternateRow != rc.row) {
-                        alternateDestination[o] = s.role == 1 ? pos.at(alternateRow, rc.col) : -2 - alternateRow;
-                        selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : rc.row;
+                    if (hasTwoWayAlternate(p, rc.row)) {
+                        alternateDestination[o] = destination(p.alternateRow);
+                        selectorRow[o] = p.stockSelectorRow <= -2 ? p.stockSelectorRow : rc.row;
                     } else {
-                        selectorRow[o] = rc.row;                  // a root: the frozen row IS its own
+                        selectorRow[o] = rc.row;                             // a root: the frozen row IS its own
                     }
-                }
-                continue;
-            }
-            if (alternateRow < 0 || alternateRow == rc.row) {
-                continue;                                    // not a relocatable output
-            }
-            if (s.role == 1 && rc.col >= 0) {
-                alternateDestination[o] = pos.at(alternateRow, rc.col);
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);   // suppressed frozen dest (remote member):
-            } else if (s.role == 0) {                        // select on the ALT row itself (BUS_TARGET_Q)
-                alternateDestination[o] = -2 - alternateRow;
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);
+                    break;
+                case Placement::ALTERNATE_ROW:                               // a suppressed frozen destination (remote
+                    alternateDestination[o] = destination(p.alternateRow);   // member) selects on the alternate row itself
+                    selectorRow[o] = p.stockSelectorRow <= -2 ? p.stockSelectorRow : (rc.row >= 0 ? rc.row : p.alternateRow);
+                    break;
             }
         }
     }
 }
 
-// Shunt analogue of closedBranchAlternateRow / collectClosedBranchRelocationPattern / buildClosedBranchRelocationDestination. The alternate Q row of a
-// voltage-controlling shunt (its own bus's SHUNT_B row <-> bus-V row) travels at shuntIndices[4]. A fixed
-// shunt on a transformer/shunt-controlled bus also relocates (alternateQRow was set for that bus). This is
-// the one-terminal case dynamic relocation exists for: SHUNT_B has no second terminal to hold its
-// column, so a frozen structure freezes it at warm-start.
-inline int shuntAlternateRow(const ShuntScatter& s, const int* ix) {
-    return s.rowEq == 1 ? ix[4] : -1;
-}
-
-void collectShuntRelocationPattern(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    for (int e = 0; e < nShunt; e++) {
-        const int* ix = shuntIndices + static_cast<size_t>(e) * 5;
-        for (int k = 0; k < SHUNT_OUTPUT_COUNT; k++) {
-            const ShuntScatter& s = SHUNT_SCATTER[k];
-            if (s.role != 1) {
-                continue;
-            }
-            RC rc = resolveShunt(s, ix);
-            int packedAlternateRow = shuntAlternateRow(s, ix);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            if (rc.col < 0) {
-                continue;
-            }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
-            }
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {   // STOCK PAIR (see stockPairPick): both rows
-                pat.emplace_back(relocatedChildOwnRow[packedAlternateRow], rc.col);
-                pat.emplace_back(packedAlternateRow, rc.col);
-                continue;
-            }
-            if (alternateRow <= -2) {
-                int g = -2 - alternateRow;
-                for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
-            } else if (alternateRow >= 0 && alternateRow != rc.row) {
-                pat.emplace_back(alternateRow, rc.col);
-            }
+// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
+// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
+// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
+// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
+// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
+template <typename F>
+void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
+                                  const std::vector<int>& relocationCandidateOffset, const RelocationTables& t) {
+    for (size_t o = 0; o < relocationGroup.size(); o++) {
+        int g = relocationGroup[o];
+        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
+        // t.groupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // used: "CUDA error: an illegal memory access" out of createBatchContext.
+        if (g >= 0 && relocationCandidateOffset[o] < 0) {
+            continue;
+        }
+        if (g >= 0 && F::scatter(static_cast<int>(o % F::OUTPUT_COUNT)).role == 0) {
+            int v = -2 - t.candidateRows[t.groupStart[g]];
+            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }
     }
 }
 
-void buildShuntRelocationDestination(int nShunt, const int* shuntIndices, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
-    selectorRow.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
-    relocationGroup.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nShunt) * SHUNT_OUTPUT_COUNT, 0);
-    for (int e = 0; e < nShunt; e++) {
-        const int* ix = shuntIndices + static_cast<size_t>(e) * 5;
-        for (int k = 0; k < SHUNT_OUTPUT_COUNT; k++) {
-            const ShuntScatter& s = SHUNT_SCATTER[k];
-            RC rc = resolveShunt(s, ix);
-            int packedAlternateRow = shuntAlternateRow(s, ix);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * SHUNT_OUTPUT_COUNT + k;
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
-                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
-                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
-                    relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
-                    relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;
-                    int own = relocatedChildOwnRow[packedAlternateRow];
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(packedAlternateRow, rc.col) : -2 - packedAlternateRow);
-                }
-                continue;
-            }
-            if (alternateRow <= -2) {
-                int g = -2 - alternateRow;
-                if (s.role == 1 && rc.col >= 0) {
-                    relocationGroup[o] = g;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(pos.at(reactiveRelocationCandidateRows[c], rc.col));
-                    }
-                } else if (s.role == 0) {
-                    relocationGroup[o] = g;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(-2 - reactiveRelocationCandidateRows[c]);
-                    }
-                }
-                continue;
-            }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dependentGroup;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                        relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
-                    }
-                    relocationDependentPilot[o] = 1;
-                    if (alternateRow >= 0 && alternateRow != rc.row) {
-                        alternateDestination[o] = s.role == 1 ? pos.at(alternateRow, rc.col) : -2 - alternateRow;
-                        selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : rc.row;
-                    } else {
-                        selectorRow[o] = rc.row;                  // a root: the frozen row IS its own
-                    }
-                }
-                continue;
-            }
-            if (alternateRow < 0 || alternateRow == rc.row) {
-                continue;
-            }
-            if (s.role == 1 && rc.col >= 0) {
-                alternateDestination[o] = pos.at(alternateRow, rc.col);
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);   // suppressed frozen dest: select on ALT row
-            } else if (s.role == 0) {
-                alternateDestination[o] = -2 - alternateRow;
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);
+// Calls fn with the traits of the elements' family.
+template <typename Fn>
+auto withFamily(const RelocatedElements& elements, Fn fn) {
+    switch (elements.family) {
+        case RelocatedFamily::CLOSED_BRANCH:
+            return fn(ClosedBranchFamily{});
+        case RelocatedFamily::SHUNT:
+            return fn(ShuntFamily{});
+        case RelocatedFamily::OPEN_BRANCH:
+        default:
+            return fn(OpenBranchFamily{elements.alternateReactiveDestination});
+    }
+}
+
+}  // namespace
+
+bool hasRelocatableOutput(const RelocatedElements& elements) {
+    return withFamily(elements, [&](const auto& family) {
+        for (int e = 0; e < elements.count; e++) {
+            if (family.hasAlternate(elements.indices + static_cast<size_t>(e) * family.INDEX_STRIDE, e)) {
+                return true;                                 // a plain alternate row, or the -2-groupId encoding (plan-A6)
             }
         }
-    }
+        return false;
+    });
+}
+
+void collectRelocationPattern(const RelocatedElements& elements, const RelocationTables& tables, std::vector<std::pair<int, int>>& pat) {
+    withFamily(elements, [&](const auto& family) {
+        collectRelocationPattern(family, elements.count, elements.indices, tables, pat);
+    });
+}
+
+RelocationDestinations installRelocationDestinations(const RelocatedElements& elements, const RelocationTables& tables,
+                                                     const CsrPattern& pos, Family& target) {
+    RelocationDestinations d;
+    withFamily(elements, [&](const auto& family) {
+        using F = std::decay_t<decltype(family)>;
+        buildRelocationDestination(family, elements.count, elements.indices, tables, pos, d.alternateDestination, d.selectorRow,
+                                   d.relocationGroup, d.relocationCandidateOffset, d.relocationCandidateDestinations,
+                                   d.relocationDependentPilot);
+        target.alternateDestination.upload(d.alternateDestination.data(), d.alternateDestination.size() * sizeof(int));
+        target.selectorRow.upload(d.selectorRow.data(), d.selectorRow.size() * sizeof(int));
+        if (!d.relocationCandidateDestinations.empty()) {
+            target.relocationGroup.upload(d.relocationGroup.data(), d.relocationGroup.size() * sizeof(int));
+            target.relocationCandidateOffset.upload(d.relocationCandidateOffset.data(), d.relocationCandidateOffset.size() * sizeof(int));
+            target.relocationCandidateDestinations.upload(d.relocationCandidateDestinations.data(),
+                                                          d.relocationCandidateDestinations.size() * sizeof(int));
+            target.relocationDependentPilot.upload(d.relocationDependentPilot.data(), d.relocationDependentPilot.size());
+            patchGroupFrozenDestinations<F>(target.destination, d.relocationGroup, d.relocationCandidateOffset, tables);
+        }
+        target.dynamicRelocation = true;
+    });
+    return d;
 }
 
 // HVDC analogue of the stock placement. An AC-emulation converter bus that is a coupler-tree child keeps its P
@@ -379,159 +384,6 @@ void buildHvdcAcEmulationRelocationDestination(int nHvdcAcEmulation, const int* 
                 alternateDestination[o] = -2 - own;
                 selectorRow[o] = stockPlacementSelectorRow(rc.row, -1, relocatedChildOwnRow);
             }
-        }
-    }
-}
-
-// Open-branch analogue of shuntAlternateRow / collectShuntRelocationPattern / buildShuntRelocationDestination: the ALTERNATE Q row
-// of each side's bus travels in a SEPARATE openBranchAlternateReactiveDestination array (nOpenBranch*2) rather than inside openBranchIndices —
-// the connected side's half-open charging q follows the BUS_TARGET_Q row of a remote member switched to PQ or a
-// relocation group's carrier exactly like its closed-branch terms.
-inline int openBranchAlternateRow(const OpenBranchScatter& s, const int* alternateQRows, int e) {
-    return s.rowEq == 1 ? alternateQRows[e * 2 + s.rowEnd] : -1;
-}
-
-void collectOpenBranchRelocationPattern(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, std::vector<std::pair<int, int>>& pat,
-                         int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows, const int* reactiveRelocationDependentGroupOfRow) {
-    for (int e = 0; e < nOpenBranch; e++) {
-        const int* ix = openBranchIndices + static_cast<size_t>(e) * 6;
-        for (int k = 0; k < OPEN_BRANCH_OUTPUT_COUNT; k++) {
-            const OpenBranchScatter& s = OPEN_BRANCH_SCATTER[k];
-            if (s.role != 1) {
-                continue;
-            }
-            RC rc = resolveOpenBranch(s, ix);
-            int packedAlternateRow = openBranchAlternateRow(s, openBranchAlternateReactiveDestination, e);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            if (rc.col < 0) {
-                continue;
-            }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
-                for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
-            }
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {   // STOCK PAIR (see stockPairPick): both rows
-                pat.emplace_back(relocatedChildOwnRow[packedAlternateRow], rc.col);
-                pat.emplace_back(packedAlternateRow, rc.col);
-                continue;
-            }
-            if (alternateRow <= -2) {
-                int g = -2 - alternateRow;
-                for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                    pat.emplace_back(reactiveRelocationCandidateRows[c], rc.col);
-                }
-            } else if (alternateRow >= 0 && alternateRow != rc.row) {
-                pat.emplace_back(alternateRow, rc.col);
-            }
-        }
-    }
-}
-
-void buildOpenBranchRelocationDestination(int nOpenBranch, const int* openBranchIndices, const int* openBranchAlternateReactiveDestination, const int* relocatedChildOwnRow, const CsrPattern& pos,
-                    std::vector<int>& alternateDestination, std::vector<int>& selectorRow,
-                    int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows,
-                    std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset, std::vector<int>& relocationCandidateDestinations,
-                    const int* reactiveRelocationDependentGroupOfRow, std::vector<char>& relocationDependentPilot) {
-    alternateDestination.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
-    selectorRow.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
-    relocationGroup.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
-    relocationCandidateOffset.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, -1);
-    relocationDependentPilot.assign(static_cast<size_t>(nOpenBranch) * OPEN_BRANCH_OUTPUT_COUNT, 0);
-    for (int e = 0; e < nOpenBranch; e++) {
-        const int* ix = openBranchIndices + static_cast<size_t>(e) * 6;
-        for (int k = 0; k < OPEN_BRANCH_OUTPUT_COUNT; k++) {
-            const OpenBranchScatter& s = OPEN_BRANCH_SCATTER[k];
-            RC rc = resolveOpenBranch(s, ix);
-            int packedAlternateRow = openBranchAlternateRow(s, openBranchAlternateReactiveDestination, e);
-            int alternateRow = stockPlacementAlternateRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            int stockSelectorRow = stockPlacementSelectorRow(rc.row, packedAlternateRow, relocatedChildOwnRow);
-            size_t o = static_cast<size_t>(e) * OPEN_BRANCH_OUTPUT_COUNT + k;
-            if (stockPairOut(rc.row, packedAlternateRow, relocatedChildOwnRow)) {
-                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL switch to PQ holds it
-                // there (BUS_TARGET_Q), NOTHING while the coupler is dead (that row is an identity — the bus is an
-                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
-                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
-                // the plain two-way rule does on FIXED_VARIABLE, corrupts that identity.
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
-                    relocationGroup[o] = packedAlternateRow;                 // the selector is the dummy row itself
-                    relocationCandidateOffset[o] = -static_cast<int>(relocationCandidateDestinations.size()) - 1;
-                    int own = relocatedChildOwnRow[packedAlternateRow];
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
-                    relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(packedAlternateRow, rc.col) : -2 - packedAlternateRow);
-                }
-                continue;
-            }
-            if (alternateRow <= -2) {
-                int g = -2 - alternateRow;
-                if (s.role == 1 && rc.col >= 0) {
-                    relocationGroup[o] = g;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(pos.at(reactiveRelocationCandidateRows[c], rc.col));
-                    }
-                } else if (s.role == 0) {
-                    relocationGroup[o] = g;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[g]; c < reactiveRelocationGroupStart[g + 1]; c++) {
-                        relocationCandidateDestinations.push_back(-2 - reactiveRelocationCandidateRows[c]);
-                    }
-                }
-                continue;
-            }
-            int dependentGroup = dependentGroupOfHomeRow(rc.row, alternateRow, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            if (dependentGroup >= 0) {                                   // DEPENDENT pilot (dependentPilotDestination): the group's pool, plus the
-                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
-                    relocationGroup[o] = dependentGroup;
-                    relocationCandidateOffset[o] = static_cast<int>(relocationCandidateDestinations.size());
-                    for (int c = reactiveRelocationGroupStart[dependentGroup]; c < reactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                        relocationCandidateDestinations.push_back(s.role == 1 ? pos.at(reactiveRelocationCandidateRows[c], rc.col) : -2 - reactiveRelocationCandidateRows[c]);
-                    }
-                    relocationDependentPilot[o] = 1;
-                    if (alternateRow >= 0 && alternateRow != rc.row) {
-                        alternateDestination[o] = s.role == 1 ? pos.at(alternateRow, rc.col) : -2 - alternateRow;
-                        selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : rc.row;
-                    } else {
-                        selectorRow[o] = rc.row;                  // a root: the frozen row IS its own
-                    }
-                }
-                continue;
-            }
-            if (alternateRow < 0 || alternateRow == rc.row) {
-                continue;
-            }
-            if (s.role == 1 && rc.col >= 0) {
-                alternateDestination[o] = pos.at(alternateRow, rc.col);
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);   // suppressed frozen dest: select on ALT row
-            } else if (s.role == 0) {
-                alternateDestination[o] = -2 - alternateRow;
-                selectorRow[o] = stockSelectorRow <= -2 ? stockSelectorRow : (rc.row >= 0 ? rc.row : alternateRow);
-            }
-        }
-    }
-}
-
-// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
-// fill (dynamicRelocation = 0; every Newton fill selects a pool slot instead) — point it at the group's
-// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
-// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
-// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-void patchGroupFrozenDestinations(DeviceBuf& dest, const std::vector<int>& relocationGroup,
-                           const std::vector<int>& relocationCandidateOffset, int outputCount,
-                           const int* scatterRole, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRows) {
-    for (size_t o = 0; o < relocationGroup.size(); o++) {
-        int g = relocationGroup[o];
-        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
-        // reactiveRelocationGroupStart[row] there walked off the candidate table and wrote a garbage dest, which the device then
-        // used: "CUDA error: an illegal memory access" out of createBatchContext.
-        if (g >= 0 && relocationCandidateOffset[o] < 0) {
-            continue;
-        }
-        if (g >= 0 && scatterRole[o % outputCount] == 0) {
-            int v = -2 - reactiveRelocationCandidateRows[reactiveRelocationGroupStart[g]];
-            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
         }
     }
 }

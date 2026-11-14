@@ -39,11 +39,11 @@ void elementControllers(int nElements, const std::vector<int>& controllerElement
 // before the first solve).
 void ensureTapControllers(BatchSolverContext* ctx) {
     std::vector<int> counts = {ctx->nIncrementalTransformerVoltageControlControllerBranches, ctx->nPhaseControlControllerBranches,
-                               ctx->nIncrementalFlowControlControllerBranches, ctx->nTransformerVoltageControlMembers};
+                               ctx->nIncrementalFlowControlControllerBranches, ctx->transformerVoltageControl.nTransformerVoltageControlMembers};
     if (counts == ctx->hClosedBranchParameterOverrideControllerCounts) return;
     ctx->hClosedBranchParameterOverrideControllerCounts = counts;
     const std::vector<int>* elements[4] = {&ctx->hIncrementalTransformerVoltageControlElement, &ctx->hPhaseControlElement,
-                                           &ctx->hIncrementalFlowControlElement, &ctx->hTransformerVoltageControlMemberElement};
+                                           &ctx->hIncrementalFlowControlElement, &ctx->transformerVoltageControl.hTransformerVoltageControlMemberElement};
     std::vector<int> controllerElement;
     for (int l = 0; l < 4; l++) {
         controllerElement.insert(controllerElement.end(), elements[l]->begin(), elements[l]->begin() + counts[l]);
@@ -167,8 +167,8 @@ void publishClosedBranchParameterOverrides(BatchSolverContext* ctx) {
          &ctx->dPhaseControlBaseTap, &ctx->dPhaseControlTapStart, &ctx->dPhaseControlTapRows},
         {ctx->nIncrementalFlowControlControllerBranches, &ctx->dIncrementalFlowControlCurrentTap, nullptr,
          &ctx->dIncrementalFlowControlBaseTap, &ctx->dIncrementalFlowControlTapStart, &ctx->dIncrementalFlowControlTapRows},
-        {ctx->nTransformerVoltageControlMembers, &ctx->dTransformerVoltageControlMemberTap, &ctx->dTransformerVoltageControlMemberState,
-         &ctx->dTransformerVoltageControlMemberBaseTap, &ctx->dTransformerVoltageControlMemberTapStart, &ctx->dTransformerVoltageControlTapRows},
+        {ctx->transformerVoltageControl.nTransformerVoltageControlMembers, &ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap, &ctx->transformerVoltageControl.dTransformerVoltageControlMemberState,
+         &ctx->transformerVoltageControl.dTransformerVoltageControlMemberBaseTap, &ctx->transformerVoltageControl.dTransformerVoltageControlMemberTapStart, &ctx->transformerVoltageControl.dTransformerVoltageControlTapRows},
     };
     int firstController = 0;
     for (const Loop& l : loops) {

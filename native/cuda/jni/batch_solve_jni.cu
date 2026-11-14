@@ -123,7 +123,7 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
     // CPU (measured 1.9 kV on the forced-PV network). Every context with RL entries gets them when it
     // is created (DeviceLoopTables.installReactiveLimitStrongestPvKeys), so reaching this is a
     // table-installation bug — say so instead of routing the scenario away and hiding it.
-    if (ctx != nullptr && ctx->nReactiveLimitEntries > 0 && !ctx->hasReactiveLimitStrongestPvKeys) {
+    if (ctx != nullptr && ctx->reactiveLimits.nReactiveLimitEntries > 0 && !ctx->reactiveLimits.hasReactiveLimitStrongestPvKeys) {
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                       "solveBatchContext: reactive-limit entries installed without the forced-PV "
                       "election keys (setBatchReactiveLimitStrongestPvKeys) — OLF's strongest-bus-stays-PV rule "
@@ -273,9 +273,9 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, solveBatchContext)(
         }
         // the reactive-limit channels of the installed slots: (slot, entry) + {dMinQ, dMaxQ, dLoadQ, dBmin, dBmax},
         // (slot, curve entry) + {pStep, shareScale}, (slot, entry) + the moved voltage target
-        installSlotTable(env, ctx, ctx->reactiveLimitDeltaOverrides, jReactiveLimitDeltaOverrideScenarioEntry, jReactiveLimitDeltaOverrideValues);
-        installSlotTable(env, ctx, ctx->reactiveCapabilityCurveOverrides, jReactiveCapabilityCurveOverrideScenarioCurve, jReactiveCapabilityCurveOverrideStepScale);
-        installSlotTable(env, ctx, ctx->reactiveLimitTargetVOverrides, jReactiveLimitTargetVOverrideScenarioEntry, jReactiveLimitTargetVOverrideValue);
+        installSlotTable(env, ctx, ctx->reactiveLimits.reactiveLimitDeltaOverrides, jReactiveLimitDeltaOverrideScenarioEntry, jReactiveLimitDeltaOverrideValues);
+        installSlotTable(env, ctx, ctx->reactiveLimits.reactiveCapabilityCurveOverrides, jReactiveCapabilityCurveOverrideScenarioCurve, jReactiveCapabilityCurveOverrideStepScale);
+        installSlotTable(env, ctx, ctx->reactiveLimits.reactiveLimitTargetVOverrides, jReactiveLimitTargetVOverrideScenarioEntry, jReactiveLimitTargetVOverrideValue);
 
         if (traceOn(Trace::PHASE_TIME)) {
             marshalNs += nowNs() - tMarshal0;

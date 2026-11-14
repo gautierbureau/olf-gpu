@@ -383,16 +383,16 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    if (ctx->nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
+    if (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
         updateDistrQTargetsBatch<<<grid(ctx->nDistrQMembers * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->nDistrQMembers, nS, n, ctx->nReactiveLimitEntries,
+                    ctx->nDistrQMembers, nS, n, ctx->reactiveLimits.nReactiveLimitEntries,
                     ctx->dDistrQMemberKey.as<double>(), ctx->dDistrQMemberReactiveLimitEntry.as<int>(),
                     ctx->dDistrQMemberGroupStart.as<int>(), ctx->dDistrQMemberGroupCount.as<int>(),
                     ctx->dDistrQMemberRow.as<int>(), ctx->dDistrQMemberHasRow.as<char>(),
-                    ctx->dReactiveLimitVoltageRow.as<int>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(), ctx->dReactiveLimitQLimitType.as<char>(), usePerScenarioReactiveLimits ? 1 : 0,
+                    ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(), ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), usePerScenarioReactiveLimits ? 1 : 0,
                     ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
                     ctx->dDistrQMemberTargetQ.as<double>(),
                     ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
@@ -408,10 +408,10 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
                     ctx->structure->dRelocatedChildOwnRow.p != nullptr
                             ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
                 ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                ctx->reactiveLimitGeneratorsLost.deviceOrNull(),
+                ctx->reactiveLimits.reactiveLimitGeneratorsLost.deviceOrNull(),
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->dReactiveRelocationPilotTargetVDeactivated.p ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
-                    ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),
+                    ctx->reactiveLimits.dReactiveLimitInitialTargetQ.as<double>(), ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>(),
                     ctx->distrQKeyOverrides.view());
     }
 }

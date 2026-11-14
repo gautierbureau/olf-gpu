@@ -310,7 +310,7 @@ __global__ void secondaryVoltageControlApplyBatch(SecondaryVoltageControlTables 
 
 static SecondaryVoltageControlTables secondaryVoltageControlTables(BatchSolverContext* ctx) {
     SecondaryVoltageControlTables T;
-    T.nControllerBuses = ctx->nSecondaryVoltageControlControllerBuses; T.nZones = ctx->nSecondaryVoltageControlZones; T.nReactiveLimitEntries = ctx->nReactiveLimitEntries;
+    T.nControllerBuses = ctx->nSecondaryVoltageControlControllerBuses; T.nZones = ctx->nSecondaryVoltageControlZones; T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries;
     T.controlledBusVRow = ctx->dSecondaryVoltageControlControlledBusVRow.as<int>(); T.controllerBusVRow = ctx->dSecondaryVoltageControlControllerBusVRow.as<int>(); T.reactiveLimitEntry = ctx->dSecondaryVoltageControlReactiveLimitEntry.as<int>();
     T.baseTargetV = ctx->dSecondaryVoltageControlBaseTargetV.as<double>(); T.minQ = ctx->dSecondaryVoltageControlMinQ.as<double>();
     T.maxQ = ctx->dSecondaryVoltageControlMaxQ.as<double>(); T.loadTargetQ = ctx->dSecondaryVoltageControlLoadTargetQ.as<double>();
@@ -353,7 +353,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     CUDA_CHECK(cudaMemsetAsync(ctx->dSecondaryVoltageControlNeedsAdjustment.p, 0, nS, ctx->stream));
     secondaryVoltageControlTriggerBatch<<<grid(ctx->nSecondaryVoltageControlZones * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
-            ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
+            ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimits.dReactiveLimitSavedRowMode.as<char>(),
             ctx->dMode.as<int>(), ctx->dTarget.as<double>());
     std::vector<char> need(nS);
     CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSecondaryVoltageControlNeedsAdjustment.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
@@ -406,7 +406,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dSecondaryVoltageControlZoneFactorizationInfo.as<int>(), ctx->dSecondaryVoltageControlZoneRightHandSide.as<double>(),
             ctx->dOuterLoopUnstable.as<char>());
     secondaryVoltageControlApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
-            ctx->dOuterLoopCheckActive.as<char>(), ctx->dReactiveLimitQLimitType.as<char>(), ctx->dTarget.as<double>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->dTarget.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> rej(nS);
     CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSecondaryVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));

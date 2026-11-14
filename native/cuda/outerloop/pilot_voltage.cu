@@ -326,20 +326,20 @@ void launchPilotTargetVEquationUpdate(BatchSolverContext* ctx, DriverPass& drv, 
                     ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
                     ctx->frozenRows.view(),
                     pilotSelfReactiveLimitEntryOrNull(ctx),
-                ctx->dReactiveLimitQLimitType.p ? ctx->dReactiveLimitQLimitType.as<char>() : nullptr, ctx->nReactiveLimitEntries,
-                useDyn ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                useDyn ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                useDyn ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(),
-                ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr, useDyn ? 1 : 0,
-                ctx->dReactiveLimitTargetV.p ? ctx->dReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->reactiveLimits.dReactiveLimitQLimitType.p ? ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>() : nullptr, ctx->reactiveLimits.nReactiveLimitEntries,
+                useDyn ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(),
+                useDyn ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(),
+                useDyn ? ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
+                ctx->reactiveLimits.reactiveLimitsRobustMode ? ctx->reactiveLimits.dReactiveLimitInitialTargetQ.as<double>() : nullptr, useDyn ? 1 : 0,
+                ctx->reactiveLimits.dReactiveLimitTargetV.p ? ctx->reactiveLimits.dReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->dReactiveRelocationPilotReactiveLimitEntry.p ? ctx->dReactiveRelocationPilotReactiveLimitEntry.as<int>() : nullptr,
-                ctx->reactiveLimitTargetVOverrides.view(),
+                ctx->reactiveLimits.reactiveLimitTargetVOverrides.view(),
                 ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
                 ctx->nDistrQMembers, ctx->dDistrQMemberRelocationGroup.p ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
                 ctx->dDistrQMemberReactiveLimitEntry.p ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr,
-                ctx->reactiveLimitIslanded.deviceOrNull(),
+                ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(),
                 ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                REACTIVE_LIMIT_TOL, ctx->reactiveLimitGeneratorsLost.deviceOrNull(),
+                REACTIVE_LIMIT_TOL, ctx->reactiveLimits.reactiveLimitGeneratorsLost.deviceOrNull(),
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
                 ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
                 useSeedTargetQ ? ctx->reactiveLimitSeedTargetQ.deviceOrNull() : nullptr);
@@ -432,12 +432,12 @@ __global__ void updateReMergedVoltageTargetRowBatch(int nScenarios, int n, int n
 }
 
 void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& drv, bool solveStart) {
-    if (solveStart && ctx->dReactiveLimitReMergedVoltageRow.p != nullptr) {
+    if (solveStart && ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.p != nullptr) {
         // the installed slots' re-merges start afresh, whether or not the bank holds one now: a slot keeps its rows until
         // its next install, and another install can bring the bank's re-merges back while it solves
-        const size_t entries = static_cast<size_t>(ctx->nReactiveLimitEntries);
-        memsetInstalledRows(ctx, ctx->dReactiveLimitHoldsReMergedVoltageTarget.p, entries, 0);
-        memsetInstalledRows(ctx, ctx->dReactiveLimitReMergedVoltageRow.p, entries * sizeof(int), 0xFF);
+        const size_t entries = static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries);
+        memsetInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.p, entries, 0);
+        memsetInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.p, entries * sizeof(int), 0xFF);
     }
     if (ctx->reMergedVoltageTargets.entries() == 0) {
         return;
@@ -449,13 +449,13 @@ void launchReMergedVoltageTargetRowUpdate(BatchSolverContext* ctx, DriverPass& d
         ctx->reMergedVoltageTargets.resetState(ctx->installSlots, ctx->stream);
     }
     updateReMergedVoltageTargetRowBatch<<<grid(nS * reMergedVoltageTargets.capacity), BLOCK, 0, ctx->stream>>>(nS, n,
-            ctx->nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),
-            ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+            ctx->reactiveLimits.nReactiveLimitEntries, reMergedVoltageTargets, ctx->reMergedVoltageTargetControllers.view(),
+            ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(), ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr,
             ctx->structure->dRelocatedChildOwnRow.p ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-            ctx->dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimitIslanded.deviceOrNull(),
+            ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(),
             ctx->frozenRows.view(),
-            ctx->reMergedVoltageTargets.state<int>(0), ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
-            ctx->dReactiveLimitReMergedVoltageRow.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+            ctx->reMergedVoltageTargets.state<int>(0), ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.as<char>(),
+            ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 

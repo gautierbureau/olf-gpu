@@ -100,7 +100,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     ctx->dSecondaryVoltageControlControllerBusEnabled.ensure(nS * nC * sizeof(char));
     ctx->dSecondaryVoltageControlNeedsAdjustment.ensure(nS * sizeof(char));
     ctx->dSecondaryVoltageControlRejected.ensure(nS * sizeof(char));
-    ctx->dSecondaryVoltageControlReactiveLimitTargetV.ensure(nS * std::max(ctx->nReactiveLimitEntries, 1) * sizeof(double));
+    ctx->dSecondaryVoltageControlReactiveLimitTargetV.ensure(nS * std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1) * sizeof(double));
     ctx->dSecondaryVoltageControlZoneMatrix.ensure(nS * static_cast<size_t>(nC) * nC * sizeof(double));
     ctx->dSecondaryVoltageControlZoneRightHandSide.ensure(nS * nC * sizeof(double));
     ctx->dSecondaryVoltageControlZoneMatrixPointers.ensure(nS * sizeof(double*));
@@ -121,7 +121,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
         // reactive-limit SEEDING reads this buffer before the per-solve reset further down runs, so an
         // uninitialised one hands the switch-back a garbage comparison voltage and switches back to PV controllers
         // that should stay PQ (measured on ieee14's z1: controllers switched to PQ 4 -> 2 instead of 4 -> 6, and 1.0e-10 kV).
-        std::vector<double> nanv(nS * std::max(ctx->nReactiveLimitEntries, 1), std::nan(""));
+        std::vector<double> nanv(nS * std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1), std::nan(""));
         CUDA_CHECK(cudaMemcpy(ctx->dSecondaryVoltageControlReactiveLimitTargetV.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     ctx->secondaryVoltageControlMinPlausibleTargetV = minPlausibleV;

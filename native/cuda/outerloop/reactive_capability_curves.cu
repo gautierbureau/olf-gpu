@@ -154,10 +154,10 @@ __global__ void reactiveCapabilityCurveLimitsBatch(int nReactiveLimitEntries, in
 // The curve kernel's view of the AC-emulation loop state (see CurveHvdcAcEmulationView).
 CurveHvdcAcEmulationView curveHvdcAcEmulationView(BatchSolverContext* ctx) {
     CurveHvdcAcEmulationView c{};
-    if (!ctx->reactiveCapabilityCurveHasHvdc) {
+    if (!ctx->reactiveLimits.reactiveCapabilityCurveHasHvdc) {
         return c;
     }
-    c.hvdcStation = ctx->dReactiveCapabilityCurveHvdcStation.as<int>();
+    c.hvdcStation = ctx->reactiveLimits.dReactiveCapabilityCurveHvdcStation.as<int>();
     c.nHvdcAcEmulation = ctx->nHvdcAcEmulation;
     if (ctx->nHvdcAcEmulation > 0) {
         c.status = ctx->hvdcAcEmulationStatus.device();

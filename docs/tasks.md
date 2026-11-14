@@ -27,7 +27,7 @@ real pocket (42 buses, 61 with every breaker) and the prepare stage takes 1.0 s:
 GPU-bound) with every breaker retained, 2.7 s (~18,000/s) without. `DC_WOODBURY_GRAPH_CHECKS` (OLF_GPU_PHASE_TIME) names
 the largest loss and the slack.
 
-Open: what to propose upstream (a most-meshed count that ignores switch branches, or counts over the bus's closed-switch
+Upstream draft: `docs/fast-dc-slack-component.md` (A: fast DC does not relocate the slack — the plain DC SA reports 263 MW lost for LIYX, fast DC 58 GW; B: the switch count). Open: what to propose upstream (a most-meshed count that ignores switch branches, or counts over the bus's closed-switch
 cluster; or fast DC relocating the slack as the AC analysis does); meanwhile a topology study should set its slack
 (`LARGEST_GENERATOR`, or `NAME` with `slackBusesIds`).
 

@@ -497,6 +497,62 @@ __global__ void pilotSelfMixedPvPqGate(int nReactiveLimitEntries, int nScenarios
     }
 }
 
+// The capability-curve limits at the current targets (forced target Q included), for the scenarios active marks (nullptr:
+// every scenario). Run before the check by the loop and by the audit.
+void launchReactiveLimitBounds(BatchSolverContext* ctx, int nS, int n, const char* active) {
+    reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
+            ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
+            ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
+            ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
+            ctx->dTarget.as<double>(),
+            ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
+            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
+            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
+            ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
+            ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
+            ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
+            ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
+            ctx->dReactiveLimitLoadQPerScenario.as<double>(), active);
+    launchForcedTargetQLimits(ctx, nS, n, active);
+}
+
+// The check kernel itself: passId is the outer-loop pass the decision log records; tracksSwitches gives it the
+// remaining-PV counter and the switched rows the forced-PV election reads (the loop), nullptr for the audit.
+void launchReactiveLimitsKernel(BatchSolverContext* ctx, const DriverPass& drv, int passId, bool tracksSwitches) {
+    reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * drv.nS), BLOCK, 0, ctx->stream>>>(
+            ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+            ctx->nReactiveLimitEntries, drv.nS, drv.n, drv.reactiveLimitTol, drv.maxPqPvSwitch,
+            ctx->dReactiveLimitVoltageRow.as<int>(),
+            ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+            drv.usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
+            drv.usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
+            drv.usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(),
+            ctx->dReactiveLimitTargetV.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
+            ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+            ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
+            ctx->dReactiveLimitCheckDecision.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
+            ctx->reactiveLimitTargetVOverrides.view(),
+            ctx->dRowSlope.as<double>(), ctx->dReactiveLimitSavedTarget.as<double>(), drv.usePerScenarioReactiveLimits ? 1 : 0,
+            ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
+            ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
+            ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
+            drv.hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, drv.hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
+            ctx->reactiveLimitIslanded.deviceOrNull(),
+            ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
+            ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
+            drv.reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
+            ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, passId,
+            pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
+            ctx->reactiveLimitLocalOverride.deviceOrNull(),
+            ctx->reactiveLimitLocalTargetV.deviceOrNull(),
+            ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
+            ctx->reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
+            ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
+            ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
+            tracksSwitches ? ctx->dReactiveLimitRemainingPvBusCount.as<int>() : nullptr,
+            tracksSwitches ? ctx->dReactiveLimitSwitchedRow.as<int>() : nullptr);
+}
+
 // One check of ReactiveLimitsOuterLoop on every live scenario (GpuOuterLoopKind::REACTIVE_LIMITS): the curve limits at the current
 // targets, the PV->PQ and PQ->PV switches, robust mode's realistic-voltage PV->PQ switches and the forced-PV election.
 void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
@@ -507,61 +563,14 @@ void reactiveLimitsCheck(BatchSolverContext* ctx, DriverPass& drv, int loopKind)
     std::vector<char>& live = drv.live;
     BatchResult& res = drv.res;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
-    const int& MAX_PQ_PV_SWITCH = drv.maxPqPvSwitch;
-    const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
     const int& skipReactiveLimitsPhase = drv.skipReactiveLimitsPhase;
-    const bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
     if (loopKind == GpuOuterLoopKind::REACTIVE_LIMITS && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0 && !skipReactiveLimitsPhase) {                  // skipReactiveLimitsPhase: a monitoring interleave solve — the
         if (usePerScenarioReactiveLimits) {                            // curve limits at the CURRENT (post-DS) targets,
-            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
-                    ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
-                    ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
-                    ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
-                    ctx->dTarget.as<double>(),
-                    ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
-                    ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                    ctx->dReactiveLimitLoadQPerScenario.as<double>(), ctx->dOuterLoopCheckActive.as<char>());
-            launchForcedTargetQLimits(ctx, nS, n, ctx->dOuterLoopCheckActive.as<char>());
+            launchReactiveLimitBounds(ctx, nS, n, ctx->dOuterLoopCheckActive.as<char>());
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitRemainingPvBusCount.p, 0, static_cast<size_t>(nS) * sizeof(int), ctx->stream));
-        reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
-                ctx->nReactiveLimitEntries, nS, n, REACTIVE_LIMIT_TOL, MAX_PQ_PV_SWITCH,
-                ctx->dReactiveLimitVoltageRow.as<int>(),
-                ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(),
-                ctx->dReactiveLimitTargetV.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-                ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
-                ctx->dReactiveLimitCheckDecision.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
-                ctx->reactiveLimitTargetVOverrides.view(),
-                ctx->dRowSlope.as<double>(), ctx->dReactiveLimitSavedTarget.as<double>(), usePerScenarioReactiveLimits ? 1 : 0,
-                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
-                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
-                ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
-                hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
-                ctx->reactiveLimitIslanded.deviceOrNull(),
-                ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
-                ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
-                reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
-                ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, outer,
-                pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                ctx->reactiveLimitLocalOverride.deviceOrNull(),
-                ctx->reactiveLimitLocalTargetV.deviceOrNull(),
-                ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                ctx->reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
-                ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
-                ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
-                ctx->dReactiveLimitRemainingPvBusCount.as<int>(), ctx->dReactiveLimitSwitchedRow.as<int>());
+        launchReactiveLimitsKernel(ctx, drv, outer, true);
         if (ctx->nReactiveLimitPilotSelfEntries > 0) {
             // a pilot that is its own controller switched to PQ while a member of its group is not (or
             // the reverse): the device has no row for OLF's layout of that state - CPU replay

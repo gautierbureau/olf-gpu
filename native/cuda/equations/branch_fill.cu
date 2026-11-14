@@ -148,11 +148,8 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
                                     const char* disabled, const char* active,
                                     const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                     ReactiveRelocationTables rt, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
     const int* q = ix + e * 6;
     const double* xs = x + s * n;
@@ -243,11 +240,8 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
                                      const char* disabled, const char* active,
                                      const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                      ReactiveRelocationTables rt, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
     const int* q = ix + e * 6;
     const double* xs = x + s * n;

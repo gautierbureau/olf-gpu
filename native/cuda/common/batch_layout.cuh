@@ -70,6 +70,16 @@ __device__ inline void itemAndScenario(int tid, int itemCount, BatchLayout layou
     }
 }
 
+// One thread per (element, scenario) of an element fill: its element and scenario, false when the thread is past the
+// last one, the scenario has retired or the element is out of service in it (disabled, per scenario x element).
+__device__ __forceinline__ bool liveElement(int elementCount, int nScenarios, int nElements, int elemOffset,
+                                            const char* active, const char* disabled, BatchLayout layout, int& e, int& s) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= elementCount * nScenarios) return false;
+    itemAndScenario(tid, elementCount, layout, e, s);
+    return active[s] && !disabled[s * nElements + elemOffset + e];
+}
+
 }  // namespace olfgpu
 
 #endif  // OLF_GPU_COMMON_BATCH_LAYOUT_CUH

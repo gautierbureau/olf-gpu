@@ -70,11 +70,8 @@ __global__ void fillHvdcBatch(int elementCount, int nScenarios, int n, int nnz, 
                               const double* x, double* vals, double* F,
                               const char* disabled, const char* active,
                               const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;
     const double* xs = x + (size_t) s * n;
@@ -135,11 +132,8 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
                                 ShuntAdmittanceOverrides shuntAdmittanceOverrides,
                                 const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                ReactiveRelocationTables rt, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     const double* p = in + e * 2;                            // g b
     double g = p[0];
     double b = p[1];
@@ -163,11 +157,8 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
                                const double* x, double* F,
                                const char* disabled, const char* active,
                                const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
     const int* q = ix + e * 4;
     const double* xs = x + (size_t) s * n;

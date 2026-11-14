@@ -100,16 +100,20 @@ SharedStructure* buildStructure(int n,
     openBranchIndices = openBranchIndicesMapped.data();
     shuntIndices = shuntIndicesMapped.data();
     hvdcAcEmulationIndices = hvdcAcEmulationIndicesMapped.data();
+    const RelocatedElements relocatedClosedBranches{RelocatedFamily::CLOSED_BRANCH, nClosedBranch, closedBranchIndices, nullptr};
+    const RelocatedElements relocatedOpenBranches{RelocatedFamily::OPEN_BRANCH, nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination};
+    const RelocatedElements relocatedShunts{RelocatedFamily::SHUNT, nShunt, shuntIndices, nullptr};
+    const RelocationTables relocationTables{relocatedChildOwnRow, structure->hReactiveRelocationGroupStart.data(),
+                                            structure->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow};
 
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
     collectPattern(nClosedBranch, closedBranchIndices, 12, CLOSED_BRANCH_SCATTER, CLOSED_BRANCH_OUTPUT_COUNT, resolveClosedBranch, pat);
-    bool dynamicRelocation = anyRelocatedChild || anyDependentGroup || hasRelocatable(nClosedBranch, closedBranchIndices, nShunt, shuntIndices)
-            || hasAlternateRows(openBranchAlternateReactiveDestination, nOpenBranch * 2) || hasAlternateRows(zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch * 2);
+    bool dynamicRelocation = anyRelocatedChild || anyDependentGroup || hasRelocatableOutput(relocatedClosedBranches) || hasRelocatableOutput(relocatedShunts)
+            || hasRelocatableOutput(relocatedOpenBranches) || hasAlternateRows(zeroImpedanceBranchAlternateReactiveDestination, nZeroImpedanceBranch * 2);
     if (dynamicRelocation) {
-        collectClosedBranchRelocationPattern(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups,        // union the alternate Q rows into the pattern
-                structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
-                        reactiveRelocationDependentGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
+        collectRelocationPattern(relocatedClosedBranches, relocationTables, pat);   // union the alternate Q rows into the pattern
+                                                                                    // (+ every GROUP candidate's slots, plan-A6)
     }
     bool hasPhaseControl = false;
     for (int e = 0; e < nClosedBranch; e++) {
@@ -120,11 +124,11 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nOpenBranch, openBranchIndices, 6, OPEN_BRANCH_SCATTER, OPEN_BRANCH_OUTPUT_COUNT, resolveOpenBranch, pat);
     if (dynamicRelocation) {
-        collectOpenBranchRelocationPattern(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
+        collectRelocationPattern(relocatedOpenBranches, relocationTables, pat);
     }
     collectPattern(nShunt, shuntIndices, 5, SHUNT_SCATTER, SHUNT_OUTPUT_COUNT, resolveShunt, pat);
     if (dynamicRelocation) {
-        collectShuntRelocationPattern(nShunt, shuntIndices, relocatedChildOwnRow, pat, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(), reactiveRelocationDependentGroupOfRow);
+        collectRelocationPattern(relocatedShunts, relocationTables, pat);
     }
     collectPattern(nHvdcAcEmulation, hvdcAcEmulationIndices, 4, HVDC_AC_EMULATION_SCATTER, HVDC_AC_EMULATION_OUTPUT_COUNT, resolveHvdcAcEmulation, pat);
     if (dynamicRelocation) {
@@ -221,28 +225,7 @@ SharedStructure* buildStructure(int n,
     // ---- family device data (inputs, indices, role-folded destinations) + static trig ----
     setupFamily(structure->closedBranch, nClosedBranch, closedBranchParameters, 8, closedBranchIndices, 12, CLOSED_BRANCH_SCATTER, CLOSED_BRANCH_OUTPUT_COUNT, resolveClosedBranch, pos);
     if (dynamicRelocation && nClosedBranch) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
-        std::vector<int> alternateDestination;
-        std::vector<int> selectorRow;
-        std::vector<int> relocationGroup;
-        std::vector<int> relocationCandidateOffset;
-        std::vector<int> relocationCandidateDestinations;
-        std::vector<char> relocationDependentPilot;
-        buildClosedBranchRelocationDestination(nClosedBranch, closedBranchIndices, relocatedChildOwnRow, pos, alternateDestination, selectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
-                relocationGroup, relocationCandidateOffset, relocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, relocationDependentPilot);
-        structure->closedBranch.alternateDestination.upload(alternateDestination.data(), alternateDestination.size() * sizeof(int));
-        structure->closedBranch.selectorRow.upload(selectorRow.data(), selectorRow.size() * sizeof(int));
-        if (!relocationCandidateDestinations.empty()) {
-            structure->closedBranch.relocationGroup.upload(relocationGroup.data(), relocationGroup.size() * sizeof(int));
-            structure->closedBranch.relocationCandidateOffset.upload(relocationCandidateOffset.data(), relocationCandidateOffset.size() * sizeof(int));
-            structure->closedBranch.relocationCandidateDestinations.upload(relocationCandidateDestinations.data(), relocationCandidateDestinations.size() * sizeof(int));
-            structure->closedBranch.relocationDependentPilot.upload(relocationDependentPilot.data(), relocationDependentPilot.size());
-            static int cbRoles[CLOSED_BRANCH_OUTPUT_COUNT];
-            for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
-                cbRoles[k] = CLOSED_BRANCH_SCATTER[k].role;
-            }
-            patchGroupFrozenDestinations(structure->closedBranch.destination, relocationGroup, relocationCandidateOffset, CLOSED_BRANCH_OUTPUT_COUNT, cbRoles,
-                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
-        }
+        RelocationDestinations d = installRelocationDestinations(relocatedClosedBranches, relocationTables, pos, structure->closedBranch);
         // rte6515 carries a relocatable output on 41 of its 9,042 closed branches, network.xiidm on 238 of 9,959; walking
         // every output of the others through the relocation tables to land on its frozen destination anyway was 71 % of
         // the closed-branch fill (the probe of 2026-10-30: 104 of 145 ms against the static scatter)
@@ -250,7 +233,7 @@ SharedStructure* buildStructure(int n,
         for (int e = 0; e < nClosedBranch; e++) {
             for (int k = 0; k < CLOSED_BRANCH_OUTPUT_COUNT; k++) {
                 const int t = e * CLOSED_BRANCH_OUTPUT_COUNT + k;
-                if (selectorRow[t] != -1 || (!relocationCandidateDestinations.empty() && relocationGroup[t] >= 0)) {
+                if (d.selectorRow[t] != -1 || (!d.relocationCandidateDestinations.empty() && d.relocationGroup[t] >= 0)) {
                     relocatedElement[e] = 1;
                 }
             }
@@ -266,7 +249,6 @@ SharedStructure* buildStructure(int n,
         if (!relocatedElements.empty()) {
             structure->closedBranch.relocatedElements.upload(relocatedElements.data(), relocatedElements.size() * sizeof(int));
         }
-        structure->closedBranch.dynamicRelocation = true;
     }
     if (hasPhaseControl) {                                          // continuous phase control: P-flow row at a1
         std::vector<int> phaseControlDestination;
@@ -278,55 +260,11 @@ SharedStructure* buildStructure(int n,
     }
     setupFamily(structure->openBranch, nOpenBranch, openBranchParameters, 7, openBranchIndices, 6, OPEN_BRANCH_SCATTER, OPEN_BRANCH_OUTPUT_COUNT, resolveOpenBranch, pos);
     if (dynamicRelocation && nOpenBranch) {                                   // ob dynamic Q-routing: alt-dest + selector
-        std::vector<int> openBranchAlternateDestination;
-        std::vector<int> openBranchSelectorRow;
-        std::vector<int> openBranchRelocationGroup;
-        std::vector<int> openBranchRelocationCandidateOffset;
-        std::vector<int> openBranchRelocationCandidateDestinations;
-        std::vector<char> openBranchRelocationDependentPilot;
-        buildOpenBranchRelocationDestination(nOpenBranch, openBranchIndices, openBranchAlternateReactiveDestination, relocatedChildOwnRow, pos, openBranchAlternateDestination, openBranchSelectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
-                openBranchRelocationGroup, openBranchRelocationCandidateOffset, openBranchRelocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, openBranchRelocationDependentPilot);
-        structure->openBranch.alternateDestination.upload(openBranchAlternateDestination.data(), openBranchAlternateDestination.size() * sizeof(int));
-        structure->openBranch.selectorRow.upload(openBranchSelectorRow.data(), openBranchSelectorRow.size() * sizeof(int));
-        if (!openBranchRelocationCandidateDestinations.empty()) {
-            structure->openBranch.relocationGroup.upload(openBranchRelocationGroup.data(), openBranchRelocationGroup.size() * sizeof(int));
-            structure->openBranch.relocationCandidateOffset.upload(openBranchRelocationCandidateOffset.data(), openBranchRelocationCandidateOffset.size() * sizeof(int));
-            structure->openBranch.relocationCandidateDestinations.upload(openBranchRelocationCandidateDestinations.data(), openBranchRelocationCandidateDestinations.size() * sizeof(int));
-            structure->openBranch.relocationDependentPilot.upload(openBranchRelocationDependentPilot.data(), openBranchRelocationDependentPilot.size());
-            static int obRoles[OPEN_BRANCH_OUTPUT_COUNT];
-            for (int k = 0; k < OPEN_BRANCH_OUTPUT_COUNT; k++) {
-                obRoles[k] = OPEN_BRANCH_SCATTER[k].role;
-            }
-            patchGroupFrozenDestinations(structure->openBranch.destination, openBranchRelocationGroup, openBranchRelocationCandidateOffset, OPEN_BRANCH_OUTPUT_COUNT, obRoles,
-                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
-        }
-        structure->openBranch.dynamicRelocation = true;
+        installRelocationDestinations(relocatedOpenBranches, relocationTables, pos, structure->openBranch);
     }
     setupFamily(structure->shunt, nShunt, shuntParameters, 2, shuntIndices, 5, SHUNT_SCATTER, SHUNT_OUTPUT_COUNT, resolveShunt, pos);
     if (dynamicRelocation && nShunt) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
-        std::vector<int> shuntAlternateDestination;
-        std::vector<int> shuntSelectorRow;
-        std::vector<int> shuntRelocationGroup;
-        std::vector<int> shuntRelocationCandidateOffset;
-        std::vector<int> shuntRelocationCandidateDestinations;
-        std::vector<char> shuntRelocationDependentPilot;
-        buildShuntRelocationDestination(nShunt, shuntIndices, relocatedChildOwnRow, pos, shuntAlternateDestination, shuntSelectorRow, structure->nReactiveRelocationGroups, structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data(),
-                shuntRelocationGroup, shuntRelocationCandidateOffset, shuntRelocationCandidateDestinations, reactiveRelocationDependentGroupOfRow, shuntRelocationDependentPilot);
-        structure->shunt.alternateDestination.upload(shuntAlternateDestination.data(), shuntAlternateDestination.size() * sizeof(int));
-        structure->shunt.selectorRow.upload(shuntSelectorRow.data(), shuntSelectorRow.size() * sizeof(int));
-        if (!shuntRelocationCandidateDestinations.empty()) {
-            structure->shunt.relocationGroup.upload(shuntRelocationGroup.data(), shuntRelocationGroup.size() * sizeof(int));
-            structure->shunt.relocationCandidateOffset.upload(shuntRelocationCandidateOffset.data(), shuntRelocationCandidateOffset.size() * sizeof(int));
-            structure->shunt.relocationCandidateDestinations.upload(shuntRelocationCandidateDestinations.data(), shuntRelocationCandidateDestinations.size() * sizeof(int));
-            structure->shunt.relocationDependentPilot.upload(shuntRelocationDependentPilot.data(), shuntRelocationDependentPilot.size());
-            static int shRoles[SHUNT_OUTPUT_COUNT];
-            for (int k = 0; k < SHUNT_OUTPUT_COUNT; k++) {
-                shRoles[k] = SHUNT_SCATTER[k].role;
-            }
-            patchGroupFrozenDestinations(structure->shunt.destination, shuntRelocationGroup, shuntRelocationCandidateOffset, SHUNT_OUTPUT_COUNT, shRoles,
-                    structure->hReactiveRelocationGroupStart.data(), structure->hReactiveRelocationCandidateRows.data());
-        }
-        structure->shunt.dynamicRelocation = true;
+        installRelocationDestinations(relocatedShunts, relocationTables, pos, structure->shunt);
     }
     setupFamily(structure->hvdcAcEmulation, nHvdcAcEmulation, hvdcAcEmulationParameters, 5, hvdcAcEmulationIndices, 4, HVDC_AC_EMULATION_SCATTER, HVDC_AC_EMULATION_OUTPUT_COUNT, resolveHvdcAcEmulation, pos);
     if (dynamicRelocation && nHvdcAcEmulation) {                                   // a converter bus under a coupler the scenario opens

@@ -50,9 +50,9 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     // limits below evaluate a curve at base + distributedSlackGeneratorMove wherever distributedSlackGeneratorMoveValid is set. Cleared only after the seed,
     // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
     // that slot. applyToNetwork also reads it when the DS phase never fires (NaN targetP otherwise).
-    if (ctx->nDistributedSlackGenerators > 0 && ctx->dDistributedSlackGeneratorMove.p) {
-        resetInstalledRows(ctx, ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->nDistributedSlackGenerators, nullptr, 0.0);
-        resetInstalledRows(ctx, ctx->dDistributedSlackGeneratorMoveValid.as<char>(), 1, nullptr, char(0));
+    if (ctx->distributedSlack.nDistributedSlackGenerators > 0 && ctx->distributedSlack.dDistributedSlackGeneratorMove.p) {
+        resetInstalledRows(ctx, ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>(), ctx->distributedSlack.nDistributedSlackGenerators, nullptr, 0.0);
+        resetInstalledRows(ctx, ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>(), 1, nullptr, char(0));
     }
     if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
         size_t need = static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(double);   // the BASE carrier's row,
@@ -150,12 +150,12 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                     ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(), ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
                     ctx->reactiveLimits.reactiveLimitDeltaOverrides.view(), ctx->reactiveLimits.reactiveCapabilityCurveOverrides.view(),
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorSeedAnchor.on() ? ctx->distributedSlackGeneratorSeedAnchor.device() : ctx->distributedSlackGeneratorAnchor.deviceOrNull(),
-                    ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorSeedAnchor.on() ? ctx->distributedSlack.distributedSlackGeneratorSeedAnchor.device() : ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(),
+                    ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->distributedSlack.nDistributedSlackGenerators,
+                    ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                    ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(), ctx->distributedSlack.nDistributedSlackBuses,
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.distributedSlackGeneratorBus.as<int>() : nullptr,
                     ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(),
                     ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
             launchForcedTargetQLimits(ctx, nS, n, installMaskOrNull(ctx));
@@ -227,11 +227,11 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
                 ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(), ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
                 ctx->dTarget.as<double>(),
                 ctx->reactiveLimits.reactiveLimitDeltaOverrides.view(), ctx->reactiveLimits.reactiveCapabilityCurveOverrides.view(),
-                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->distributedSlack.nDistributedSlackGenerators,
+                ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(), ctx->distributedSlack.nDistributedSlackBuses,
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.distributedSlackGeneratorBus.as<int>() : nullptr,
                 ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(),
                 ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
         launchForcedTargetQLimits(ctx, nS, n, installMaskOrNull(ctx));
@@ -239,7 +239,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     launchReMergedVoltageTargetRowUpdate(ctx, drv, true);                       // a main seeded switched to PQ (a continued solve)
     launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
-    if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->distributedSlack.nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
         distributedSlackResetSolve(ctx, drv);
     }
     if (ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
@@ -269,7 +269,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
         incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->distributedSlackOuterLoop && ctx->slackOnlyDistribution) {
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->distributedSlack.slackOnlyDistribution) {
         slackOnlyDistributionResetSolve(ctx, drv);
     }
 }

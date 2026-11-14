@@ -506,11 +506,11 @@ void launchReactiveLimitBounds(BatchSolverContext* ctx, int nS, int n, const cha
             ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(), ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
             ctx->dTarget.as<double>(),
             ctx->reactiveLimits.reactiveLimitDeltaOverrides.view(), ctx->reactiveLimits.reactiveCapabilityCurveOverrides.view(),
-            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-            ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-            ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-            ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
+            ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+            ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->distributedSlack.nDistributedSlackGenerators,
+            ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr,
+            ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(), ctx->distributedSlack.nDistributedSlackBuses,
+            ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.distributedSlackGeneratorBus.as<int>() : nullptr,
             ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(),
             ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>(), active);
     launchForcedTargetQLimits(ctx, nS, n, active);

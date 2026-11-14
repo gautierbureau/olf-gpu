@@ -521,13 +521,13 @@ __global__ void areaInterchangeControlResetSolveBatch(int nS, int nGenerators, c
 void areaInterchangeControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.alloc((size_t) nS * sizeof(double));
-    if (ctx->areaInterchangeControl.nAreas == 0 || ctx->nDistributedSlackGenerators == 0) {
+    if (ctx->areaInterchangeControl.nAreas == 0 || ctx->distributedSlack.nDistributedSlackGenerators == 0) {
         resetInstalledRows(ctx, ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.as<double>(), 1, nullptr, 0.0);
         return;
     }
-    areaInterchangeControlResetSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nDistributedSlackGenerators,
-            ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
-            ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->dDistributedSlackGeneratorMoveValid.as<char>(),
+    areaInterchangeControlResetSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->distributedSlack.nDistributedSlackGenerators,
+            ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(),
+            ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>(), ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>(),
             ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.as<double>(), installMaskOrNull(ctx));
 }
 
@@ -538,9 +538,9 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     }
     const int& n = drv.n;
     const int& nS = drv.nS;
-    int nGenerators = ctx->nDistributedSlackGenerators;
-    if (!ctx->dSlackDistributionFailure.p) ctx->dSlackDistributionFailure.alloc(nS * sizeof(char));
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSlackDistributionFailure.p, 0, nS * sizeof(char), ctx->stream));
+    int nGenerators = ctx->distributedSlack.nDistributedSlackGenerators;
+    if (!ctx->distributedSlack.dSlackDistributionFailure.p) ctx->distributedSlack.dSlackDistributionFailure.alloc(nS * sizeof(char));
+    CUDA_CHECK(cudaMemsetAsync(ctx->distributedSlack.dSlackDistributionFailure.p, 0, nS * sizeof(char), ctx->stream));
     ctx->areaInterchangeControl.dAreaInterchangeControlAreaScratch.alloc((size_t) nS * (ctx->areaInterchangeControl.nAreas + 1) * SLOT_WIDTH * sizeof(double));
     ctx->areaInterchangeControl.dAreaInterchangeControlPreviousMove.alloc((size_t) nS * nGenerators * sizeof(double));
     ctx->areaInterchangeControl.dAreaInterchangeControlParticipant.alloc((size_t) nS * nGenerators * sizeof(char));
@@ -548,10 +548,10 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.n = n;
     t.nS = nS;
     t.nElements = ctx->nElements;
-    t.slackRowBase = ctx->slackBusPhiRow;
-    t.slackRowOverride = ctx->slackBusRowOverride.deviceOrNull();
-    t.slackTargetP = ctx->slackBusTargetP;
-    t.slackBusAnchorShift = ctx->nDistributedSlackBuses > 0 ? ctx->slackBusAnchorShift.deviceOrNull() : nullptr;
+    t.slackRowBase = ctx->distributedSlack.slackBusPhiRow;
+    t.slackRowOverride = ctx->distributedSlack.slackBusRowOverride.deviceOrNull();
+    t.slackTargetP = ctx->distributedSlack.slackBusTargetP;
+    t.slackBusAnchorShift = ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.slackBusAnchorShift.deviceOrNull() : nullptr;
     t.nAreas = ctx->areaInterchangeControl.nAreas;
     t.interchangeTarget = ctx->areaInterchangeControl.dAreaInterchangeTarget.as<double>();
     t.slackDistributionFactor = ctx->areaInterchangeControl.dAreaSlackDistributionFactor.as<double>();
@@ -566,26 +566,26 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.openBranchParameters = ctx->structure->openBranch.parameters.as<double>();
     t.openBranchIndices = ctx->structure->openBranch.indices.as<int>();
     t.closedBranchParameterOverrides = closedBranchParameterOverrides(ctx);
-    t.nBuses = ctx->nDistributedSlackBuses;
-    t.busPhiRow = ctx->dDistributedSlackBusPhiRow.as<int>();
-    t.busRowOverride = ctx->distributedSlackBusRowOverride.deviceOrNull();
+    t.nBuses = ctx->distributedSlack.nDistributedSlackBuses;
+    t.busPhiRow = ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>();
+    t.busRowOverride = ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull();
     t.busArea = ctx->areaInterchangeControl.dDistributedSlackBusArea.as<int>();
-    t.busGeneratorStart = ctx->dDistributedSlackBusGeneratorStart.as<int>();
-    t.busGeneratorEnd = ctx->dDistributedSlackBusGeneratorEnd.as<int>();
-    t.busBaseTargetP = ctx->dDistributedSlackBusBaseTargetP.as<double>();
-    t.busAnchorShift = ctx->distributedSlackBusAnchorShift.deviceOrNull();
-    t.islanded = ctx->distributedSlackIslanded.deviceOrNull();
+    t.busGeneratorStart = ctx->distributedSlack.dDistributedSlackBusGeneratorStart.as<int>();
+    t.busGeneratorEnd = ctx->distributedSlack.dDistributedSlackBusGeneratorEnd.as<int>();
+    t.busBaseTargetP = ctx->distributedSlack.dDistributedSlackBusBaseTargetP.as<double>();
+    t.busAnchorShift = ctx->distributedSlack.distributedSlackBusAnchorShift.deviceOrNull();
+    t.islanded = ctx->distributedSlack.distributedSlackIslanded.deviceOrNull();
     t.nGenerators = nGenerators;
-    t.generatorBus = ctx->distributedSlackGeneratorBus.as<int>();
+    t.generatorBus = ctx->distributedSlack.distributedSlackGeneratorBus.as<int>();
     t.generatorArea = ctx->areaInterchangeControl.dDistributedSlackGeneratorArea.as<int>();
-    t.generatorFactor = ctx->distributedSlackGeneratorFactor.as<double>();
-    t.generatorMaxDelta = ctx->distributedSlackGeneratorMaxDelta.as<double>();
-    t.generatorMinDelta = ctx->distributedSlackGeneratorMinDelta.as<double>();
-    t.generatorMarginUp = ctx->distributedSlackGeneratorMarginUp.as<double>();
-    t.generatorMarginDown = ctx->distributedSlackGeneratorMarginDown.as<double>();
-    t.factorMode = ctx->distributedSlackFactorMode;
-    t.lostGenerators = ctx->distributedSlackLostGenerators.view();
-    t.removedGenerators = ctx->distributedSlackRemovedGenerators.view();
+    t.generatorFactor = ctx->distributedSlack.distributedSlackGeneratorFactor.as<double>();
+    t.generatorMaxDelta = ctx->distributedSlack.distributedSlackGeneratorMaxDelta.as<double>();
+    t.generatorMinDelta = ctx->distributedSlack.distributedSlackGeneratorMinDelta.as<double>();
+    t.generatorMarginUp = ctx->distributedSlack.distributedSlackGeneratorMarginUp.as<double>();
+    t.generatorMarginDown = ctx->distributedSlack.distributedSlackGeneratorMarginDown.as<double>();
+    t.factorMode = ctx->distributedSlack.distributedSlackFactorMode;
+    t.lostGenerators = ctx->distributedSlack.distributedSlackLostGenerators.view();
+    t.removedGenerators = ctx->distributedSlack.distributedSlackRemovedGenerators.view();
     t.slackBusPMaxMismatch = drv.slackDistTol;
     t.areaInterchangePMaxMismatch = ctx->areaInterchangeControl.areaInterchangePMaxMismatch;
     t.residueEps = drv.pResidueEps;
@@ -594,16 +594,16 @@ void areaInterchangeControlCheck(BatchSolverContext* ctx, DriverPass& drv) {
     t.disabled = ctx->dDisabled.as<char>();
     t.outerLoopCheckActive = ctx->dOuterLoopCheckActive.as<char>();
     t.target = ctx->dTarget.as<double>();
-    t.move = ctx->dDistributedSlackGeneratorMove.as<double>();
-    t.workingFactor = ctx->dDistributedSlackGeneratorWorkingFactor.as<double>();
+    t.move = ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>();
+    t.workingFactor = ctx->distributedSlack.dDistributedSlackGeneratorWorkingFactor.as<double>();
     t.previousMove = ctx->areaInterchangeControl.dAreaInterchangeControlPreviousMove.as<double>();
     t.slots = ctx->areaInterchangeControl.dAreaInterchangeControlAreaScratch.as<double>();
     t.distributedActivePower = ctx->areaInterchangeControl.dAreaInterchangeControlDistributedActivePower.as<double>();
-    t.removed = ctx->dDistributedSlackGeneratorRemoved.as<char>();
+    t.removed = ctx->distributedSlack.dDistributedSlackGeneratorRemoved.as<char>();
     t.participant = ctx->areaInterchangeControl.dAreaInterchangeControlParticipant.as<char>();
     t.unstable = ctx->dOuterLoopUnstable.as<char>();
-    t.failure = ctx->dSlackDistributionFailure.as<char>();
-    t.moveValid = ctx->dDistributedSlackGeneratorMoveValid.as<char>();
+    t.failure = ctx->distributedSlack.dSlackDistributionFailure.as<char>();
+    t.moveValid = ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>();
     areaInterchangeControlBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(t);
     CUDA_CHECK(cudaGetLastError());
 }

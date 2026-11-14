@@ -183,7 +183,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // distributed-slack and reactive-limit tables are packed whatever the run's loops: they count only for a run
     // that has the loop (distributedSlackOuterLoop / reactiveLimitsOuterLoop).
     bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0)
-                                             || (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution))
+                                             || (ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
                                              || ctx->nTransformerVoltageControlMembers > 0 || ctx->nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0
                                              || ctx->nOverloadManagementSystems > 0);
@@ -273,7 +273,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.reactiveLimitsAuditLog.assign(drv.reactiveLimitsAuditOn ? nS : 0, {});
     if (traceOn(Trace::BATCH_TRACE) && nS == 1) {
         std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d fullLoadflow=%d\n",
-                     ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
+                     ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && ctx->nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
@@ -314,7 +314,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int& nLoops = drv.nLoops;
     nLoops = 0;
     // OLF drops the DistributedSlack loop from a run with AreaInterchangeControl, which runs after the HVDC loops instead
-    bool distributionInLoopOrder = ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution);
+    bool distributionInLoopOrder = ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution);
     if (distributionInLoopOrder && !ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }

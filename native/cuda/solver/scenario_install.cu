@@ -106,17 +106,17 @@ void installScenarios(BatchSolverContext* ctx, const ScenarioInputs& in) {
     writeInstalledRows(ctx, ctx->dDisabled.as<char>(), in.disabled, static_cast<size_t>(ctx->nElements));
 
     // The distributed slack's per-scenario channels exist only on a context with DS buses.
-    const bool distributedSlack = ctx->nDistributedSlackBuses > 0;
+    const bool distributedSlack = ctx->distributedSlack.nDistributedSlackBuses > 0;
     auto rowsIf = [&](const auto* rows) { return distributedSlack ? rows : nullptr; };
-    ctx->distributedSlackOverrideBus.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideBus));
-    ctx->distributedSlackOverrideFactorDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideFactorDelta));
-    ctx->distributedSlackOverrideBaseTargetPDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideBaseTargetPDelta));
-    ctx->distributedSlackOverrideMaxDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideMaxDelta));
-    ctx->distributedSlackOverrideMinDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideMinDelta));
-    ctx->distributedSlackBusAnchorShift.install(nS, ctx->installSlots, static_cast<size_t>(std::max(ctx->nDistributedSlackBuses, 0)),
+    ctx->distributedSlack.distributedSlackOverrideBus.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideBus));
+    ctx->distributedSlack.distributedSlackOverrideFactorDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideFactorDelta));
+    ctx->distributedSlack.distributedSlackOverrideBaseTargetPDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideBaseTargetPDelta));
+    ctx->distributedSlack.distributedSlackOverrideMaxDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideMaxDelta));
+    ctx->distributedSlack.distributedSlackOverrideMinDelta.install(nS, ctx->installSlots, 1, rowsIf(in.distributedSlackOverrideMinDelta));
+    ctx->distributedSlack.distributedSlackBusAnchorShift.install(nS, ctx->installSlots, static_cast<size_t>(std::max(ctx->distributedSlack.nDistributedSlackBuses, 0)),
                                                 rowsIf(in.distributedSlackBusAnchorShift));
     // The slack's own move also seeds a slack-only distribution, which has no DS bus.
-    ctx->slackBusAnchorShift.install(nS, ctx->installSlots, 1, in.slackBusAnchorShift);
+    ctx->distributedSlack.slackBusAnchorShift.install(nS, ctx->installSlots, 1, in.slackBusAnchorShift);
 }
 
 }  // namespace olfgpu

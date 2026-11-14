@@ -14,7 +14,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackOnlyAnchor)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jAnchor) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotRows(env, ctx, ctx->slackOnlyAnchor, 1, ctx->slackOnlyDistribution ? jAnchor : nullptr, "setBatchSlackOnlyAnchor");
+        installSlotRows(env, ctx, ctx->distributedSlack.slackOnlyAnchor, 1, ctx->distributedSlack.slackOnlyDistribution ? jAnchor : nullptr, "setBatchSlackOnlyAnchor");
     }
 }
 
@@ -30,14 +30,14 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
     if (ctx == nullptr) {
         return;
     }
-    size_t width = static_cast<size_t>(std::max(ctx->nDistributedSlackGenerators, 0));
+    size_t width = static_cast<size_t>(std::max(ctx->distributedSlack.nDistributedSlackGenerators, 0));
     const char* who = "setBatchDistributedSlackGeneratorAnchors";
-    installSlotRows(env, ctx, ctx->distributedSlackGeneratorAnchor, width, jAnchor, who);
+    installSlotRows(env, ctx, ctx->distributedSlack.distributedSlackGeneratorAnchor, width, jAnchor, who);
     if (!env->ExceptionCheck()) {
-        installSlotRows(env, ctx, ctx->distributedSlackGeneratorInitialMove, width, jStart, who);
+        installSlotRows(env, ctx, ctx->distributedSlack.distributedSlackGeneratorInitialMove, width, jStart, who);
     }
     if (!env->ExceptionCheck()) {
-        installSlotRows(env, ctx, ctx->distributedSlackGeneratorSeedAnchor, width, jSeedAnchor, who);
+        installSlotRows(env, ctx, ctx->distributedSlack.distributedSlackGeneratorSeedAnchor, width, jSeedAnchor, who);
     }
 }
 
@@ -46,7 +46,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackLostGe
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distributedSlackLostGenerators, jSlotGen, nullptr);
+        installSlotTable(env, ctx, ctx->distributedSlack.distributedSlackLostGenerators, jSlotGen, nullptr);
     }
 }
 
@@ -55,7 +55,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackRemove
         JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distributedSlackRemovedGenerators, jSlotGen, nullptr);
+        installSlotTable(env, ctx, ctx->distributedSlack.distributedSlackRemovedGenerators, jSlotGen, nullptr);
     }
 }
 
@@ -67,8 +67,8 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackBusRooms)(
         JNIEnv*, jclass, jlong handle, jdouble roomUp, jdouble roomDown) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        ctx->slackBusRoomUp = roomUp;
-        ctx->slackBusRoomDown = roomDown;
+        ctx->distributedSlack.slackBusRoomUp = roomUp;
+        ctx->distributedSlack.slackBusRoomDown = roomDown;
     }
 }
 
@@ -82,7 +82,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
         return;
     }
     if (jBus == nullptr || env->GetArrayLength(jBus) == 0) {
-        ctx->nDistributedSlackGenerators = 0;
+        ctx->distributedSlack.nDistributedSlackGenerators = 0;
         return;
     }
     int nDistributedSlackGenerators = env->GetArrayLength(jBus);
@@ -99,19 +99,19 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
         buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(double));
         env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
     };
-    upI(jBus, ctx->distributedSlackGeneratorBus);
-    upD(jFactor, ctx->distributedSlackGeneratorFactor);
-    upD(jMaxDelta, ctx->distributedSlackGeneratorMaxDelta);
-    upD(jMinDelta, ctx->distributedSlackGeneratorMinDelta);
-    upD(jMarginUp, ctx->distributedSlackGeneratorMarginUp);
-    upD(jMarginDown, ctx->distributedSlackGeneratorMarginDown);
-    upI(jBusGenStart, ctx->dDistributedSlackBusGeneratorStart);
-    upI(jBusGenEnd, ctx->dDistributedSlackBusGeneratorEnd);
-    ctx->dDistributedSlackGeneratorMove.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(double));
-    ctx->dDistributedSlackGeneratorMoveValid.alloc((size_t) ctx->nScenarios * sizeof(char));
-    ctx->dDistributedSlackGeneratorWorkingFactor.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(double));
-    ctx->dDistributedSlackGeneratorRemoved.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(char));
-    ctx->nDistributedSlackGenerators = nDistributedSlackGenerators;
+    upI(jBus, ctx->distributedSlack.distributedSlackGeneratorBus);
+    upD(jFactor, ctx->distributedSlack.distributedSlackGeneratorFactor);
+    upD(jMaxDelta, ctx->distributedSlack.distributedSlackGeneratorMaxDelta);
+    upD(jMinDelta, ctx->distributedSlack.distributedSlackGeneratorMinDelta);
+    upD(jMarginUp, ctx->distributedSlack.distributedSlackGeneratorMarginUp);
+    upD(jMarginDown, ctx->distributedSlack.distributedSlackGeneratorMarginDown);
+    upI(jBusGenStart, ctx->distributedSlack.dDistributedSlackBusGeneratorStart);
+    upI(jBusGenEnd, ctx->distributedSlack.dDistributedSlackBusGeneratorEnd);
+    ctx->distributedSlack.dDistributedSlackGeneratorMove.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(double));
+    ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.alloc((size_t) ctx->nScenarios * sizeof(char));
+    ctx->distributedSlack.dDistributedSlackGeneratorWorkingFactor.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(double));
+    ctx->distributedSlack.dDistributedSlackGeneratorRemoved.alloc((size_t) ctx->nScenarios * nDistributedSlackGenerators * sizeof(char));
+    ctx->distributedSlack.nDistributedSlackGenerators = nDistributedSlackGenerators;
 }
 
 // Per installed slot, the row the distributed-slack kernels read the slack on (host row, -1 = the base slack row): a
@@ -132,7 +132,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchSlackBusRows)(
         env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "setBatchSlackBusRows: expected one row per installed scenario");
         return;
     }
-    ctx->slackBusRowOverride.install(ctx->nScenarios, ctx->installSlots, 1, rows.empty() ? nullptr : rows.data());
+    ctx->distributedSlack.slackBusRowOverride.install(ctx->nScenarios, ctx->installSlots, 1, rows.empty() ? nullptr : rows.data());
 }
 
 // Distributed-slack participants STRANDED in another synchronous component: the installed slots' mask as {slot,
@@ -150,7 +150,7 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackIsland
     // participant inside loops it already walks, so a scan over a pair list would be the only cost
     // the mask adds to scenarios that have no islanded participant at all.
     std::vector<int> pairs = jniInts(env, jPairs);
-    ctx->distributedSlackIslanded.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nDistributedSlackBuses,
+    ctx->distributedSlack.distributedSlackIslanded.installEntries(ctx->nScenarios, ctx->installSlots, ctx->distributedSlack.nDistributedSlackBuses,
                                                  static_cast<int>(pairs.size() / 2), pairs.data(), nullptr, 1);
 }
 
@@ -178,6 +178,6 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackBusRow
             rows.push_back(rowMap[row]);
         }
     }
-    ctx->distributedSlackBusRowOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nDistributedSlackBuses,
+    ctx->distributedSlack.distributedSlackBusRowOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->distributedSlack.nDistributedSlackBuses,
                                                        static_cast<int>(rows.size()), pairs.data(), rows.data());
 }

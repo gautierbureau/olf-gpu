@@ -11,6 +11,26 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #95 — OPEN: the slack bus a topology study selects (MOST_MESHED counts the retained switches) (2026-11-14)
+
+On network.xiidm with a topology study (`TopologyStudy`, actions on breakers and disconnectors), OLF's default
+`MostMeshedSlackBusSelector` picks `AAHR_0`: one bus bar of AAHR whose 40 "branches" are nearly all switches the study
+retains (it counts every branch connected at both sides, switches included). That bus bar hangs off a weakly connected
+corner: the line contingency `LIYX` (DOA-ACLC) separates it, and fast DC keeps the slack's component as the network
+(it does not relocate the slack, `toLfContingency(network, false, ...)`): 15 buses kept, 13,347 lost (45,675 of 45,692
+with every breaker retained). The CPU's fast DC gives the same; the GPU only mirrors it. So the slack, and what a
+contingency means, depend on which switches the study operates; a plain N-1 (bus view, no switch branch) is not affected.
+
+Cost: the strategies of `LIYX` each rebuild that lost part in OLF's graph check, 12.1 s of the 12.5 s pipelined strategy
+phase with every breaker retained. With `slackBusSelectionMode = LARGEST_GENERATOR` (no switch counted) `LIYX` loses its
+real pocket (42 buses, 61 with every breaker) and the prepare stage takes 1.0 s: 48,449 strategies in 6.4 s (~7,600/s,
+GPU-bound) with every breaker retained, 2.7 s (~18,000/s) without. `DC_WOODBURY_GRAPH_CHECKS` (OLF_GPU_PHASE_TIME) names
+the largest loss and the slack.
+
+Open: what to propose upstream (a most-meshed count that ignores switch branches, or counts over the bus's closed-switch
+cluster; or fast DC relocating the slack as the AC analysis does); meanwhile a topology study should set its slack
+(`LARGEST_GENERATOR`, or `NAME` with `slackBusesIds`).
+
 ### #94 — OPEN: the DC port, back onto main (2026-11-13)
 
 Branch `dc-port` (from `main`) carries the `dc` branch's DC work: the Woodbury DC security analysis on the device

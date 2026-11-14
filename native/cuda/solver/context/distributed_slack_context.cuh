@@ -47,20 +47,16 @@ struct DistributedSlackContext {
     int nDistributedSlackGenerators = 0;
     DeviceBuf distributedSlackGeneratorBus, distributedSlackGeneratorFactor, distributedSlackGeneratorMaxDelta, distributedSlackGeneratorMinDelta, distributedSlackGeneratorMarginUp, distributedSlackGeneratorMarginDown;
     DeviceBuf dDistributedSlackBusGeneratorStart, dDistributedSlackBusGeneratorEnd;
-    // Per (scenario, generator): its cumulative delta from the anchor, and whether the water-fill has
-    // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
-    // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
-    // another iteration — where it absorbs weight and moves nothing.
-    // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
-    // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
-    // activation writes. dMonitoringVoltageActivatedTargetV holds the chosen target per (controller, scenario), NaN until
-    // it fires — OLF never re-checks a controller it has already switched.
     // The run's outer-loop list holds OLF's DistributedSlackOuterLoop / ReactiveLimitsOuterLoop
     // (setBatchOuterLoops). The driver installs those phases only when the run has the loop, whatever
     // the packed tables hold: the reactive-limit pack also carries the stand-by automaton SVC buses the
     // MonitoringVoltage phase activates, with no ReactiveLimitsOuterLoop in the run. Never set = on, the
     // tables alone decide.
     bool distributedSlackOuterLoop = true;
+    // Per (scenario, generator): its cumulative delta from the anchor, and whether the water-fill has
+    // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
+    // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
+    // another iteration — where it absorbs weight and moves nothing.
     DeviceBuf dDistributedSlackGeneratorMove, dDistributedSlackGeneratorRemoved;
     DeviceBuf dDistributedSlackPreviousGeneratorMove, dDistributedSlackPreviousBusTarget;   // nS x generators / buses: before a distribution
     SlotTable distributedSlackLostGenerators{1, 0};                             // per slot: the DS generators an outage removes, by identity

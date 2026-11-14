@@ -243,6 +243,16 @@ __global__ void fillDistrQBatch(int nDistrQ, int nScenarios, int n, int nnz, int
     }
 }
 
+// A linear distribution term coef * x[column] in one scenario: added to its residual row (destination[c * 2], -2 - row)
+// and, when the Jacobian is filled, coef to its slot (destination[c * 2 + 1]).
+__device__ __forceinline__ void addLinearDistributionTerm(int c, int s, int n, int nnz, double coef, const int* destination, const int* column,
+                                                          const double* x, double* vals, double* F, BatchLayout layout) {
+    int dF = destination[c * 2 + 0];
+    int dJ = destination[c * 2 + 1];
+    if (dF <= -2) atomicAdd(&scenarioEntries(F, s, n, layout)[-2 - dF], coef * x[(size_t) s * n + column[c]]);
+    if (vals != nullptr && dJ >= 0) atomicAdd(&scenarioEntries(vals, s, nnz, layout)[dJ], coef);
+}
+
 // Batched DISTR_RHO fill: one thread per (contribution, scenario). Linear coef*r1 into the controller's
 // BRANCH_RHO1 row — strided per scenario, active-gated, no mask (controller-outage contingencies are
 // rejected to the CPU because the 1/count coefficients reform).
@@ -269,10 +279,7 @@ __global__ void fillDistrRhoBatch(int nDistrRho, int nScenarios, int n, int nnz,
     if (coefficientOverride >= 0) {
         coef = distrRhoCoefficientOverrides.doubleOf(s, coefficientOverride);
     }
-    int dF = distrRhoDestination[c * 2 + 0];
-    int dJ = distrRhoDestination[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&scenarioEntries(F, s, n, layout)[-2 - dF], coef * x[(size_t) s * n + distrRhoColumn[c]]);
-    if (vals != nullptr && dJ >= 0) atomicAdd(&scenarioEntries(vals, s, nnz, layout)[dJ], coef);
+    addLinearDistributionTerm(c, s, n, nnz, coef, distrRhoDestination, distrRhoColumn, x, vals, F, layout);
 }
 
 // Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
@@ -286,10 +293,7 @@ __global__ void fillDistrShuntBBatch(int nDistrShuntB, int nScenarios, int n, in
     itemAndScenario(tid, nDistrShuntB, layout, c, s);
     if (!active[s]) return;
     double coef = distrShuntBCoefficient[c];
-    int dF = distrShuntBDestination[c * 2 + 0];
-    int dJ = distrShuntBDestination[c * 2 + 1];
-    if (dF <= -2) atomicAdd(&scenarioEntries(F, s, n, layout)[-2 - dF], coef * x[(size_t) s * n + distrShuntBColumn[c]]);
-    if (vals != nullptr && dJ >= 0) atomicAdd(&scenarioEntries(vals, s, nnz, layout)[dJ], coef);
+    addLinearDistributionTerm(c, s, n, nnz, coef, distrShuntBDestination, distrShuntBColumn, x, vals, F, layout);
 }
 
 }  // namespace olfgpu

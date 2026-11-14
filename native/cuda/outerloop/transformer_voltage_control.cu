@@ -415,7 +415,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     // after its PV -> PQ switches; the freeze happens two loops later and would otherwise leave the pilot holding
     // a target for a control that no longer exists until the next sweep reached RL again (measured
     // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
-    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates > 0) {
+    if (ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates > 0) {
         launchPilotTargetVEquationUpdate(ctx, drv);
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

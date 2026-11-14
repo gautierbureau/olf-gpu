@@ -41,6 +41,7 @@
 #include "context/forced_target_q_context.cuh"
 #include "context/hvdc_ac_emulation_context.cuh"
 #include "context/realistic_voltage_context.cuh"
+#include "context/remote_voltage_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -153,21 +154,8 @@ struct BatchSolverContext {
     std::vector<double> x0SeedVal;
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     ReactiveLimitsContext reactiveLimits;
-    DeviceBuf dPilotSelfCarrierSkip;                                       // nReactiveRelocationGroups * nScenarios chars
-    bool hasPilotSelf = false;
-    SlotTable distrQInactiveMembers{1, 0};                                     // per slot: the DISTR_Q members that stop controlling there
-    SlotRows<char> distrQSubgroup{0};                                     // tasks #71: per (slot, dq member) subgroup
-                                                                          // labels (0: none) and the
-    DeviceBuf dReactiveRelocationDistrQMemberStart;                                    // qr group -> first dq member map
+    RemoteVoltageControlContext remoteVoltageControl;
     ForcedTargetQContext forcedTargetQ;
-    // DISTR_Q weight overrides (setBatchDistrQWeightOverrides): a gen outage at a remote-VC controller
-    // bus renormalizes the group's qPct keys per scenario — per slot, (contribution; new weight), the last one wins.
-    SlotTable distrQWeightOverrides{1, 1};
-    // Per-scenario member reactive KEYS (setBatchDistrQKeyOverrides, {slot, member} -> OLF's qPct after the scenario's
-    // generator losses): the DISTR_Q fill and the target kernel renormalize these over the members a PV -> PQ switch
-    // leaves enabled, so an outage and an in-flight switch to PQ in one group compose. The per-contribution weight
-    // overrides stay for what keys cannot express (a re-extracted pack whose free role moved).
-    SlotTable distrQKeyOverrides{1, 1};                                        // per slot: (member; key), the first one wins
     // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
     // group's 1/count coefficients per scenario — per slot, (contribution; new coefficient), the last one wins.
     SlotTable distrRhoCoefficientOverrides{1, 1};
@@ -177,40 +165,7 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (BUS_TARGET_V_WITH_SLOPE V rows), 0 elsewhere
-    int nDistrQDynamicKeys = 0;                                        // dynamic reactive keys (plan-B3): an RL switch to PQ zeroes the
-    DeviceBuf dDistrQRowMember;                                  // switched member's key and renormalizes the DISTR_Q
-    DeviceBuf dDistrQInjectionMember;                                  // weights over the survivors (updateReactiveKeys) — the
-    DeviceBuf dDistrQMemberKey;                                // kernel recomputes each contribution's weight from the
-    DeviceBuf dDistrQMemberReactiveLimitEntry;                            // RAW keys + the per-(entry, scenario) limitType,
-    DeviceBuf dDistrQMemberGroupStart;                         // zero-then-sum in member order (bit-exact vs OLF)
-    DeviceBuf dDistrQMemberGroupCount;
-    DeviceBuf dDistrQMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
-    DeviceBuf dDistrQMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
-    DeviceBuf dDistrQMemberTargetQ;                            // per member: its UNFROZEN targetQ (generationTargetQ -
-                                                           // loadTargetQ), the value AcTargetVector reads for every
-                                                           // member the RL loop has not frozen
     DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
-    DeviceBuf dDistrQMemberTargetPeerStart;                             // per member (CSR): the members whose targetQ OLF sums
-    DeviceBuf dDistrQMemberTargetPeer;                            // into its DISTR_Q target — its OWN control's elements,
-                                                           // just itself for a control MERGED into the group
-    int nDistrQMembers = 0;
-    int hasDistrQRelocationGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
-    DeviceBuf dDistrQMemberRelocationGroup;                            // per member: the pilot's qr candidate group id, -1 = none
-    DeviceBuf dReactiveRelocationPilotTargetQ;                                   // per (scenario, qr group): the pilot's Q target, captured
-                                                           // at solve init from the BASE carrier's row and handed to
-                                                           // the CURRENT carrier's row on every re-pick
-    DeviceBuf dReactiveRelocationIsGeneratorVoltageControl;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
-                                                           // those get the no-enabled-controller pilot-vEq flip)
-    DeviceBuf dReactiveRelocationPilotTargetVDeactivated;                                   // per (scenario, qr group): 1 = the pilot's V equation was
-    DeviceBuf dReactiveRelocationSavedPilotTargetV;                                  // flipped OFF by updatePilotTargetVEquationBatch (+ the saved V target)
-    DeviceBuf dReactiveRelocationPilotReactiveLimitEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
-                                                           // (its row + the group's V target), -1 = none
-    int nRemoteMemberReactiveTerms = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
-    DeviceBuf dRemoteMemberReactiveTermRow;                                     // of the DISTR_Q assembly accumulating each member's own
-    DeviceBuf dRemoteMemberReactiveTermElement;                                    // bus q into dQbuf at its own row (that slot is free —
-    DeviceBuf dRemoteMemberReactiveTermSide;                                    // the main qBuf fill suppresses member rows)
-    DeviceBuf dRemoteMemberReactiveTermKind;
-    DeviceBuf dRemoteMemberReactiveTermWeight;
     // dQbuf holds the q of every row (dQbufClosed's closed branches plus the other families, refilled at every check);
     // dOuterLoopCheckActive marks the scenarios an outer loop checks this pass, dOuterLoopUnstable those it changed.
     DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
@@ -240,19 +195,6 @@ struct BatchSolverContext {
     SlotRows<double> reactiveLimitSeedTargetQ{std::numeric_limits<double>::quiet_NaN()};   // per (slot, entry): the frozen target Q a continued
                                                                          // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
 
-    SlotTable distrQMemberTargetQOverrides{1, 1};                                // per slot: (member; its own targetQ), the first one wins
-    SlotTable reactiveRelocationPilotTargetQDeltas{1, 1};   // per slot: (relocation group; the move of its pilot's captured Q target)
-    // Pilot-row flip entries (pilotRowWithoutEnabledControllerBatch), per slot: (pilot row, first and count of its surviving
-    // controllers' reactive-limit entries in pilotFlipSurvivors; the pilot's Q target), and per entry whether the row is
-    // flipped and the voltage target it had.
-    SlotTable pilotFlips{3, 1, {{sizeof(char), 0}, {sizeof(double), 0}}};
-    SlotTable pilotFlipSurvivors{1, 0};
-    // Re-merged controls whose main is one of its controllers (updateReMergedVoltageTargetRowBatch), per slot: (the main's
-    // reactive-limit entry, first and count of the cluster's other controllers in reMergedVoltageTargetControllers, in OLF's
-    // merged order; the control's voltage target), and per entry which of those controllers' rows holds the target (-1: the
-    // main's own).
-    SlotTable reMergedVoltageTargets{3, 1, {{sizeof(int), 0xFF}}};
-    SlotTable reMergedVoltageTargetControllers{1, 0};
     HvdcAcEmulationContext hvdcAcEmulation;
     CudssCtx solver;
     bool analyzed = false;

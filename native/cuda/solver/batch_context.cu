@@ -180,7 +180,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             // DISTR_Q terms it feeds: with reactive limits disabled on rte6515 the base started at
             // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
             pilotSelfReactiveLimitEntry[g] = PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY;
-            ctx->hasPilotSelf = true;
+            ctx->remoteVoltageControl.hasPilotSelf = true;
             for (int i = 0; i < nReactiveLimitEntries; i++) {
                 if (rowMap[reactiveLimitVoltageRow[i]] == fallbackRow) {
                     pilotSelfReactiveLimitEntry[g] = i;
@@ -188,9 +188,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                 }
             }
         }
-        if (ctx->hasPilotSelf) {
+        if (ctx->remoteVoltageControl.hasPilotSelf) {
             ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
-            ctx->dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
+            ctx->remoteVoltageControl.dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
             if (traceOn(Trace::RL_TRACE)) {
                 int count = 0, noEntry = 0;
                 for (int g = 0; g < nRelocationGroups; g++) {

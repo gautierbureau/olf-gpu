@@ -271,9 +271,9 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
     }
     if (jReactiveLimitVoltageControlRole == nullptr || jReactiveLimitComparedVoltageRow == nullptr || env->GetArrayLength(jReactiveLimitVoltageControlRole) == 0) {
         ctx->reactiveLimits.nReactiveLimitRemoteEntries = 0;
-        ctx->nRemoteMemberReactiveTerms = 0;
-        ctx->nDistrQDynamicKeys = 0;
-        ctx->hasDistrQRelocationGroups = 0;
+        ctx->remoteVoltageControl.nRemoteMemberReactiveTerms = 0;
+        ctx->remoteVoltageControl.nDistrQDynamicKeys = 0;
+        ctx->remoteVoltageControl.hasDistrQRelocationGroups = 0;
         return;
     }
     int nReactiveLimitEntries = env->GetArrayLength(jReactiveLimitVoltageControlRole);
@@ -300,7 +300,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
     env->ReleaseByteArrayElements(jReactiveLimitVoltageControlRole, voltageControlRole, JNI_ABORT);
     env->ReleaseIntArrayElements(jReactiveLimitComparedVoltageRow, comparedVoltageRow, JNI_ABORT);
     ctx->reactiveLimits.nReactiveLimitRemoteEntries = count;
-    ctx->nRemoteMemberReactiveTerms = 0;
+    ctx->remoteVoltageControl.nRemoteMemberReactiveTerms = 0;
     if (jRemoteMemberReactiveTermRow != nullptr && env->GetArrayLength(jRemoteMemberReactiveTermRow) > 0) {
         int nRemoteMemberReactiveTerms = env->GetArrayLength(jRemoteMemberReactiveTermRow);
         jint* remoteMemberReactiveTermRow = env->GetIntArrayElements(jRemoteMemberReactiveTermRow, nullptr);
@@ -308,20 +308,20 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
         jint* remoteMemberReactiveTermSide = env->GetIntArrayElements(jRemoteMemberReactiveTermSide, nullptr);
         jint* remoteMemberReactiveTermKind = env->GetIntArrayElements(jRemoteMemberReactiveTermKind, nullptr);
         jdouble* remoteMemberReactiveTermWeight = env->GetDoubleArrayElements(jRemoteMemberReactiveTermWeight, nullptr);
-        ctx->dRemoteMemberReactiveTermRow.upload(remoteMemberReactiveTermRow, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
-        ctx->dRemoteMemberReactiveTermElement.upload(remoteMemberReactiveTermElement, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
-        ctx->dRemoteMemberReactiveTermSide.upload(remoteMemberReactiveTermSide, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
-        ctx->dRemoteMemberReactiveTermKind.upload(remoteMemberReactiveTermKind, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
-        ctx->dRemoteMemberReactiveTermWeight.upload(remoteMemberReactiveTermWeight, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(double));
+        ctx->remoteVoltageControl.dRemoteMemberReactiveTermRow.upload(remoteMemberReactiveTermRow, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
+        ctx->remoteVoltageControl.dRemoteMemberReactiveTermElement.upload(remoteMemberReactiveTermElement, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
+        ctx->remoteVoltageControl.dRemoteMemberReactiveTermSide.upload(remoteMemberReactiveTermSide, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
+        ctx->remoteVoltageControl.dRemoteMemberReactiveTermKind.upload(remoteMemberReactiveTermKind, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(int));
+        ctx->remoteVoltageControl.dRemoteMemberReactiveTermWeight.upload(remoteMemberReactiveTermWeight, static_cast<size_t>(nRemoteMemberReactiveTerms) * sizeof(double));
         env->ReleaseIntArrayElements(jRemoteMemberReactiveTermRow, remoteMemberReactiveTermRow, JNI_ABORT);
         env->ReleaseIntArrayElements(jRemoteMemberReactiveTermElement, remoteMemberReactiveTermElement, JNI_ABORT);
         env->ReleaseIntArrayElements(jRemoteMemberReactiveTermSide, remoteMemberReactiveTermSide, JNI_ABORT);
         env->ReleaseIntArrayElements(jRemoteMemberReactiveTermKind, remoteMemberReactiveTermKind, JNI_ABORT);
         env->ReleaseDoubleArrayElements(jRemoteMemberReactiveTermWeight, remoteMemberReactiveTermWeight, JNI_ABORT);
-        ctx->nRemoteMemberReactiveTerms = nRemoteMemberReactiveTerms;
+        ctx->remoteVoltageControl.nRemoteMemberReactiveTerms = nRemoteMemberReactiveTerms;
     }
-    ctx->nDistrQDynamicKeys = 0;
-    ctx->hasDistrQRelocationGroups = 0;
+    ctx->remoteVoltageControl.nDistrQDynamicKeys = 0;
+    ctx->remoteVoltageControl.hasDistrQRelocationGroups = 0;
     // Keyed on the MEMBER list, not on the DISTR_Q rows: a SINGLETON remote group has members (and a
     // pilot-Q relocation group, so its pilot's control-loss flip must be armed) but no DISTR_Q row at
     // all — gating on distrQRowMember left hasDistrQRelocationGroups at 0 for it, and the base load flow on the driver
@@ -337,8 +337,8 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
         jint* distrQMemberGroupCount = env->GetIntArrayElements(jDistrQMemberGroupCount, nullptr);
         jint* distrQMemberRow = env->GetIntArrayElements(jDistrQMemberRow, nullptr);
         jbyte* distrQMemberHasRow = env->GetByteArrayElements(jDistrQMemberHasRow, nullptr);
-        ctx->dDistrQMemberRow.upload(distrQMemberRow, static_cast<size_t>(nDistrQMembers) * sizeof(int));
-        ctx->dDistrQMemberHasRow.upload(distrQMemberHasRow, static_cast<size_t>(nDistrQMembers) * sizeof(char));
+        ctx->remoteVoltageControl.dDistrQMemberRow.upload(distrQMemberRow, static_cast<size_t>(nDistrQMembers) * sizeof(int));
+        ctx->remoteVoltageControl.dDistrQMemberHasRow.upload(distrQMemberHasRow, static_cast<size_t>(nDistrQMembers) * sizeof(char));
         env->ReleaseIntArrayElements(jDistrQMemberRow, distrQMemberRow, JNI_ABORT);
         env->ReleaseByteArrayElements(jDistrQMemberHasRow, distrQMemberHasRow, JNI_ABORT);
         if (jDistrQMemberTargetQ == nullptr || env->GetArrayLength(jDistrQMemberTargetQ) != nDistrQMembers) {
@@ -347,7 +347,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
             return;
         }
         jdouble* distrQMemberTargetQ = env->GetDoubleArrayElements(jDistrQMemberTargetQ, nullptr);
-        ctx->dDistrQMemberTargetQ.upload(distrQMemberTargetQ, static_cast<size_t>(nDistrQMembers) * sizeof(double));
+        ctx->remoteVoltageControl.dDistrQMemberTargetQ.upload(distrQMemberTargetQ, static_cast<size_t>(nDistrQMembers) * sizeof(double));
         env->ReleaseDoubleArrayElements(jDistrQMemberTargetQ, distrQMemberTargetQ, JNI_ABORT);
         if (jDistrQMemberTargetPeerStart == nullptr || env->GetArrayLength(jDistrQMemberTargetPeerStart) != nDistrQMembers + 1 || jDistrQMemberTargetPeer == nullptr) {
             env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -355,23 +355,23 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
             return;
         }
         jint* distrQMemberTargetPeerStart = env->GetIntArrayElements(jDistrQMemberTargetPeerStart, nullptr);
-        ctx->dDistrQMemberTargetPeerStart.upload(distrQMemberTargetPeerStart, static_cast<size_t>(nDistrQMembers + 1) * sizeof(int));
+        ctx->remoteVoltageControl.dDistrQMemberTargetPeerStart.upload(distrQMemberTargetPeerStart, static_cast<size_t>(nDistrQMembers + 1) * sizeof(int));
         env->ReleaseIntArrayElements(jDistrQMemberTargetPeerStart, distrQMemberTargetPeerStart, JNI_ABORT);
         int nDistrQMemberTargetPeers = env->GetArrayLength(jDistrQMemberTargetPeer);
         if (nDistrQMemberTargetPeers > 0) {
             jint* distrQMemberTargetPeer = env->GetIntArrayElements(jDistrQMemberTargetPeer, nullptr);
-            ctx->dDistrQMemberTargetPeer.upload(distrQMemberTargetPeer, static_cast<size_t>(nDistrQMemberTargetPeers) * sizeof(int));
+            ctx->remoteVoltageControl.dDistrQMemberTargetPeer.upload(distrQMemberTargetPeer, static_cast<size_t>(nDistrQMemberTargetPeers) * sizeof(int));
             env->ReleaseIntArrayElements(jDistrQMemberTargetPeer, distrQMemberTargetPeer, JNI_ABORT);
         }
-        ctx->nDistrQMembers = nDistrQMembers;
+        ctx->remoteVoltageControl.nDistrQMembers = nDistrQMembers;
         if (nDistrQTermMembers > 0) {
-            ctx->dDistrQRowMember.upload(distrQRowMember, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
-            ctx->dDistrQInjectionMember.upload(distrQInjectionMember, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
+            ctx->remoteVoltageControl.dDistrQRowMember.upload(distrQRowMember, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
+            ctx->remoteVoltageControl.dDistrQInjectionMember.upload(distrQInjectionMember, static_cast<size_t>(nDistrQTermMembers) * sizeof(int));
         }
-        ctx->dDistrQMemberKey.upload(distrQMemberKey, static_cast<size_t>(nDistrQMembers) * sizeof(double));
-        ctx->dDistrQMemberReactiveLimitEntry.upload(distrQMemberReactiveLimitEntry, static_cast<size_t>(nDistrQMembers) * sizeof(int));
-        ctx->dDistrQMemberGroupStart.upload(distrQMemberGroupStart, static_cast<size_t>(nDistrQMembers) * sizeof(int));
-        ctx->dDistrQMemberGroupCount.upload(distrQMemberGroupCount, static_cast<size_t>(nDistrQMembers) * sizeof(int));
+        ctx->remoteVoltageControl.dDistrQMemberKey.upload(distrQMemberKey, static_cast<size_t>(nDistrQMembers) * sizeof(double));
+        ctx->remoteVoltageControl.dDistrQMemberReactiveLimitEntry.upload(distrQMemberReactiveLimitEntry, static_cast<size_t>(nDistrQMembers) * sizeof(int));
+        ctx->remoteVoltageControl.dDistrQMemberGroupStart.upload(distrQMemberGroupStart, static_cast<size_t>(nDistrQMembers) * sizeof(int));
+        ctx->remoteVoltageControl.dDistrQMemberGroupCount.upload(distrQMemberGroupCount, static_cast<size_t>(nDistrQMembers) * sizeof(int));
         if (nDistrQTermMembers > 0) {
             env->ReleaseIntArrayElements(jDistrQRowMember, distrQRowMember, JNI_ABORT);
             env->ReleaseIntArrayElements(jDistrQInjectionMember, distrQInjectionMember, JNI_ABORT);
@@ -380,14 +380,14 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
         env->ReleaseIntArrayElements(jDistrQMemberReactiveLimitEntry, distrQMemberReactiveLimitEntry, JNI_ABORT);
         env->ReleaseIntArrayElements(jDistrQMemberGroupStart, distrQMemberGroupStart, JNI_ABORT);
         env->ReleaseIntArrayElements(jDistrQMemberGroupCount, distrQMemberGroupCount, JNI_ABORT);
-        ctx->nDistrQDynamicKeys = nDistrQTermMembers;
-        ctx->hasDistrQRelocationGroups = 0;
+        ctx->remoteVoltageControl.nDistrQDynamicKeys = nDistrQTermMembers;
+        ctx->remoteVoltageControl.hasDistrQRelocationGroups = 0;
         if (jDistrQMemberRelocationGroup != nullptr && env->GetArrayLength(jDistrQMemberRelocationGroup) == nDistrQMembers) {
             jint* distrQMemberRelocationGroup = env->GetIntArrayElements(jDistrQMemberRelocationGroup, nullptr);
             std::vector<char> isGeneratorVoltageControl(ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->nReactiveRelocationGroups : 1, 0);
             for (int i = 0; i < nDistrQMembers; i++) {
                 if (distrQMemberRelocationGroup[i] >= 0) {
-                    ctx->hasDistrQRelocationGroups = 1;                  // plan-B4: relocation-linked group present
+                    ctx->remoteVoltageControl.hasDistrQRelocationGroups = 1;                  // plan-B4: relocation-linked group present
                     isGeneratorVoltageControl[distrQMemberRelocationGroup[i]] = 1;   // this relocation group is a remote generator voltage control
                 }
             }
@@ -396,9 +396,9 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
                     isGeneratorVoltageControl[g] = isGeneratorVoltageControl[ctx->structure->hReactiveRelocationDependentBaseGroup[g]];
                 }
             }
-            ctx->dDistrQMemberRelocationGroup.upload(distrQMemberRelocationGroup, static_cast<size_t>(nDistrQMembers) * sizeof(int));
-            if (ctx->hasDistrQRelocationGroups) {
-                ctx->dReactiveRelocationIsGeneratorVoltageControl.upload(isGeneratorVoltageControl.data(), isGeneratorVoltageControl.size() * sizeof(char));
+            ctx->remoteVoltageControl.dDistrQMemberRelocationGroup.upload(distrQMemberRelocationGroup, static_cast<size_t>(nDistrQMembers) * sizeof(int));
+            if (ctx->remoteVoltageControl.hasDistrQRelocationGroups) {
+                ctx->remoteVoltageControl.dReactiveRelocationIsGeneratorVoltageControl.upload(isGeneratorVoltageControl.data(), isGeneratorVoltageControl.size() * sizeof(char));
             }
             env->ReleaseIntArrayElements(jDistrQMemberRelocationGroup, distrQMemberRelocationGroup, JNI_ABORT);
         }
@@ -430,10 +430,10 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
     exportReactiveLimitTargetQ<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, n, ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
             ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr, ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(),
-            ctx->hasDistrQRelocationGroups ? ctx->structure->nReactiveRelocationGroups : 0, pilotSelfReactiveLimitEntryOrNull(ctx),
-            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
-            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
-            ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
+            ctx->remoteVoltageControl.hasDistrQRelocationGroups ? ctx->structure->nReactiveRelocationGroups : 0, pilotSelfReactiveLimitEntryOrNull(ctx),
+            ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
+            ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
+            ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
             ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr, out.as<double>());
     std::vector<double> host;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

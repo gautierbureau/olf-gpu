@@ -78,12 +78,11 @@ __global__ void factorBlocks(int nItems, int width, int capacity, const int* __r
                              const int* __restrict__ rowStart, const int* __restrict__ upperBase,
                              double* __restrict__ lu, unsigned char* __restrict__ rowPermutation,
                              unsigned char* __restrict__ columnPermutation, int* __restrict__ pivotClamps) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, nullptr, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -354,12 +353,11 @@ __global__ void applyPanels(int nItems, int width, int capacity, const int* __re
                             const int* __restrict__ lowerBase, const int* __restrict__ upperBase,
                             const unsigned char* __restrict__ rowPermutation,
                             const unsigned char* __restrict__ columnPermutation, double* __restrict__ lu) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, nullptr, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int s = panelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -409,12 +407,11 @@ __global__ void forwardLevel(int nItems, int width, int capacity, const int* __r
                              const int* __restrict__ forwardRunLower, const int* __restrict__ forwardRunY,
                              const int* __restrict__ forwardRunLength, const unsigned char* __restrict__ rowPermutation,
                              const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -608,12 +605,11 @@ __global__ void backwardLevel(int nItems, int width, int capacity, const int* __
                               const int* __restrict__ diagonalBase, const int* __restrict__ upperBase,
                               const unsigned char* __restrict__ columnPermutation, const double* __restrict__ lu,
                               double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;

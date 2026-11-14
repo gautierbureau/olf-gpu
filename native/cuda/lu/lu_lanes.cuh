@@ -33,6 +33,17 @@ __device__ __forceinline__ int laneOf(int k, const int* __restrict__ selected) {
     return selected == nullptr ? k : selected[k];
 }
 
+// One thread per (item, lane): the item t and the lane a of this thread, false past the last one.
+__device__ __forceinline__ bool itemLane(int nItems, int width, const int* __restrict__ selected, int& t, int& a) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nItems) * width) {
+        return false;
+    }
+    t = static_cast<int>(g / width);
+    a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
+    return true;
+}
+
 // dst[map[k] * capacity + a] = src[laneMap[a] * stride + k]: scenario-major rows to the lane-interleaved layout,
 // through a shared tile so both sides stay contiguous (k along the source, lanes along the destination). The lanes:
 // 0 .. width, or the width selected ones.

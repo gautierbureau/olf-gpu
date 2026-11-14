@@ -120,12 +120,11 @@ __global__ void forwardLevel(int nRows, int width, int capacity, const int* __re
                              const int* __restrict__ rows, const int* __restrict__ luRowPtr,
                              const int* __restrict__ luCol, const int* __restrict__ luDiag,
                              const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nRows) * width) {
+    int t;
+    int a;
+    if (!itemLane(nRows, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double y = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luDiag[i];
@@ -140,12 +139,11 @@ __global__ void backwardLevel(int nRows, int width, int capacity, const int* __r
                               const int* __restrict__ rows, const int* __restrict__ luRowPtr,
                               const int* __restrict__ luCol, const int* __restrict__ luDiag,
                               const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nRows) * width) {
+    int t;
+    int a;
+    if (!itemLane(nRows, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double x = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luRowPtr[i + 1];

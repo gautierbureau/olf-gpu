@@ -107,7 +107,7 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchContinuousPhase)(
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nPhaseControlControllerBranches = 0;
+    ctx->phaseControl.nPhaseControlControllerBranches = 0;
     if (jKind == nullptr || env->GetArrayLength(jKind) == 0) {
         return 0;
     }
@@ -125,30 +125,30 @@ OLF_JNI(ac_outerloop_gpu, PhaseControlNative, setBatchContinuousPhase)(
     readI(jA1Row, a1Row);
     readI(jSide, side);
     readD(jCurrentLimit, limit);
-    readI(jElem, ctx->hPhaseControlElement);
-    readI(jTapStart, ctx->hPhaseControlTapStart);
-    readD(jTapRows, ctx->hPhaseControlTapRows);
-    readI(jBaseTap, ctx->hPhaseControlBaseTap);
+    readI(jElem, ctx->phaseControl.hPhaseControlElement);
+    readI(jTapStart, ctx->phaseControl.hPhaseControlTapStart);
+    readD(jTapRows, ctx->phaseControl.hPhaseControlTapRows);
+    readI(jBaseTap, ctx->phaseControl.hPhaseControlBaseTap);
     int nc = static_cast<int>(kind.size());
     for (int c = 0; c < nc; c++) {
-        int e = ctx->hPhaseControlElement[c] - ctx->closedBranchOffset;
+        int e = ctx->phaseControl.hPhaseControlElement[c] - ctx->closedBranchOffset;
         if (e < 0 || e >= ctx->structure->closedBranch.elementCount) {
             return 0;                                        // not a closed branch: the host orchestrator keeps it
         }
     }
-    ctx->dPhaseControlMode.upload(kind.data(), nc * sizeof(int));
-    ctx->dPhaseControlA1Row.upload(a1Row.data(), nc * sizeof(int));
-    ctx->dPhaseControlControlledSide.upload(side.data(), nc * sizeof(int));
-    ctx->dPhaseControlCurrentLimit.upload(limit.data(), nc * sizeof(double));
-    ctx->dPhaseControlElement.upload(ctx->hPhaseControlElement.data(), nc * sizeof(int));
-    ctx->dPhaseControlTapStart.upload(ctx->hPhaseControlTapStart.data(), ctx->hPhaseControlTapStart.size() * sizeof(int));
-    ctx->dPhaseControlTapRows.upload(ctx->hPhaseControlTapRows.data(), ctx->hPhaseControlTapRows.size() * sizeof(double));
-    ctx->dPhaseControlBaseTap.upload(ctx->hPhaseControlBaseTap.data(), nc * sizeof(int));
+    ctx->phaseControl.dPhaseControlMode.upload(kind.data(), nc * sizeof(int));
+    ctx->phaseControl.dPhaseControlA1Row.upload(a1Row.data(), nc * sizeof(int));
+    ctx->phaseControl.dPhaseControlControlledSide.upload(side.data(), nc * sizeof(int));
+    ctx->phaseControl.dPhaseControlCurrentLimit.upload(limit.data(), nc * sizeof(double));
+    ctx->phaseControl.dPhaseControlElement.upload(ctx->phaseControl.hPhaseControlElement.data(), nc * sizeof(int));
+    ctx->phaseControl.dPhaseControlTapStart.upload(ctx->phaseControl.hPhaseControlTapStart.data(), ctx->phaseControl.hPhaseControlTapStart.size() * sizeof(int));
+    ctx->phaseControl.dPhaseControlTapRows.upload(ctx->phaseControl.hPhaseControlTapRows.data(), ctx->phaseControl.hPhaseControlTapRows.size() * sizeof(double));
+    ctx->phaseControl.dPhaseControlBaseTap.upload(ctx->phaseControl.hPhaseControlBaseTap.data(), nc * sizeof(int));
     size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
-    ctx->dPhaseControlTap.ensure(nst * sizeof(int));
-    ctx->dPhaseControlAppliedTap.ensure(nst * sizeof(int));
-    ctx->dPhaseControlCheckCount.ensure(static_cast<size_t>(ctx->nScenarios) * sizeof(int));
-    ctx->nPhaseControlControllerBranches = nc;
+    ctx->phaseControl.dPhaseControlTap.ensure(nst * sizeof(int));
+    ctx->phaseControl.dPhaseControlAppliedTap.ensure(nst * sizeof(int));
+    ctx->phaseControl.dPhaseControlCheckCount.ensure(static_cast<size_t>(ctx->nScenarios) * sizeof(int));
+    ctx->phaseControl.nPhaseControlControllerBranches = nc;
     return 1;
 }
 
@@ -156,11 +156,11 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, PhaseControlNative, readBatchContinuousPhaseTaps)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nPhaseControlControllerBranches <= 0 || !ctx->dPhaseControlTap.p) {
+    if (ctx == nullptr || ctx->phaseControl.nPhaseControlControllerBranches <= 0 || !ctx->phaseControl.dPhaseControlTap.p) {
         return nullptr;
     }
     std::vector<int> host;
-    readInstalledRows(ctx, ctx->dPhaseControlTap.p, static_cast<size_t>(ctx->nPhaseControlControllerBranches), host);
+    readInstalledRows(ctx, ctx->phaseControl.dPhaseControlTap.p, static_cast<size_t>(ctx->phaseControl.nPhaseControlControllerBranches), host);
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

@@ -89,31 +89,31 @@ __global__ void phaseControlCountCheckBatch(int nScenarios, const char* outerLoo
 
 // Per-solve reset. Continuous phase control: base taps, check count 0.
 void phaseControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
-    const size_t nc = static_cast<size_t>(ctx->nPhaseControlControllerBranches);
-    resetInstalledRows(ctx, ctx->dPhaseControlTap.as<int>(), nc, ctx->hPhaseControlBaseTap.data());
-    resetInstalledRows(ctx, ctx->dPhaseControlAppliedTap.as<int>(), nc, ctx->hPhaseControlBaseTap.data());
-    resetInstalledRows(ctx, ctx->dPhaseControlCheckCount.as<int>(), 1, nullptr, 0);
+    const size_t nc = static_cast<size_t>(ctx->phaseControl.nPhaseControlControllerBranches);
+    resetInstalledRows(ctx, ctx->phaseControl.dPhaseControlTap.as<int>(), nc, ctx->phaseControl.hPhaseControlBaseTap.data());
+    resetInstalledRows(ctx, ctx->phaseControl.dPhaseControlAppliedTap.as<int>(), nc, ctx->phaseControl.hPhaseControlBaseTap.data());
+    resetInstalledRows(ctx, ctx->phaseControl.dPhaseControlCheckCount.as<int>(), 1, nullptr, 0);
 }
 
 void phaseControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    int nC = ctx->nPhaseControlControllerBranches;
+    int nC = ctx->phaseControl.nPhaseControlControllerBranches;
     if (nC <= 0) return;
     size_t nst = static_cast<size_t>(nS) * nC;
     phaseControlCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->closedBranchOffset,
-            ctx->dPhaseControlMode.as<int>(), ctx->dPhaseControlA1Row.as<int>(), ctx->dPhaseControlControlledSide.as<int>(), ctx->dPhaseControlCurrentLimit.as<double>(), ctx->dPhaseControlElement.as<int>(),
-            ctx->dPhaseControlTapStart.as<int>(), ctx->dPhaseControlTapRows.as<double>(),
+            ctx->phaseControl.dPhaseControlMode.as<int>(), ctx->phaseControl.dPhaseControlA1Row.as<int>(), ctx->phaseControl.dPhaseControlControlledSide.as<int>(), ctx->phaseControl.dPhaseControlCurrentLimit.as<double>(), ctx->phaseControl.dPhaseControlElement.as<int>(),
+            ctx->phaseControl.dPhaseControlTapStart.as<int>(), ctx->phaseControl.dPhaseControlTapRows.as<double>(),
             ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), closedBranchParameterOverrides(ctx),
-            ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dPhaseControlCheckCount.as<int>(),
-            ctx->dPhaseControlTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
-    phaseControlCountCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dOuterLoopCheckActive.as<char>(), ctx->dPhaseControlCheckCount.as<int>());
+            ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->phaseControl.dPhaseControlCheckCount.as<int>(),
+            ctx->phaseControl.dPhaseControlTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
+    phaseControlCountCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dOuterLoopCheckActive.as<char>(), ctx->phaseControl.dPhaseControlCheckCount.as<int>());
     publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
         std::vector<int> cur(nst);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dPhaseControlTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->phaseControl.dPhaseControlTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nMoved = 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hPhaseControlBaseTap[c]) nMoved++;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->phaseControl.hPhaseControlBaseTap[c]) nMoved++;
         std::fprintf(stderr, "CPHASE_KERNEL nS=%d nControllers=%d pairsOffBaseTap=%d\n", nS, nC, nMoved);
     }
 }

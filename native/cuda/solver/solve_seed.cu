@@ -251,7 +251,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0) {
         incrementalTransformerVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nPhaseControlControllerBranches > 0) {
+    if (ctx->phaseControl.nPhaseControlControllerBranches > 0) {
         phaseControlResetSolve(ctx, drv);
     }
     if (ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0) {

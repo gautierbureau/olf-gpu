@@ -38,11 +38,11 @@ void elementControllers(int nElements, const std::vector<int>& controllerElement
 // continuous phase, incremental flow, discrete TVC members. Built when the loops' sizes change (they are installed
 // before the first solve).
 void ensureTapControllers(BatchSolverContext* ctx) {
-    std::vector<int> counts = {ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches, ctx->nPhaseControlControllerBranches,
+    std::vector<int> counts = {ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches, ctx->phaseControl.nPhaseControlControllerBranches,
                                ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches, ctx->transformerVoltageControl.nTransformerVoltageControlMembers};
     if (counts == ctx->hClosedBranchParameterOverrideControllerCounts) return;
     ctx->hClosedBranchParameterOverrideControllerCounts = counts;
-    const std::vector<int>* elements[4] = {&ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement, &ctx->hPhaseControlElement,
+    const std::vector<int>* elements[4] = {&ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement, &ctx->phaseControl.hPhaseControlElement,
                                            &ctx->incrementalFlowControl.hIncrementalFlowControlElement, &ctx->transformerVoltageControl.hTransformerVoltageControlMemberElement};
     std::vector<int> controllerElement;
     for (int l = 0; l < 4; l++) {
@@ -163,8 +163,8 @@ void publishClosedBranchParameterOverrides(BatchSolverContext* ctx) {
     const Loop loops[4] = {
         {ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches, &ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap, nullptr,
          &ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlBaseTap, &ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapStart, &ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapRows},
-        {ctx->nPhaseControlControllerBranches, &ctx->dPhaseControlTap, nullptr,
-         &ctx->dPhaseControlBaseTap, &ctx->dPhaseControlTapStart, &ctx->dPhaseControlTapRows},
+        {ctx->phaseControl.nPhaseControlControllerBranches, &ctx->phaseControl.dPhaseControlTap, nullptr,
+         &ctx->phaseControl.dPhaseControlBaseTap, &ctx->phaseControl.dPhaseControlTapStart, &ctx->phaseControl.dPhaseControlTapRows},
         {ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches, &ctx->incrementalFlowControl.dIncrementalFlowControlCurrentTap, nullptr,
          &ctx->incrementalFlowControl.dIncrementalFlowControlBaseTap, &ctx->incrementalFlowControl.dIncrementalFlowControlTapStart, &ctx->incrementalFlowControl.dIncrementalFlowControlTapRows},
         {ctx->transformerVoltageControl.nTransformerVoltageControlMembers, &ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap, &ctx->transformerVoltageControl.dTransformerVoltageControlMemberState,

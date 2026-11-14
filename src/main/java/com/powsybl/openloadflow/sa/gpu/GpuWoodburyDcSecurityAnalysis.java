@@ -691,6 +691,14 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         return loadedOpen;
     }
 
+    /** Whether the contingency takes this branch out: one of its branches, or a branch of a bus it disconnects. */
+    private static boolean disabledByContingency(LfBranch branch, ConnectivityBreakAnalysis.ConnectivityAnalysisResult postContingency) {
+        Set<LfBus> lost = postContingency.getDisabledBuses();
+        return postContingency.getPropagatedContingency().getBranchIdsToOpen().containsKey(branch.getId())
+                || postContingency.getPartialDisabledBranches().contains(branch)
+                || lost.contains(branch.getBus1()) || lost.contains(branch.getBus2());
+    }
+
     /** The search budget of {@link #provablyConnected}, in buses visited per removed edge: beyond, OLF's graph check decides. */
     private static final int CONNECTED_SEARCH_LIMIT = 4096;
 
@@ -821,7 +829,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             } else {
                 graphChecks[0]++;
                 Optional<ConnectivityBreakAnalysis.ConnectivityAnalysisResult> breaking = ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(
-                        lfNetwork, postContingency.getPropagatedContingency(), elementByBranch, los, strategySetup.actionElementsByLfAction(), false);
+                        lfNetwork, postContingency.getPropagatedContingency(), elementByBranch, los, strategySetup.actionElementsByLfAction(), false, true);
                 connectivity = breaking.orElseGet(() -> ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(
                         postContingency.getPropagatedContingency(), los, lfNetwork));
                 // its LfContingency only serves the lost loads and generators of the target column, which
@@ -848,9 +856,12 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 List<ComputedElement> actionElements = strategySetup.actionElementsByLfAction().get(action);
                 if (actionElements != null) {
                     for (ComputedElement element : actionElements) {
-                        // opening a branch already out of the base case (inside a dead part: a bay with every breaker
-                        // retained) changes nothing: no element (its dead bus has no angle row to read)
-                        boolean noOp = element instanceof ComputedSwitchBranchElement sw && !sw.isEnabled() && sw.getLfBranch().isDisabled();
+                        // opening a branch already out changes nothing: no element. Out of the base case (inside a dead
+                        // part: a bay with every breaker retained; its dead bus has no angle row to read), or taken out by
+                        // the contingency (its own branch, or a branch of the part it disconnects: the Woodbury update of
+                        // a branch already removed is singular)
+                        boolean noOp = element instanceof ComputedSwitchBranchElement sw && !sw.isEnabled()
+                                && (sw.getLfBranch().isDisabled() || disabledByContingency(sw.getLfBranch(), postContingency));
                         if (!noOp && !toReconnect.contains(element.getLfBranch().getId())) {
                             elements.add(element);
                         }
@@ -1359,7 +1370,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         for (PropagatedContingency contingency : potentiallyBreaking) {
             // the security analysis never reads the slack's connected component: not materialized (a copy of every bus of
             // the main component per breaking contingency, most of this loop's time on network.xiidm)
-            ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, contingency, elementByBranch, null, Collections.emptyMap(), false)
+            // as the stock fast DC (and the AC) security analysis: a contingency stranding the slack bus loses the slack bus's component
+            ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, contingency, elementByBranch, null, Collections.emptyMap(), false, true)
                     .ifPresentOrElse(breaking::add,
                         () -> nonBreaking.add(ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(contingency, null, lfNetwork)));
         }

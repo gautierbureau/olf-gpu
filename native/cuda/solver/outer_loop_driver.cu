@@ -315,7 +315,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     nLoops = 0;
     // OLF drops the DistributedSlack loop from a run with AreaInterchangeControl, which runs after the HVDC loops instead
     bool distributionInLoopOrder = ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution);
-    if (distributionInLoopOrder && !ctx->areaInterchangeControlOuterLoop) {
+    if (distributionInLoopOrder && !ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::DISTRIBUTED_SLACK;
     }
     if (ctx->nHvdcAcEmulation > 0) {
@@ -324,7 +324,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             loopOrder[nLoops++] = GpuOuterLoopKind::HVDC_AC_EMULATION_LIMITS;  // OLF: AcHvdcAcEmulationLimits
         }
     }
-    if (distributionInLoopOrder && ctx->areaInterchangeControlOuterLoop) {
+    if (distributionInLoopOrder && ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;  // OLF order 3: AreaInterchangeControl
     }
     if (ctx->nSecondaryVoltageControlControllerBuses > 0) {

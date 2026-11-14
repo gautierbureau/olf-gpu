@@ -242,7 +242,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
         distributedSlackResetSolve(ctx, drv);
     }
-    if (ctx->areaInterchangeControlOuterLoop) {
+    if (ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         areaInterchangeControlResetSolve(ctx, drv);
     }
     if (ctx->nMonitoringVoltageControllers > 0) {

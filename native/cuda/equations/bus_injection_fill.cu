@@ -159,7 +159,8 @@ __global__ void fillShuntBatchF(int elementCount, int nScenarios, int n, int nnz
     withShuntInputs(e, s, n, in, ix, x, shuntAdmittanceOverrides, [&](double g, double b, double v) {
         updateShuntWithoutDerivatives(v, g, b, 0, o + 0, o + 1);
     });
-    const int pos[2] = {0, 2};
+    constexpr ResidualPositions<2> RESIDUALS = residualPositions<2>(SHUNT_SCATTER);
+    const int pos[2] = {RESIDUALS.at[0], RESIDUALS.at[1]};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * SHUNT_OUTPUT_COUNT, alternateDestination + e * SHUNT_OUTPUT_COUNT, selectorRow + e * SHUNT_OUTPUT_COUNT,
                        pos, mode + (size_t) s * n, o, scenarioEntries(F, s, n, layout), relocationTablesForScenario(rt, s), e * SHUNT_OUTPUT_COUNT);
@@ -179,7 +180,8 @@ __global__ void fillHvdcBatchF(int elementCount, int nScenarios, int n, int nnz,
     withHvdcInputs(e, s, n, in, ix, x, [&](const double* p, double ph1, double ph2) {
         updateHvdcAcEmulationWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
     });
-    const int pos[2] = {0, 3};
+    constexpr ResidualPositions<2> RESIDUALS = residualPositions<2>(HVDC_AC_EMULATION_SCATTER);
+    const int pos[2] = {RESIDUALS.at[0], RESIDUALS.at[1]};
     if (dynamicRelocation) {
         scatterAddFRelocated(2, dest + e * HVDC_AC_EMULATION_OUTPUT_COUNT, alternateDestination + e * HVDC_AC_EMULATION_OUTPUT_COUNT, selectorRow + e * HVDC_AC_EMULATION_OUTPUT_COUNT,
                        pos, mode + (size_t) s * n, o, scenarioEntries(F, s, n, layout), ReactiveRelocationTables{}, e * HVDC_AC_EMULATION_OUTPUT_COUNT);

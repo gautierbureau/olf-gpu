@@ -242,6 +242,10 @@ struct BatchSolverContext {
     DeviceBuf dAutomationSystemSwitched;                                            // per (scenario, tripping): a check's decisions
     std::vector<int> outerLoopFirstSolveIterations, outerLoopIterations, outerLoopSolvePasses, outerLoopChecks;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
                                                              // solve pass
+    // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
+    // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
+    // activation writes. dMonitoringVoltageActivatedTargetV holds the chosen target per (controller, scenario), NaN until
+    // it fires — OLF never re-checks a controller it has already switched.
     int nMonitoringVoltageControllers = 0;
     DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;
     IncrementalTransformerVoltageControlContext incrementalTransformerVoltageControl;

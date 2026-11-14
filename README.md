@@ -18,6 +18,11 @@ GPU extension for [powsybl-open-loadflow](https://github.com/powsybl/powsybl-ope
   contingencies as one GPU batch (`GpuBatchedAcSecurityAnalysis`), degrading to the
   standard AC path when no GPU is present. Best measured: pegase9241, 500 contingencies,
   K=4 — ~4.8 ms/scenario warm on an RTX A1000 (cuDSS 0.8.0, uniform batch).
+- **`OpenLoadFlowGpu`** (sensitivity analysis) — a `SensitivityAnalysisProvider` extending OLF's: OLF's
+  sensitivity analysis with its AC load flows (the base case and every contingency) on the GPU Newton-Raphson,
+  the sensitivities computed by OLF on the Jacobian at the state they reach. OLF's parameters apply on a copy,
+  single-threaded; its load flow provider is `OpenLoadFlowGpu`, so provider parameters by name set the GPU solver's
+  and OLF's. DC runs as in OLF.
 
 **Stock OLF is never modified.** The fused CUDA kernels in `native/cuda/equations/generated/` are PARSED and
 transpiled from OLF's own hand-written equation Java by `codegen/java2cuda` (no symbolic

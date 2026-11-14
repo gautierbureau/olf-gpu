@@ -52,6 +52,8 @@ struct SupernodalLuPlan {
     std::vector<int> levelPanelStart, panelSupernode, panelRow;   // panelRow < |R|: U column; >= |R|: L row - |R|
     // forward solve: per row of B, the L runs of the descendants holding it (L start, y start, length)
     std::vector<int> forwardRunStart, forwardRunLower, forwardRunY, forwardRunLength;
+    // transposed solve, up pass (transposed_solve.cuh): per forward run, the U panel column i of the same supernode
+    std::vector<int> forwardRunUpper;
 
     long long gatherMultiplyAdds() const;
     int supernodeSize(int s) const { return supernodeStart[s + 1] - supernodeStart[s]; }

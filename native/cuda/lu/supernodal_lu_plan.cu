@@ -380,6 +380,7 @@ SupernodalLuPlan buildSupernodalLuPlan(int n, const int* rowPtr, const int* colI
         plan.forwardRunStart[i + 1] += plan.forwardRunStart[i];
     }
     plan.forwardRunLower.resize(plan.forwardRunStart[n]);
+    plan.forwardRunUpper.resize(plan.forwardRunStart[n]);
     plan.forwardRunY.resize(plan.forwardRunStart[n]);
     plan.forwardRunLength.resize(plan.forwardRunStart[n]);
     {
@@ -389,6 +390,7 @@ SupernodalLuPlan buildSupernodalLuPlan(int n, const int* rowPtr, const int* colI
             for (int a = plan.rowStart[t]; a < plan.rowStart[t + 1]; a++) {
                 const int run = cursor[plan.rows[a]]++;
                 plan.forwardRunLower[run] = plan.lowerBase[t] + (a - plan.rowStart[t]) * b;
+                plan.forwardRunUpper[run] = plan.upperBase[t] + (a - plan.rowStart[t]) * b;
                 plan.forwardRunY[run] = plan.supernodeStart[t];
                 plan.forwardRunLength[run] = b;
             }

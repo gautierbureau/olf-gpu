@@ -56,6 +56,8 @@ final class GpuStateInjector {
         private List<Variable<AcVariableType>> vars;         // identity of the list the permutation was built from
         private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base
         private boolean identity;                            // no variable was removed: row == base row throughout
+        private boolean missing;                             // a current variable has no base row (the device has no value)
+        private int[] currentRowOfBase;                      // base row -> current row, -1 = gone (built on demand)
         private double[] buf;                                // the state array handed to the equation system
         /** base row per (elementNum, variable type), -1 = absent — the run-constant base snapshot in
          *  dense form. Applying a contingency invalidates the equation system's variable index about
@@ -118,6 +120,58 @@ final class GpuStateInjector {
     static void injectState(EquationSystem<AcVariableType, AcEquationType> es,
                             Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState,
                             Remap remap, int[] closedBranchNums) {
+        // VALUES ONLY: the injected state feeds result building (flows, currents, voltages) and never a
+        // Jacobian — the next solve on this equation system starts with its own full state set. That
+        // skips refreshing every branch's partial derivatives, which measured 993 ms of the 1119 ms
+        // this notification cost over 2000 contingencies.
+        setValues(es, remapState(es, baseVariableRows, deviceState, remap), closedBranchNums);
+    }
+
+    /**
+     * Injects a device state (BASE row layout) as a FULL state: every listener refreshes what it derives from the state,
+     * the branches' partial derivatives included, for a caller that reads the Jacobian at this state next (the batched
+     * sensitivity analysis). The equation system gets its own copy of the remapped values. False, with nothing set, when a
+     * current variable has no base row: the device has no value for it, and the zero {@link #injectState} reads there
+     * would be a wrong state, not a missing result.
+     */
+    static boolean injectFullState(EquationSystem<AcVariableType, AcEquationType> es,
+                                   Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState, Remap remap) {
+        double[] values = remapState(es, baseVariableRows, deviceState, remap);
+        if (remap.missing) {
+            return false;
+        }
+        es.getStateVector().set(values.clone());
+        return true;
+    }
+
+    /** True when every current variable of the equation system has a row in the base snapshot, so a device state can be
+     *  injected whole ({@link #injectFullState}): checked before a caller changes anything else for that injection. */
+    static boolean coversCurrentVariables(EquationSystem<AcVariableType, AcEquationType> es,
+                                          Map<Variable<AcVariableType>, Integer> baseVariableRows, Remap remap) {
+        rebuildIfStale(es, baseVariableRows, remap);
+        return !remap.missing;
+    }
+
+    /** The device state remapped to the current variable rows, in {@code remap}'s buffer (a variable the base lacks reads
+     *  0 and sets {@code remap.missing}). */
+    private static double[] remapState(EquationSystem<AcVariableType, AcEquationType> es,
+                                       Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState, Remap remap) {
+        rebuildIfStale(es, baseVariableRows, remap);
+        if (remap.identity) {                                // the common case: the outage islanded nothing,
+            System.arraycopy(deviceState, 0, remap.buf, 0, remap.buf.length);   // so the rows still line up
+            return remap.buf;
+        }
+        int[] baseRowOf = remap.baseRowOf;
+        double[] mapped = remap.buf;
+        for (int row = 0; row < baseRowOf.length; row++) {
+            int baseRow = baseRowOf[row];
+            mapped[row] = baseRow >= 0 ? deviceState[baseRow] : 0;
+        }
+        return mapped;
+    }
+
+    private static void rebuildIfStale(EquationSystem<AcVariableType, AcEquationType> es,
+                                       Map<Variable<AcVariableType>, Integer> baseVariableRows, Remap remap) {
         // VARIABLES-ONLY index update: the injected state is read back through variable rows (flows, voltages) and
         // never solved, so rebuilding the equations-to-solve list here is wasted - the contingency's apply and the
         // restore invalidate it every time, and on network.xiidm that rebuild was ~2.3 s of the 8.3 s this call
@@ -155,27 +209,40 @@ final class GpuStateInjector {
                     identity = rows[row] == row;
                 }
             }
+            boolean missing = false;
+            for (int row = 0; row < rows.length && !missing; row++) {
+                missing = rows[row] < 0;
+            }
             remap.baseRowOf = rows;
             remap.identity = identity;
+            remap.missing = missing;
             remap.buf = new double[vars.size()];
             remap.vars = vars;
+            remap.currentRowOfBase = null;
         }
-        if (remap.identity) {                                // the common case: the outage islanded nothing,
-            System.arraycopy(deviceState, 0, remap.buf, 0, remap.buf.length);   // so the rows still line up
-            setValues(es, remap.buf, closedBranchNums);
-            return;
+    }
+
+    /** The current variable row of each of {@code baseRows} (base variable rows), -1 for a variable the current system no
+     *  longer finds: where a value solved in the base layout goes in the current one. */
+    static int[] currentRows(EquationSystem<AcVariableType, AcEquationType> es,
+                             Map<Variable<AcVariableType>, Integer> baseVariableRows, Remap remap, int[] baseRows) {
+        rebuildIfStale(es, baseVariableRows, remap);
+        if (remap.currentRowOfBase == null) {
+            int[] inverse = new int[baseVariableRows.size()];
+            java.util.Arrays.fill(inverse, -1);
+            for (int row = 0; row < remap.baseRowOf.length; row++) {
+                int baseRow = remap.baseRowOf[row];
+                if (baseRow >= 0 && baseRow < inverse.length) {
+                    inverse[baseRow] = row;
+                }
+            }
+            remap.currentRowOfBase = inverse;
         }
-        int[] baseRowOf = remap.baseRowOf;
-        double[] mapped = remap.buf;
-        for (int row = 0; row < baseRowOf.length; row++) {
-            int baseRow = baseRowOf[row];
-            mapped[row] = baseRow >= 0 ? deviceState[baseRow] : 0;
+        int[] current = new int[baseRows.length];
+        for (int i = 0; i < baseRows.length; i++) {
+            current[i] = baseRows[i] >= 0 && baseRows[i] < remap.currentRowOfBase.length ? remap.currentRowOfBase[baseRows[i]] : -1;
         }
-        // VALUES ONLY: the injected state feeds result building (flows, currents, voltages) and never a
-        // Jacobian — the next solve on this equation system starts with its own full state set. That
-        // skips refreshing every branch's partial derivatives, which measured 993 ms of the 1119 ms
-        // this notification cost over 2000 contingencies.
-        setValues(es, mapped, closedBranchNums);
+        return current;
     }
 
     private static void setValues(EquationSystem<AcVariableType, AcEquationType> es, double[] values, int[] closedBranchNums) {

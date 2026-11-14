@@ -118,6 +118,7 @@ add_library(olfgpu SHARED
     native/cuda/jni/reactive_limits_jni.cu
     native/cuda/jni/remote_voltage_control_jni.cu
     native/cuda/jni/secondary_voltage_control_jni.cu
+    native/cuda/jni/sensitivity_basis_jni.cu
     native/cuda/jni/shunt_voltage_control_jni.cu
     native/cuda/jni/structure_jni.cu
     native/cuda/jni/transformer_voltage_control_jni.cu
@@ -183,6 +184,7 @@ add_library(olfgpu SHARED
     native/cuda/outerloop/remote_voltage_control.cu
     native/cuda/outerloop/secondary_voltage_control.cu
     native/cuda/outerloop/sensitivity.cu
+    native/cuda/outerloop/sensitivity_basis.cu
     native/cuda/outerloop/shunt_voltage_control.cu
     native/cuda/outerloop/transformer_voltage_control.cu
     native/cuda/outerloop/voltage_monitoring.cu

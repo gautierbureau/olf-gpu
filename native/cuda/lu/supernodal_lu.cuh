@@ -47,6 +47,10 @@ struct SupernodalLu {
     DeviceBuf dLaneMap;                                      // capacity: the last factorization's lane -> scenario
     DeviceBuf dPivotClamps;                                  // capacity: clamped pivots of each lane's factors
     std::vector<int> hLaneMap;
+    // the transposed solve's (transposed_solve.cuh), built by its first one: per forward run, the U panel column of the
+    // same supernode and position as its L panel row
+    bool transposedReady = false;
+    DeviceBuf dForwardRunUpper;
 };
 
 // Upload the plan and size the factors for capacity lanes.
@@ -65,6 +69,12 @@ void solveSupernodalLanes(SupernodalLu& lu, const double* b, double* x, cudaStre
 // in its lane map): each of them takes the operations solveSupernodalLanes gives it; every other scenario keeps its x.
 void solveSupernodalSelectedLanes(SupernodalLu& lu, const int* selected, int count, const double* b, double* x,
                                   cudaStream_t stream);
+
+// The transposed solve of the last factorization's lanes: x[s * n ..] = A_s^-T b[s * n ..] for every s of its lane map,
+// on the same factors (transposed_solve.cuh). Scenarios outside the lane map keep their x. plan: the one lu was created
+// from; the first transposed solve uploads its U panel runs from it.
+void solveSupernodalLanesTransposed(SupernodalLu& lu, const SupernodalLuPlan& plan, const double* b, double* x,
+                                    cudaStream_t stream);
 
 // The last factorization's clamp counts, per lane of its lane map (synchronizes the stream).
 std::vector<int> readSupernodalClamps(SupernodalLu& lu, cudaStream_t stream);

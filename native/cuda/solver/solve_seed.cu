@@ -266,7 +266,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->nIncrementalFlowControlControllerBranches > 0) {
         incrementalFlowControlResetSolve(ctx, drv);
     }
-    if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
+    if (ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0) {
         incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
     if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->distributedSlack.slackOnlyDistribution) {

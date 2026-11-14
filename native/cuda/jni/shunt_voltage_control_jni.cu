@@ -20,7 +20,7 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchIncrementalShuntVol
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nIncrementalShuntVoltageControlControllerShunts = 0;
+    ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts = 0;
     if (jShuntBRow == nullptr || env->GetArrayLength(jShuntBRow) == 0) {
         return 0;
     }
@@ -34,53 +34,53 @@ OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, setBatchIncrementalShuntVol
     };
     std::vector<int> vRow, controllerElement, groupControllerStart, groupController, shuntCompensatorMinPosition;
     std::vector<double> targetV, halfTargetDeadband;
-    readI(jShuntBRow, ctx->hIncrementalShuntVoltageControlShuntBRow);
+    readI(jShuntBRow, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntBRow);
     readI(jVRow, vRow);
     readD(jTargetV, targetV);
     readD(jHalfTargetDeadband, halfTargetDeadband);
     readI(jControllerElement, controllerElement);
-    readI(jShuntAdmittanceOverrideElement, ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement);
+    readI(jShuntAdmittanceOverrideElement, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement);
     readI(jGroupControllerStart, groupControllerStart);
     readI(jGroupController, groupController);
-    readI(jShuntCompensatorStart, ctx->hIncrementalShuntVoltageControlShuntCompensatorStart);
-    readI(jSectionStart, ctx->hIncrementalShuntVoltageControlSectionStart);
-    readD(jSectionB, ctx->hIncrementalShuntVoltageControlSectionB);
-    readD(jSectionG, ctx->hIncrementalShuntVoltageControlSectionG);
+    readI(jShuntCompensatorStart, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorStart);
+    readI(jSectionStart, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionStart);
+    readD(jSectionB, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionB);
+    readD(jSectionG, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionG);
     readI(jShuntCompensatorMinPosition, shuntCompensatorMinPosition);
-    readI(jShuntCompensatorBasePosition, ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition);
-    int nc = static_cast<int>(ctx->hIncrementalShuntVoltageControlShuntBRow.size());
-    int nSubs = static_cast<int>(ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition.size());
-    ctx->dIncrementalShuntVoltageControlShuntBRow.upload(ctx->hIncrementalShuntVoltageControlShuntBRow.data(), nc * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlElement.upload(controllerElement.data(), nc * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.upload(ctx->hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.data(), nc * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlShuntCompensatorStart.upload(ctx->hIncrementalShuntVoltageControlShuntCompensatorStart.data(), ctx->hIncrementalShuntVoltageControlShuntCompensatorStart.size() * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlSectionStart.upload(ctx->hIncrementalShuntVoltageControlSectionStart.data(), ctx->hIncrementalShuntVoltageControlSectionStart.size() * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlSectionB.upload(ctx->hIncrementalShuntVoltageControlSectionB.data(), ctx->hIncrementalShuntVoltageControlSectionB.size() * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlSectionG.upload(ctx->hIncrementalShuntVoltageControlSectionG.data(), ctx->hIncrementalShuntVoltageControlSectionG.size() * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlShuntCompensatorMinPosition.upload(shuntCompensatorMinPosition.data(), nSubs * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlShuntCompensatorBasePosition.upload(ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition.data(), nSubs * sizeof(int));
-    ctx->nIncrementalShuntVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
-    ctx->nIncrementalShuntVoltageControlShuntCompensators = nSubs;
-    ctx->incrementalShuntVoltageControlMaxSectionShift = maxSectionShift >= 0 ? maxSectionShift : 3;
+    readI(jShuntCompensatorBasePosition, ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorBasePosition);
+    int nc = static_cast<int>(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntBRow.size());
+    int nSubs = static_cast<int>(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorBasePosition.size());
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntBRow.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntBRow.data(), nc * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlElement.upload(controllerElement.data(), nc * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement.data(), nc * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorStart.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorStart.data(), ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorStart.size() * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionStart.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionStart.data(), ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionStart.size() * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionB.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionB.data(), ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionB.size() * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionG.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionG.data(), ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlSectionG.size() * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorMinPosition.upload(shuntCompensatorMinPosition.data(), nSubs * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorBasePosition.upload(ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorBasePosition.data(), nSubs * sizeof(int));
+    ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
+    ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators = nSubs;
+    ctx->incrementalShuntVoltageControl.incrementalShuntVoltageControlMaxSectionShift = maxSectionShift >= 0 ? maxSectionShift : 3;
     size_t nsu = static_cast<size_t>(ctx->nScenarios) * nSubs;
     size_t nsc = static_cast<size_t>(ctx->nScenarios) * nc;
-    size_t nsg = static_cast<size_t>(ctx->nScenarios) * ctx->nIncrementalShuntVoltageControlGroups;
-    ctx->dIncrementalShuntVoltageControlPosition.ensure(nsu * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlCurrentDirection.ensure(nsu * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlDirectionChangeCount.ensure(nsu * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlAllowedDirection.ensure(nsu * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlSectionShift.ensure(nsu * sizeof(int));
-    ctx->dIncrementalShuntVoltageControlSensitivity.ensure(nsc * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlBaseB.ensure(nsc * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlAppliedDeltaB.ensure(nsc * sizeof(double));
-    ctx->dIncrementalShuntVoltageControlOutOfDeadband.ensure(nsg * sizeof(char));
-    ctx->dIncrementalShuntVoltageControlDiffV.ensure(nsg * sizeof(double));
-    ctx->nIncrementalShuntVoltageControlControllerShunts = nc;
+    size_t nsg = static_cast<size_t>(ctx->nScenarios) * ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlGroups;
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.ensure(nsu * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlCurrentDirection.ensure(nsu * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDirectionChangeCount.ensure(nsu * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAllowedDirection.ensure(nsu * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionShift.ensure(nsu * sizeof(int));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSensitivity.ensure(nsc * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlBaseB.ensure(nsc * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAppliedDeltaB.ensure(nsc * sizeof(double));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlOutOfDeadband.ensure(nsg * sizeof(char));
+    ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDiffV.ensure(nsg * sizeof(double));
+    ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts = nc;
     return 1;
 }
 
@@ -88,11 +88,11 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, ShuntVoltageControlNative, readBatchIncrementalShuntVoltageControlPositions)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nIncrementalShuntVoltageControlControllerShunts <= 0 || !ctx->dIncrementalShuntVoltageControlPosition.p) {
+    if (ctx == nullptr || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts <= 0 || !ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.p) {
         return nullptr;
     }
     std::vector<int> host;
-    readInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlPosition.p, static_cast<size_t>(ctx->nIncrementalShuntVoltageControlShuntCompensators), host);
+    readInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.p, static_cast<size_t>(ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators), host);
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

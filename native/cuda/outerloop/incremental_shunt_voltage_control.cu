@@ -160,18 +160,18 @@ __global__ void incrementalShuntVoltageControlBaseBBatch(int nIncrementalShuntVo
 void incrementalShuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    const size_t nu = static_cast<size_t>(ctx->nIncrementalShuntVoltageControlShuntCompensators);
-    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlPosition.as<int>(), nu,
-                       ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition.data());
-    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlCurrentDirection.as<int>(), nu, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlDirectionChangeCount.as<int>(), nu, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlAllowedDirection.as<int>(), nu, nullptr, 0);
-    const size_t nc = static_cast<size_t>(ctx->nIncrementalShuntVoltageControlControllerShunts);
-    resetInstalledRows(ctx, ctx->dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), nc, nullptr, 0.0);
+    const size_t nu = static_cast<size_t>(ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators);
+    resetInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.as<int>(), nu,
+                       ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorBasePosition.data());
+    resetInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlCurrentDirection.as<int>(), nu, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDirectionChangeCount.as<int>(), nu, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAllowedDirection.as<int>(), nu, nullptr, 0);
+    const size_t nc = static_cast<size_t>(ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts);
+    resetInstalledRows(ctx, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), nc, nullptr, 0.0);
     const int nc32 = static_cast<int>(nc);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    incrementalShuntVoltageControlBaseBBatch<<<grid(nc32 * nS), BLOCK, 0, ctx->stream>>>(nc32, nS, n, ctx->dIncrementalShuntVoltageControlShuntBRow.as<int>(),
-            ctx->dTarget.as<double>(), ctx->dIncrementalShuntVoltageControlBaseB.as<double>(), installMaskOrNull(ctx));
+    incrementalShuntVoltageControlBaseBBatch<<<grid(nc32 * nS), BLOCK, 0, ctx->stream>>>(nc32, nS, n, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntBRow.as<int>(),
+            ctx->dTarget.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlBaseB.as<double>(), installMaskOrNull(ctx));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
@@ -179,7 +179,7 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
     const int& n = drv.n;
     const int& nS = drv.nS;
     std::vector<char>& active = drv.active;
-    int nIncrementalShuntVoltageControlControllerShunts = ctx->nIncrementalShuntVoltageControlControllerShunts;
+    int nIncrementalShuntVoltageControlControllerShunts = ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts;
     if (nIncrementalShuntVoltageControlControllerShunts <= 0) return;
     if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
             && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
@@ -187,19 +187,19 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
         if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
         return;
     }
-    int nG = ctx->nIncrementalShuntVoltageControlGroups;
+    int nG = ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlGroups;
     size_t nsg = static_cast<size_t>(nS) * nG;
     incrementalShuntVoltageControlDeadbandCheckBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements,
-            ctx->dIncrementalShuntVoltageControlGroupControllerStart.as<int>(), ctx->dIncrementalShuntVoltageControlGroupController.as<int>(),
-            ctx->dIncrementalShuntVoltageControlControlledBusVRow.as<int>(), ctx->dIncrementalShuntVoltageControlTargetV.as<double>(), ctx->dIncrementalShuntVoltageControlHalfTargetDeadband.as<double>(), ctx->dIncrementalShuntVoltageControlElement.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupControllerStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupController.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlControlledBusVRow.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlTargetV.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlHalfTargetDeadband.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlElement.as<int>(),
             ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-            ctx->dIncrementalShuntVoltageControlOutOfDeadband.as<char>(), ctx->dIncrementalShuntVoltageControlDiffV.as<double>());
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlOutOfDeadband.as<char>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDiffV.as<double>());
     std::vector<char> outOfDeadband(nsg);
-    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->dIncrementalShuntVoltageControlOutOfDeadband.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlOutOfDeadband.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    std::vector<int> gPtr(nG + 1), gCtrl(ctx->nIncrementalShuntVoltageControlControllerShunts);
-    CUDA_CHECK(cudaMemcpy(gPtr.data(), ctx->dIncrementalShuntVoltageControlGroupControllerStart.p, gPtr.size() * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(gCtrl.data(), ctx->dIncrementalShuntVoltageControlGroupController.p, gCtrl.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<int> gPtr(nG + 1), gCtrl(ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts);
+    CUDA_CHECK(cudaMemcpy(gPtr.data(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupControllerStart.p, gPtr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(gCtrl.data(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupController.p, gCtrl.size() * sizeof(int), cudaMemcpyDeviceToHost));
     std::vector<char> needC(nIncrementalShuntVoltageControlControllerShunts, 0);
     bool any = false;
     for (int s2 = 0; s2 < nS; s2++) {
@@ -213,36 +213,36 @@ void incrementalShuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv
     std::vector<char> ones(nS, 1);
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
     fillActiveBatch(ctx, drv, false);
-    CUDA_CHECK(cudaMemsetAsync(ctx->dIncrementalShuntVoltageControlSensitivity.p, 0, static_cast<size_t>(nS) * nIncrementalShuntVoltageControlControllerShunts * sizeof(double), ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSensitivity.p, 0, static_cast<size_t>(nS) * nIncrementalShuntVoltageControlControllerShunts * sizeof(double), ctx->stream));
     bool first = true;
     for (int c = 0; c < nIncrementalShuntVoltageControlControllerShunts; c++) {
         if (!needC[c]) continue;
-        int row = ctx->structure->rowMap[ctx->hIncrementalShuntVoltageControlShuntBRow[c]];
+        int row = ctx->structure->rowMap[ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntBRow[c]];
         if (row < 0) continue;
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
-        incrementalShuntVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalShuntVoltageControlControllerShunts, ctx->dIncrementalShuntVoltageControlControlledBusVRow.as<int>(),
-                ctx->dDx.as<double>(), ctx->dIncrementalShuntVoltageControlSensitivity.as<double>());
+        incrementalShuntVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalShuntVoltageControlControllerShunts, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlControlledBusVRow.as<int>(),
+                ctx->dDx.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSensitivity.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
-    incrementalShuntVoltageControlAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nIncrementalShuntVoltageControlControllerShunts, ctx->nIncrementalShuntVoltageControlShuntCompensators,
-            ctx->incrementalShuntVoltageControlMaxSectionShift, ctx->dIncrementalShuntVoltageControlGroupControllerStart.as<int>(), ctx->dIncrementalShuntVoltageControlGroupController.as<int>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(),
-            ctx->dIncrementalShuntVoltageControlSectionStart.as<int>(), ctx->dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorMinPosition.as<int>(),
-            ctx->dIncrementalShuntVoltageControlHalfTargetDeadband.as<double>(), ctx->dIncrementalShuntVoltageControlElement.as<int>(), ctx->dDisabled.as<char>(),
-            ctx->dIncrementalShuntVoltageControlOutOfDeadband.as<char>(), ctx->dIncrementalShuntVoltageControlDiffV.as<double>(), ctx->dIncrementalShuntVoltageControlSensitivity.as<double>(),
-            ctx->dIncrementalShuntVoltageControlPosition.as<int>(), ctx->dIncrementalShuntVoltageControlCurrentDirection.as<int>(), ctx->dIncrementalShuntVoltageControlDirectionChangeCount.as<int>(), ctx->dIncrementalShuntVoltageControlAllowedDirection.as<int>(),
-            ctx->dIncrementalShuntVoltageControlSectionShift.as<int>(), ctx->dOuterLoopUnstable.as<char>());
-    incrementalShuntVoltageControlApplyBatch<<<grid(nIncrementalShuntVoltageControlControllerShunts * nS), BLOCK, 0, ctx->stream>>>(nIncrementalShuntVoltageControlControllerShunts, nS, n, ctx->dIncrementalShuntVoltageControlShuntBRow.as<int>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(),
-            ctx->dIncrementalShuntVoltageControlSectionStart.as<int>(), ctx->dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->dIncrementalShuntVoltageControlPosition.as<int>(),
-            ctx->nIncrementalShuntVoltageControlShuntCompensators, ctx->dIncrementalShuntVoltageControlBaseB.as<double>(), ctx->dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+    incrementalShuntVoltageControlAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nIncrementalShuntVoltageControlControllerShunts, ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators,
+            ctx->incrementalShuntVoltageControl.incrementalShuntVoltageControlMaxSectionShift, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupControllerStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlGroupController.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorMinPosition.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlHalfTargetDeadband.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlElement.as<int>(), ctx->dDisabled.as<char>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlOutOfDeadband.as<char>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDiffV.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSensitivity.as<double>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlCurrentDirection.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlDirectionChangeCount.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAllowedDirection.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionShift.as<int>(), ctx->dOuterLoopUnstable.as<char>());
+    incrementalShuntVoltageControlApplyBatch<<<grid(nIncrementalShuntVoltageControlControllerShunts * nS), BLOCK, 0, ctx->stream>>>(nIncrementalShuntVoltageControlControllerShunts, nS, n, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntBRow.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorStart.as<int>(),
+            ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionStart.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlSectionB.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlShuntCompensatorBasePosition.as<int>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.as<int>(),
+            ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators, ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlBaseB.as<double>(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlAppliedDeltaB.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
     publishShuntAdmittanceOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
-        std::vector<int> pos(static_cast<size_t>(nS) * ctx->nIncrementalShuntVoltageControlShuntCompensators);
-        CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dIncrementalShuntVoltageControlPosition.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> pos(static_cast<size_t>(nS) * ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators);
+        CUDA_CHECK(cudaMemcpy(pos.data(), ctx->incrementalShuntVoltageControl.dIncrementalShuntVoltageControlPosition.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
         for (char c : outOfDeadband) nOut += c ? 1 : 0;
-        for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nIncrementalShuntVoltageControlShuntCompensators; u++) if (pos[static_cast<size_t>(s2) * ctx->nIncrementalShuntVoltageControlShuntCompensators + u] != ctx->hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]) nMoved++;
+        for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators; u++) if (pos[static_cast<size_t>(s2) * ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlShuntCompensators + u] != ctx->incrementalShuntVoltageControl.hIncrementalShuntVoltageControlShuntCompensatorBasePosition[u]) nMoved++;
         std::fprintf(stderr, "SHUNT_KERNEL nS=%d nControllers=%d nGroups=%d outOfDeadband=%d subsOffBase=%d\n", nS, nIncrementalShuntVoltageControlControllerShunts, nG, nOut, nMoved);
     }
 }

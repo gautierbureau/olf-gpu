@@ -31,6 +31,7 @@
 #include "context/transformer_voltage_control_context.cuh"
 #include "context/incremental_transformer_voltage_control_context.cuh"
 #include "context/shunt_voltage_control_context.cuh"
+#include "context/incremental_shunt_voltage_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -244,19 +245,7 @@ struct BatchSolverContext {
     int nMonitoringVoltageControllers = 0;
     DeviceBuf dMonitoringVoltageBusVRow, dMonitoringVoltageBand, dMonitoringVoltageDeltaStart, dMonitoringVoltageDeltaRow, dMonitoringVoltageDeltaMode, dMonitoringVoltageDeltaTarget, dMonitoringVoltageActivatedTargetV;
     IncrementalTransformerVoltageControlContext incrementalTransformerVoltageControl;
-    // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL). Controllers are
-    // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
-    // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
-    int nIncrementalShuntVoltageControlControllerShunts = 0, nIncrementalShuntVoltageControlGroups = 0, nIncrementalShuntVoltageControlShuntCompensators = 0, incrementalShuntVoltageControlMaxSectionShift = 3;
-    DeviceBuf dIncrementalShuntVoltageControlShuntBRow, dIncrementalShuntVoltageControlControlledBusVRow, dIncrementalShuntVoltageControlTargetV, dIncrementalShuntVoltageControlHalfTargetDeadband, dIncrementalShuntVoltageControlElement, dIncrementalShuntVoltageControlShuntAdmittanceOverrideElement;   // per controller
-    DeviceBuf dIncrementalShuntVoltageControlGroupControllerStart, dIncrementalShuntVoltageControlGroupController;                   // CSR: group -> controllers (sorted)
-    DeviceBuf dIncrementalShuntVoltageControlShuntCompensatorStart;                                    // CSR: controller -> subs
-    DeviceBuf dIncrementalShuntVoltageControlSectionStart, dIncrementalShuntVoltageControlSectionB, dIncrementalShuntVoltageControlSectionG, dIncrementalShuntVoltageControlShuntCompensatorMinPosition, dIncrementalShuntVoltageControlShuntCompensatorBasePosition;   // per sub: section tables
-    DeviceBuf dIncrementalShuntVoltageControlPosition, dIncrementalShuntVoltageControlCurrentDirection, dIncrementalShuntVoltageControlDirectionChangeCount, dIncrementalShuntVoltageControlAllowedDirection, dIncrementalShuntVoltageControlSectionShift;   // per (scenario, sub)
-    DeviceBuf dIncrementalShuntVoltageControlSensitivity, dIncrementalShuntVoltageControlBaseB, dIncrementalShuntVoltageControlAppliedDeltaB;           // per (scenario, controller)
-    DeviceBuf dIncrementalShuntVoltageControlOutOfDeadband, dIncrementalShuntVoltageControlDiffV;                        // per (scenario, group)
-    std::vector<int> hIncrementalShuntVoltageControlShuntBRow, hIncrementalShuntVoltageControlShuntAdmittanceOverrideElement, hIncrementalShuntVoltageControlShuntCompensatorStart, hIncrementalShuntVoltageControlSectionStart, hIncrementalShuntVoltageControlShuntCompensatorBasePosition;
-    std::vector<double> hIncrementalShuntVoltageControlSectionB, hIncrementalShuntVoltageControlSectionG;
+    IncrementalShuntVoltageControlContext incrementalShuntVoltageControl;
     // FLOW-OBSERVED incremental loops (GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL /
     // INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL): a rho (RPC) or a1 (phase) tap driving a CONTROLLED
     // branch's flow; kind = the GpuControlledFlow: REACTIVE_POWER (rho, closest-r1), ACTIVE_POWER (phase

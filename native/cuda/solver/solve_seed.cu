@@ -245,7 +245,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     if (ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         areaInterchangeControlResetSolve(ctx, drv);
     }
-    if (ctx->nMonitoringVoltageControllers > 0) {
+    if (ctx->monitoringVoltage.nMonitoringVoltageControllers > 0) {
         monitoringVoltageResetSolve(ctx, drv);
     }
     if (ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0) {

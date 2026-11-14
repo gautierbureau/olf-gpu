@@ -77,9 +77,9 @@ __global__ void scoreLanes(int n, int nnz, const int* __restrict__ laneMap, cons
 void solveWithCudss(BatchSolverContext* ctx, const double* vals) {
     const int n = ctx->n;
     const int nS = ctx->nScenarios;
-    CudssCtx& solver = ctx->luComparisonSolver;
-    if (!ctx->luComparisonAnalyzed) {
-        ctx->dLuComparisonDx.alloc(static_cast<size_t>(n) * nS * sizeof(double));
+    CudssCtx& solver = ctx->linearSolver.luComparisonSolver;
+    if (!ctx->linearSolver.luComparisonAnalyzed) {
+        ctx->linearSolver.dLuComparisonDx.alloc(static_cast<size_t>(n) * nS * sizeof(double));
         CUDSS_CHECK(cudssCreate(&solver.handle));
         CUDSS_CHECK(cudssSetStream(solver.handle, ctx->stream));
         CUDSS_CHECK(cudssConfigCreate(&solver.config));
@@ -95,11 +95,11 @@ void solveWithCudss(BatchSolverContext* ctx, const double* vals) {
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE,
                                         CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&solver.solutionMatrix, n, 1, n, ctx->dLuComparisonDx.as<double>(),
+        CUDSS_CHECK(cudssMatrixCreateDn(&solver.solutionMatrix, n, 1, n, ctx->linearSolver.dLuComparisonDx.as<double>(),
                                         OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_ANALYSIS, solver.config, solver.data, solver.systemMatrix,
                                  solver.solutionMatrix, solver.rightHandSideMatrix));
-        ctx->luComparisonAnalyzed = true;
+        ctx->linearSolver.luComparisonAnalyzed = true;
     }
     CUDSS_CHECK(cudssExecute(solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, solver.config, solver.data,
                              solver.systemMatrix, solver.solutionMatrix, solver.rightHandSideMatrix));
@@ -108,26 +108,26 @@ void solveWithCudss(BatchSolverContext* ctx, const double* vals) {
 }  // namespace
 
 void compareBatchedLuWithCudss(BatchSolverContext* ctx, int outer, int iteration) {
-    BatchedLu& lu = *ctx->batchedLu;
+    BatchedLu& lu = *ctx->linearSolver.batchedLu;
     const int lanes = lu.width;
     if (lanes == 0) {
         return;
     }
     const double* vals = ctx->dVals.as<double>();
     if (ctx->layout.interleaved) {
-        ctx->dLuComparisonValues.alloc(static_cast<size_t>(ctx->nnz) * ctx->nScenarios * sizeof(double));
-        copyToScenarioMajor(ctx->nnz, ctx->layout, vals, ctx->dLuComparisonValues.as<double>(), nullptr, ctx->stream);
-        vals = ctx->dLuComparisonValues.as<double>();
+        ctx->linearSolver.dLuComparisonValues.alloc(static_cast<size_t>(ctx->nnz) * ctx->nScenarios * sizeof(double));
+        copyToScenarioMajor(ctx->nnz, ctx->layout, vals, ctx->linearSolver.dLuComparisonValues.as<double>(), nullptr, ctx->stream);
+        vals = ctx->linearSolver.dLuComparisonValues.as<double>();
     }
     solveWithCudss(ctx, vals);
-    ctx->dLuComparisonScore.alloc(static_cast<size_t>(ctx->nScenarios) * SCORES * sizeof(double));
+    ctx->linearSolver.dLuComparisonScore.alloc(static_cast<size_t>(ctx->nScenarios) * SCORES * sizeof(double));
     scoreLanes<<<lanes, COMPARE_BLOCK, 0, ctx->stream>>>(ctx->n, ctx->nnz, deviceLaneMap(lu),
             ctx->structure->dRowPtr.as<int>(), ctx->structure->dColIdx.as<int>(), vals,
-            ctx->dB.as<double>(), ctx->dDx.as<double>(), ctx->dLuComparisonDx.as<double>(),
-            ctx->dLuComparisonScore.as<double>());
+            ctx->dB.as<double>(), ctx->dDx.as<double>(), ctx->linearSolver.dLuComparisonDx.as<double>(),
+            ctx->linearSolver.dLuComparisonScore.as<double>());
     CUDA_CHECK(cudaGetLastError());
     std::vector<double> score(static_cast<size_t>(lanes) * SCORES);
-    CUDA_CHECK(cudaMemcpyAsync(score.data(), ctx->dLuComparisonScore.p, score.size() * sizeof(double),
+    CUDA_CHECK(cudaMemcpyAsync(score.data(), ctx->linearSolver.dLuComparisonScore.p, score.size() * sizeof(double),
                                cudaMemcpyDeviceToHost, ctx->stream));
     const std::vector<int> clamps = readPivotClamps(lu, ctx->stream);  // synchronizes the stream
     double worstDifference = 0.0;

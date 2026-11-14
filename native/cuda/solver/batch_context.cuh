@@ -42,6 +42,7 @@
 #include "context/hvdc_ac_emulation_context.cuh"
 #include "context/realistic_voltage_context.cuh"
 #include "context/remote_voltage_control_context.cuh"
+#include "context/linear_solver_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -97,8 +98,7 @@ struct BatchSolverContext {
     DeviceBuf dXLastConv;
     DeviceBuf dHandBackSlots, dHandBackStates;               // a paused call's handed-back slots and their states, gathered
     DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
-    DeviceBuf dZeroDiagonalRowSnapshot, dZeroDiagonalRightHandSideSnapshot, dZeroDiagonalDonorChoice;               // zero-diagonal repair scratch (lazy)
-    int zeroDiagonalRepairCapacity = 0;
+    LinearSolverContext linearSolver;
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
@@ -135,19 +135,6 @@ struct BatchSolverContext {
     std::vector<int> hClosedBranchParameterOverrideControllerCounts;                 // the loop sizes the controller tables were built for
     DeviceBuf dClosedBranchParameterOverrideElementControllerStart, dClosedBranchParameterOverrideElementController;
     DeviceBuf dClosedBranchParameterOverrideTapMoved, dClosedBranchParameterOverridePiModel;
-    // ---- solve-only batch compaction (UBATCH, tol > 0): lazily allocated on first engage ----
-    DeviceBuf dValsCompacted, dBCompacted, dDxCompacted, dCompactedScenarioMap;                      // nnz*cap / n*cap / n*cap / cap ints
-    CudssCtx compactedSolver;                                            // dedicated handle/config/data for the compact width
-    cudssMatrix_t compactedUniformBatchSystemMatrix = nullptr, compactedUniformBatchRightHandSideMatrix = nullptr, compactedUniformBatchSolutionMatrix = nullptr;
-    cudssMatrix_t compactedUniformBatchResidualMatrix = nullptr, compactedUniformBatchDeltaMatrix = nullptr;   // adaptive refinement on the compacted solve
-    cudssMatrix_t uniformBatchResidualMatrix = nullptr, uniformBatchDeltaMatrix = nullptr;     // ...and on the full-width UBATCH solve
-    DeviceBuf dRCompacted, dDeltaCompacted;
-    int compactedCapacity = 0;                                      // buffer capacity (nS/2)
-    int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
-    // One ANALYZED cuDSS data object per compact width: a data object's
-    // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
-    // same tiers, and so does the next run on this context -- can reuse its analysis instead of redoing it.
-    std::map<int, cudssData_t> compactData;
     // setBatchX0Seeds: per-scenario starting values (flat s*n+row -> value) written over the tiled BASE state by
     // the next solve that is given no full per-scenario state; consumed (cleared) by that solve.
     std::vector<int> x0SeedIdx;
@@ -165,7 +152,6 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (BUS_TARGET_V_WITH_SLOPE V rows), 0 elsewhere
-    DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
     // dQbuf holds the q of every row (dQbufClosed's closed branches plus the other families, refilled at every check);
     // dOuterLoopCheckActive marks the scenarios an outer loop checks this pass, dOuterLoopUnstable those it changed.
     DeviceBuf dQbuf, dOuterLoopCheckActive, dOuterLoopUnstable;               // dQbuf nS*n, dOuterLoopCheckActive/dOuterLoopUnstable nS
@@ -196,25 +182,6 @@ struct BatchSolverContext {
                                                                          // solve restores (setBatchReactiveLimitSeedTargetQ), NaN = the limit
 
     HvdcAcEmulationContext hvdcAcEmulation;
-    CudssCtx solver;
-    bool analyzed = false;
-    int mode = 0;                                            // 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config,
-                                                             // 7 = our batched LU
-    std::unique_ptr<BatchedLu> batchedLu;                    // BATCHED_LU: the factors, one lane per slot
-    // BATCHED_LU with couplers: the residual and correction of the internal refinement steps inside a refinement's own
-    // correction solve (batched_lu_solve.cu solveWithInternalRefinement)
-    DeviceBuf dInternalRefinementResidual, dInternalRefinementCorrection;
-    // BATCHED_LU: the exact substitution of the one-variable equations after each solve (singleton_substitution.cuh)
-    DeviceBuf dSingletonHazardSlot, dSingletonColumnStart, dSingletonColumnRow, dSingletonList, dSingletonPendingList,
-            dSingletonFixed, dSingletonTouched, dSingletonOwner, dSingletonProposal, dSingletonProposalValue, dSingletonCounters;
-    CudssCtx luComparisonSolver;                             // OLF_GPU_LU_COMPARE: cuDSS's uniform batch on the same systems
-    DeviceBuf dLuComparisonDx, dLuComparisonScore, dLuComparisonValues;   // the values' scenario-major copy, when interleaved
-    bool luComparisonAnalyzed = false;
-    DeviceBuf dR, dDelta, dIterativeRefinementScore, dIterativeRefinementScenarioMask;                 // adaptive refinement: residual, correction, lane scores/mask
-    // UBATCH single matrices (that mode only): a SINGLE per-block CSR (n, nnz, shared rowPtr/colIdx)
-    // whose value/RHS pointers are the batched buffers (dVals = nS*nnz, dB/dDx = nS*n); cuDSS
-    // analyzes ONE block (cheap) and factorizes/solves all nS via CUDSS_CONFIG_UBATCH_SIZE.
-    cudssMatrix_t uniformBatchSystemMatrix = nullptr, uniformBatchRightHandSideMatrix = nullptr, uniformBatchSolutionMatrix = nullptr;
     // Dedicated stream for the WHOLE batch solve (every kernel/memset/async copy + cuDSS via
     // cudssSetStream): keeps the per-iteration launch sequence off the legacy default stream,
     // whose implicit device-wide serialization stitched the timeline with sync points (the
@@ -229,20 +196,20 @@ struct BatchSolverContext {
             secondaryVoltageControl.secondaryVoltageControlBlasHandle = nullptr;
         }
         if (stream) cudaStreamDestroy(stream);
-        if (uniformBatchResidualMatrix) cudssMatrixDestroy(uniformBatchResidualMatrix);
-        if (uniformBatchDeltaMatrix) cudssMatrixDestroy(uniformBatchDeltaMatrix);
-        if (compactedUniformBatchResidualMatrix) cudssMatrixDestroy(compactedUniformBatchResidualMatrix);
-        if (compactedUniformBatchDeltaMatrix) cudssMatrixDestroy(compactedUniformBatchDeltaMatrix);
-        if (uniformBatchSystemMatrix) cudssMatrixDestroy(uniformBatchSystemMatrix);
-        if (uniformBatchRightHandSideMatrix) cudssMatrixDestroy(uniformBatchRightHandSideMatrix);
-        if (uniformBatchSolutionMatrix) cudssMatrixDestroy(uniformBatchSolutionMatrix);
-        for (auto& e : compactData) {
-            if (e.second && compactedSolver.handle) cudssDataDestroy(compactedSolver.handle, e.second);
+        if (linearSolver.uniformBatchResidualMatrix) cudssMatrixDestroy(linearSolver.uniformBatchResidualMatrix);
+        if (linearSolver.uniformBatchDeltaMatrix) cudssMatrixDestroy(linearSolver.uniformBatchDeltaMatrix);
+        if (linearSolver.compactedUniformBatchResidualMatrix) cudssMatrixDestroy(linearSolver.compactedUniformBatchResidualMatrix);
+        if (linearSolver.compactedUniformBatchDeltaMatrix) cudssMatrixDestroy(linearSolver.compactedUniformBatchDeltaMatrix);
+        if (linearSolver.uniformBatchSystemMatrix) cudssMatrixDestroy(linearSolver.uniformBatchSystemMatrix);
+        if (linearSolver.uniformBatchRightHandSideMatrix) cudssMatrixDestroy(linearSolver.uniformBatchRightHandSideMatrix);
+        if (linearSolver.uniformBatchSolutionMatrix) cudssMatrixDestroy(linearSolver.uniformBatchSolutionMatrix);
+        for (auto& e : linearSolver.compactData) {
+            if (e.second && linearSolver.compactedSolver.handle) cudssDataDestroy(linearSolver.compactedSolver.handle, e.second);
         }
-        compactData.clear();
-        if (compactedUniformBatchSystemMatrix) cudssMatrixDestroy(compactedUniformBatchSystemMatrix);
-        if (compactedUniformBatchRightHandSideMatrix) cudssMatrixDestroy(compactedUniformBatchRightHandSideMatrix);
-        if (compactedUniformBatchSolutionMatrix) cudssMatrixDestroy(compactedUniformBatchSolutionMatrix);
+        linearSolver.compactData.clear();
+        if (linearSolver.compactedUniformBatchSystemMatrix) cudssMatrixDestroy(linearSolver.compactedUniformBatchSystemMatrix);
+        if (linearSolver.compactedUniformBatchRightHandSideMatrix) cudssMatrixDestroy(linearSolver.compactedUniformBatchRightHandSideMatrix);
+        if (linearSolver.compactedUniformBatchSolutionMatrix) cudssMatrixDestroy(linearSolver.compactedUniformBatchSolutionMatrix);
     }
 };
 

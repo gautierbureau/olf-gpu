@@ -22,12 +22,12 @@ namespace olfgpu {
 namespace {
 
 BatchedLuSystems systemsOf(BatchSolverContext* ctx, int nS, const char* lanes) {
-    return BatchedLuSystems{ctx->batchedLu.get(), ctx->n, nS, ctx->nnz, ctx->structure->dRowPtr.as<int>(),
+    return BatchedLuSystems{ctx->linearSolver.batchedLu.get(), ctx->n, nS, ctx->nnz, ctx->structure->dRowPtr.as<int>(),
                             ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
-                            ctx->structure->nZeroImpedanceBranch > 0, lanes, ctx->stream, ctx->dR.as<double>(),
-                            ctx->dDelta.as<double>(), ctx->dInternalRefinementResidual.as<double>(),
-                            ctx->dInternalRefinementCorrection.as<double>(), ctx->dIterativeRefinementScore,
-                            ctx->dIterativeRefinementScenarioMask, ctx->layout};
+                            ctx->structure->nZeroImpedanceBranch > 0, lanes, ctx->stream, ctx->linearSolver.dR.as<double>(),
+                            ctx->linearSolver.dDelta.as<double>(), ctx->linearSolver.dInternalRefinementResidual.as<double>(),
+                            ctx->linearSolver.dInternalRefinementCorrection.as<double>(), ctx->linearSolver.dIterativeRefinementScore,
+                            ctx->linearSolver.dIterativeRefinementScenarioMask, ctx->layout};
 }
 
 // The internal refinement steps of a solve: cuDSS's base steps on a structure with couplers, none without.
@@ -126,7 +126,7 @@ void batchedLuNewtonSolve(BatchSolverContext* ctx, DriverPass& drv, int iteratio
     CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
     {
         AnalysisTimer at_(__LINE__, 'F');
-        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), static_cast<int>(laneMap.size()),
+        factorizeLanes(*ctx->linearSolver.batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), static_cast<int>(laneMap.size()),
                        ctx->stream);
     }
     solveNewtonStep(systemsOf(ctx, nS, ctx->dActive.as<char>()), ctx->dB.as<double>(), ctx->dDx.as<double>(), [&]() {
@@ -143,10 +143,10 @@ void batchedLuSensitivitySolve(BatchSolverContext* ctx, int nS, bool first) {
         std::vector<int> laneMap(nS);
         std::iota(laneMap.begin(), laneMap.end(), 0);
         AnalysisTimer at_(__LINE__, 'F');
-        factorizeLanes(*ctx->batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), nS, ctx->stream);
+        factorizeLanes(*ctx->linearSolver.batchedLu, ctx->dVals.as<double>(), ctx->layout, laneMap.data(), nS, ctx->stream);
     }
     solveWithInternalRefinement(systemsOf(ctx, nS, nullptr), ctx->dB.as<double>(), ctx->dDx.as<double>(),
-                                ctx->dR.as<double>(), ctx->dDelta.as<double>(), nullptr);
+                                ctx->linearSolver.dR.as<double>(), ctx->linearSolver.dDelta.as<double>(), nullptr);
     AnalysisTimer at_(__LINE__, 'S');
     substituteSingletons(ctx, ctx->dB.as<double>(), ctx->dDx.as<double>());
 }

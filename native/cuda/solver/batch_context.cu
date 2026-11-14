@@ -36,53 +36,53 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE. ----
     {
         int ub = nScenarios;
-        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->uniformBatchSystemMatrix, n, n, ctx->nnz,
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.uniformBatchSystemMatrix, n, n, ctx->nnz,
                 ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                 OLF_CUDSS_CSR_TYPES,
                 CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchSolutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchSolutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         // adaptive refinement: the residual and the correction, the same single-block dense shape as B and X
-        if (!ctx->dR.p) {
-            ctx->dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
-            ctx->dDelta.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+        if (!ctx->linearSolver.dR.p) {
+            ctx->linearSolver.dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+            ctx->linearSolver.dDelta.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
             // zeroed: a solve covers UBATCH_SIZE = nScenarios lanes while a short last chunk fills nS < nScenarios
             // of them - the padding lanes' residual must be a clean 0, not whatever the allocation held
-            CUDA_CHECK(cudaMemset(ctx->dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
-            CUDA_CHECK(cudaMemset(ctx->dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->linearSolver.dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->linearSolver.dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
         }
-        if (!ctx->dIterativeRefinementScore.p) {
-            ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+        if (!ctx->linearSolver.dIterativeRefinementScore.p) {
+            ctx->linearSolver.dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
         }
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchResidualMatrix, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchDeltaMatrix, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchResidualMatrix, n, 1, n, ctx->linearSolver.dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchDeltaMatrix, n, 1, n, ctx->linearSolver.dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
     }
 }
 
 // BATCHED_LU: our batched LU's factors for every slot, and the refinement buffers the cuDSS batch has.
 void setupBatchedLu(BatchSolverContext* ctx) {
-    ctx->batchedLu = std::make_unique<BatchedLu>();
-    createBatchedLu(*ctx->batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
+    ctx->linearSolver.batchedLu = std::make_unique<BatchedLu>();
+    createBatchedLu(*ctx->linearSolver.batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
     const size_t vectorBytes = static_cast<size_t>(ctx->n) * ctx->nScenarios * sizeof(double);
-    ctx->dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
-    ctx->dDelta.alloc(vectorBytes);
-    ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+    ctx->linearSolver.dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
+    ctx->linearSolver.dDelta.alloc(vectorBytes);
+    ctx->linearSolver.dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
     if (ctx->structure->nZeroImpedanceBranch > 0) {
-        ctx->dInternalRefinementResidual.alloc(vectorBytes);
-        ctx->dInternalRefinementCorrection.alloc(vectorBytes);
+        ctx->linearSolver.dInternalRefinementResidual.alloc(vectorBytes);
+        ctx->linearSolver.dInternalRefinementCorrection.alloc(vectorBytes);
     }
 }
 
 void setupBatchMatricesFallback(BatchSolverContext* ctx) {
     int n = ctx->n;
     // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->solver.systemMatrix, n, n, ctx->nnz,
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.solver.systemMatrix, n, n, ctx->nnz,
                                      ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                                      OLF_CUDSS_CSR_TYPES,
                                      CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int nScenarios, int mode,
@@ -100,7 +100,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     ctx->n = n;
     ctx->nnz = structure->nnz;
     ctx->nScenarios = nScenarios;
-    ctx->mode = mode;
+    ctx->linearSolver.mode = mode;
     ctx->nElements = structure->nElements;
     ctx->closedBranchOffset = structure->closedBranchOffset;
     ctx->openBranchOffset = structure->openBranchOffset;
@@ -307,17 +307,17 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     CUDA_CHECK(cudaStreamCreate(&ctx->stream));
     if (mode != GpuLinearSolveMode::BATCHED_LU) {            // our batched LU solves without cuDSS
         gCudssContexts++;
-        CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
-        CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
-        CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
+        CUDSS_CHECK(cudssCreate(&ctx->linearSolver.solver.handle));
+        CUDSS_CHECK(cudssSetStream(ctx->linearSolver.solver.handle, ctx->stream));
+        CUDSS_CHECK(cudssConfigCreate(&ctx->linearSolver.solver.config));
         int ir = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
         if (mode == GpuLinearSolveMode::ROBUST) {
-            applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
+            applyRobustSingleMatrixConfig(ctx->linearSolver.solver.config);       // its own ordering: never set the ordering twice
         } else {
-            applyReorderAlg(ctx->solver.config, ctx->structure->nZeroImpedanceBranch > 0);
+            applyReorderAlg(ctx->linearSolver.solver.config, ctx->structure->nZeroImpedanceBranch > 0);
         }
-        CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
+        CUDSS_CHECK(cudssDataCreate(ctx->linearSolver.solver.handle, &ctx->linearSolver.solver.data));
     }
 
     if (mode == GpuLinearSolveMode::UBATCH) {

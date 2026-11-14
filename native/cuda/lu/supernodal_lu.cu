@@ -873,30 +873,12 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
 
 void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
                               cudaStream_t stream) {
-    if (width < 0 || width > lu.capacity) {
-        throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
-                                 + std::to_string(lu.capacity));
-    }
-    lu.width = width;
-    lu.hLaneMap.assign(laneMap, laneMap + width);
-    if (width == 0) {
-        return;
-    }
-    CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemsetAsync(lu.dPivotClamps.p, 0, width * sizeof(int), stream));
     // Values interleaved by scenario are read in place by the gathers; scenario-major ones are copied into the
     // lane-interleaved layout first, the fill entries zeroed.
-    const double* src = layout.interleaved ? vals : nullptr;
-    if (!layout.interleaved) {
-        const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
-        const dim3 valuesGrid((lu.nnzA + LU_TILE - 1) / LU_TILE, (width + LU_TILE - 1) / LU_TILE);
-        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-                nullptr, lu.dStoredOfA.as<int>(), vals, lu.dLu.as<double>());
-        if (lu.nFill > 0) {
-            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
-        }
+    if (!beginLaneFactorization(lu, vals, layout, laneMap, width, lu.dPivotClamps, lu.dStoredOfA, stream)) {
+        return;
     }
+    const double* src = layout.interleaved ? vals : nullptr;
     for (int l = 0; l + 1 < static_cast<int>(lu.levelStart.size()); l++) {
         const int entries = lu.levelEntryStart[l + 1] - lu.levelEntryStart[l];
         if (entries > 0) {

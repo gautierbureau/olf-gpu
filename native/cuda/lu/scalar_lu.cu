@@ -313,30 +313,12 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
 
 void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
                           cudaStream_t stream) {
-    if (width < 0 || width > lu.capacity) {
-        throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
-                                 + std::to_string(lu.capacity));
-    }
-    lu.width = width;
-    lu.hLaneMap.assign(laneMap, laneMap + width);
-    if (width == 0) {
+    // Values interleaved by scenario are read in place by the steps (initialEntry); scenario-major ones are copied into the
+    // lane-interleaved layout first, the fill entries zeroed.
+    if (!beginLaneFactorization(lu, vals, layout, laneMap, width, lu.dTrouble, lu.dEntryOfA, stream)) {
         return;
     }
-    CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemsetAsync(lu.dTrouble.p, 0, width * sizeof(int), stream));
-    // Values interleaved by scenario are read in place by the steps (initialEntry); scenario-major ones are copied into
-    // the lane-interleaved layout first, the fill entries zeroed.
     const double* src = layout.interleaved ? vals : nullptr;
-    if (!layout.interleaved) {
-        const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
-        const dim3 valuesGrid((lu.nnzA + LU_TILE - 1) / LU_TILE, (width + LU_TILE - 1) / LU_TILE);
-        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-                nullptr, lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
-        if (lu.nFill > 0) {
-            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
-        }
-    }
     for (int s = 0; s + 1 < static_cast<int>(lu.stepStart.size()); s++) {
         const int items = lu.stepStart[s + 1] - lu.stepStart[s];
         if (items == 0) {

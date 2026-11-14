@@ -6,9 +6,15 @@
 #ifndef OLF_GPU_LU_LU_LANES_CUH
 #define OLF_GPU_LU_LU_LANES_CUH
 
+#include <cuda_runtime.h>
+
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
+#include "../common/batch_layout.cuh"
+#include "../common/check.cuh"
 #include "../common/device_buf.cuh"
 
 namespace olfgpu {
@@ -47,6 +53,37 @@ void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
     if (!v.empty()) {
         buf.upload(v.data(), v.size() * sizeof(T));
     }
+}
+
+// The head of a factorization of width lanes, alike for both variants: the width checked against the capacity, the lane
+// map kept (host and device), the per-lane flags of the factorization (laneFlags) cleared, and scenario-major values
+// copied into the lane-interleaved layout (through entryOfA, the stored entry of each A entry) with the fill entries
+// zeroed. Interleaved values are left where they are, read in place by the factorization. False: no lane to factorize.
+template <typename Lu>
+bool beginLaneFactorization(Lu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width, DeviceBuf& laneFlags,
+                            DeviceBuf& entryOfA, cudaStream_t stream) {
+    if (width < 0 || width > lu.capacity) {
+        throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
+                                 + std::to_string(lu.capacity));
+    }
+    lu.width = width;
+    lu.hLaneMap.assign(laneMap, laneMap + width);
+    if (width == 0) {
+        return false;
+    }
+    CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemsetAsync(laneFlags.p, 0, width * sizeof(int), stream));
+    if (!layout.interleaved) {
+        const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
+        const dim3 valuesGrid((lu.nnzA + LU_TILE - 1) / LU_TILE, (width + LU_TILE - 1) / LU_TILE);
+        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.template as<int>(),
+                nullptr, entryOfA.template as<int>(), vals, lu.dLu.template as<double>());
+        if (lu.nFill > 0) {
+            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
+                    lu.capacity, lu.dFillEntry.template as<int>(), lu.dLu.template as<double>());
+        }
+    }
+    return true;
 }
 
 }  // namespace olfgpu

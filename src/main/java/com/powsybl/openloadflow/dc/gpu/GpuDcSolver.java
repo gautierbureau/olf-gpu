@@ -455,10 +455,12 @@ public final class GpuDcSolver implements AutoCloseable {
      * {@code DcLoadFlowEngine.distributeSlack} over the remaining buses when {@code distributed}, then the
      * target vector re-read, then the zeroed rows), solved into the base states as {@link #setChunkTargets}
      * does. {@code outTargets}, when non-null, receives the built columns (the bitwise check against the host).
+     * Columns equal in every respect (the same changes, zeroed rows and edits) are built and solved once: the returned
+     * map gives each column's base, the one {@link #woodburyChunk} takes.
      */
-    public void buildChunkTargets(ChunkTargetChanges changes, boolean distributed, int participationType, boolean useActiveLimits,
+    public int[] buildChunkTargets(ChunkTargetChanges changes, boolean distributed, int participationType, boolean useActiveLimits,
                                   int referenceGenerator, double[] outTargets) {
-        buildChunkTargets(handle(), changes.count(), changes.excludedPtr(), changes.excludedBus(), changes.loadPtr(), changes.loadBus(),
+        return buildChunkTargets(handle(), changes.count(), changes.excludedPtr(), changes.excludedBus(), changes.loadPtr(), changes.loadBus(),
                 changes.loadP(), changes.lostGeneratorPtr(), changes.lostGenerator(), changes.stationPtr(), changes.station(),
                 changes.generatorActionPtr(), changes.generatorActionGen(), changes.generatorActionTarget(),
                 changes.generatorActionInitialTarget(), changes.generatorActionParticipating(),
@@ -498,7 +500,7 @@ public final class GpuDcSolver implements AutoCloseable {
 
     private static native void readChunkStates(long handle, int[] contingencies, double[] out);
 
-    private static native void buildChunkTargets(long handle, int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus,
+    private static native int[] buildChunkTargets(long handle, int count, int[] excludedPtr, int[] excludedBus, int[] loadPtr, int[] loadBus,
                                                  double[] loadP, int[] lostGeneratorPtr, int[] lostGenerator, int[] stationPtr, int[] station,
                                                  int[] generatorActionPtr, int[] generatorActionGen, double[] generatorActionTarget,
                                                  double[] generatorActionInitialTarget, int[] generatorActionParticipating,

@@ -149,7 +149,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     /** How the modified target columns are built: on the device (with the injection tables' generator indices), or by
      *  the host replay; and whether the check hook compares the device columns with the replay's. */
     private record DeviceTargets(boolean onDevice, boolean check, int participationType, Map<LfGenerator, Integer> generatorIndex,
-                                 int referenceGenerator, boolean distributed, boolean useActiveLimits) {
+                                 int referenceGenerator, boolean distributed, boolean useActiveLimits, boolean[] zeroPTargetBuses) {
     }
 
     private record DeviceCandidate(ConnectivityBreakAnalysis.ConnectivityAnalysisResult connectivity,
@@ -548,17 +548,16 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             int[] ctgElem = elemList.stream().mapToInt(Integer::intValue).toArray();
             if (changes != null && nBases > 0) {
                 double[] built = checkTargets ? new double[n * nBases] : null;
-                solver.buildChunkTargets(changes.build(), context.getParameters().isDistributedSlack(), participationType,
-                        context.getParameters().getNetworkParameters().isUseActiveLimits(), assembly.referenceGeneratorIndex(), built);
+                buildOnDevice(solver, changes, context.getParameters().isDistributedSlack(), participationType,
+                        context.getParameters().getNetworkParameters().isUseActiveLimits(), assembly.referenceGeneratorIndex(), built, ctgBase);
                 deviceTargetCount += nBases;
                 if (built != null) {
                     targetMismatches += compareTargets(built, targets, n * nBases, n, targetMismatches);
                 }
-                tColumns += System.nanoTime() - tb0;
             } else {
-                tColumns += System.nanoTime() - tb0;
                 solver.setChunkTargets(targets, nBases);
             }
+            tColumns += System.nanoTime() - tb0;
             long tc0 = System.nanoTime();
             // states answered from stay on the device: only the values read come back (check hook: every state)
             int[] records = solver.woodburyChunk(ctgPtr, ctgElem, ctgBase, GpuViolationScreen.BAND, CAPACITY,
@@ -644,7 +643,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     strategyResultsByContingency,
                     monitoredBranchResults, stateFree, checkStateReader,
                     new DeviceTargets(deviceTargets, checkTargets, participationType, generatorIndex, assembly.referenceGeneratorIndex(),
-                            context.getParameters().isDistributedSlack(), context.getParameters().getNetworkParameters().isUseActiveLimits()));
+                            context.getParameters().isDistributedSlack(), context.getParameters().getNetworkParameters().isUseActiveLimits(),
+                            assembly.busesWithZeroPTarget()));
         }
         // leave the base state loaded, as the stock path's restore would
         equationSystem.getStateVector().set(preContingencyStates);
@@ -826,7 +826,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 List<ComputedElement> actionElements = strategySetup.actionElementsByLfAction().get(action);
                 if (actionElements != null) {
                     for (ComputedElement element : actionElements) {
-                        if (!toReconnect.contains(element.getLfBranch().getId())) {
+                        // opening a branch already out of the base case (inside a dead part: a bay with every breaker
+                        // retained) changes nothing: no element (its dead bus has no angle row to read)
+                        boolean noOp = element instanceof ComputedSwitchBranchElement sw && !sw.isEnabled() && sw.getLfBranch().isDisabled();
+                        if (!noOp && !toReconnect.contains(element.getLfBranch().getId())) {
                             elements.add(element);
                         }
                     }
@@ -906,7 +909,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             // the strategies' columns: built on the device (the contingency's changes, then the actions as row edits),
             // or replayed on the host when the device cannot place them; the check hook builds both
             long tc0 = System.nanoTime();
-            ChunkChanges changes = deviceTargets.onDevice() ? new ChunkChanges(deviceTargets.distributed(), parameters.getNetworkParameters()) : null;
+            ChunkChanges changes = deviceTargets.onDevice()
+                    ? new ChunkChanges(deviceTargets.distributed(), parameters.getNetworkParameters(), deviceTargets.zeroPTargetBuses()) : null;
             for (int i = 0; i < count && changes != null; i++) {
                 StrategyScenario sc = resolved.get(from + i);
                 PropagatedContingency propagated = sc.connectivity().getPropagatedContingency();
@@ -934,12 +938,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             tChanges += tc1 - tc0;
             if (changes != null) {
                 double[] built = deviceTargets.check() ? new double[n * count] : null;
-                solver.buildChunkTargets(changes.build(), deviceTargets.distributed(), deviceTargets.participationType(),
-                        deviceTargets.useActiveLimits(), deviceTargets.referenceGenerator(), built);
+                buildOnDevice(solver, changes, deviceTargets.distributed(), deviceTargets.participationType(),
+                        deviceTargets.useActiveLimits(), deviceTargets.referenceGenerator(), built, base);
                 DEVICE_TARGET_COUNT.addAndGet(count);
                 if (built != null) {
                     TARGET_MISMATCH_COUNT.addAndGet(compareTargets(built, targets, n * count, n, 0));
                 }
+
             } else {
                 solver.setChunkTargets(targets, count);
             }
@@ -1468,6 +1473,20 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         return fromStateOf;
     }
 
+    /**
+     * The chunk's columns built on the device, each base index ({@code -1}: the pre-contingency state, kept) mapped to its
+     * distinct column's: columns equal in every respect are built and solved once.
+     */
+    private static void buildOnDevice(GpuDcSolver solver, ChunkChanges changes, boolean distributed, int participationType, boolean useActiveLimits,
+                                      int referenceGenerator, double[] built, int[] bases) {
+        int[] distinctOf = solver.buildChunkTargets(changes.build(), distributed, participationType, useActiveLimits, referenceGenerator, built);
+        for (int i = 0; i < bases.length; i++) {
+            if (bases[i] >= 0) {
+                bases[i] = distinctOf[bases[i]];
+            }
+        }
+    }
+
     /** A strategy chunk's reads: which strategies are answered from their state, and their action branches. */
     private record StrategyChunkReads(boolean[] fromStateOf, int[][] uncoveredOf) {
     }
@@ -1739,14 +1758,18 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         private final boolean distributed;
         private final LfNetworkParameters networkParameters;
 
+        /** The buses whose zeroed P row is already an exact +0.0 (no change: not listed, so columns stay shareable), or null. */
+        private final boolean[] zeroPTargetBuses;
+
         /** Contingencies only: no operator strategy action. */
         ChunkChanges() {
-            this(false, null);
+            this(false, null, null);
         }
 
-        ChunkChanges(boolean distributed, LfNetworkParameters networkParameters) {
+        ChunkChanges(boolean distributed, LfNetworkParameters networkParameters, boolean[] zeroPTargetBuses) {
             this.distributed = distributed;
             this.networkParameters = networkParameters;
+            this.zeroPTargetBuses = zeroPTargetBuses;
         }
 
         private final List<Integer> zeroRowPtr = new ArrayList<>(List.of(0));
@@ -1837,7 +1860,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             int[] pColumns = busPColumns(equationSystem, lfNetwork);
             for (LfBus bus : candidate.connectivity().getDisabledBuses()) {
                 int column = pColumns[bus.getNum()];
-                if (column >= 0) {
+                boolean alreadyZero = zeroPTargetBuses != null && zeroPTargetBuses[bus.getNum()] && !changedLoads.containsKey(bus);
+                if (column >= 0 && !alreadyZero) {
                     zeroRow.add(column);
                 }
             }

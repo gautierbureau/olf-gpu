@@ -185,7 +185,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0)
                                              || (ctx->distributedSlack.distributedSlackOuterLoop && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
-                                             || ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0 || ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0
+                                             || ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0 || ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0 || ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0
                                              || ctx->nOverloadManagementSystems > 0);
     const int MAX_OUTER_LOOP_ITERATIONS = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     // per-bus PV→PQ count cap (OLF maxPqPvSwitch): 0 is OLF's "never switch back" and is honoured as such;
@@ -275,9 +275,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d fullLoadflow=%d\n",
                      ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
     }
-    if (fullLoadflow && ctx->nSecondaryVoltageControlControllerBuses > 0) {
+    if (fullLoadflow && ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
-        resetInstalledRows(ctx, ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>(),
+        resetInstalledRows(ctx, ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.as<double>(),
                            static_cast<size_t>(std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1)), nullptr, std::nan(""));
     }
     // no inner solve has converged yet: the start
@@ -327,7 +327,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (distributionInLoopOrder && ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         loopOrder[nLoops++] = GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;  // OLF order 3: AreaInterchangeControl
     }
-    if (ctx->nSecondaryVoltageControlControllerBuses > 0) {
+    if (ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL;  // OLF order 4: SecondaryVoltageControl
     }
     if (ctx->nMonitoringVoltageControllers > 0) {

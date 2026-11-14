@@ -310,30 +310,30 @@ __global__ void secondaryVoltageControlApplyBatch(SecondaryVoltageControlTables 
 
 static SecondaryVoltageControlTables secondaryVoltageControlTables(BatchSolverContext* ctx) {
     SecondaryVoltageControlTables T;
-    T.nControllerBuses = ctx->nSecondaryVoltageControlControllerBuses; T.nZones = ctx->nSecondaryVoltageControlZones; T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries;
-    T.controlledBusVRow = ctx->dSecondaryVoltageControlControlledBusVRow.as<int>(); T.controllerBusVRow = ctx->dSecondaryVoltageControlControllerBusVRow.as<int>(); T.reactiveLimitEntry = ctx->dSecondaryVoltageControlReactiveLimitEntry.as<int>();
-    T.baseTargetV = ctx->dSecondaryVoltageControlBaseTargetV.as<double>(); T.minQ = ctx->dSecondaryVoltageControlMinQ.as<double>();
-    T.maxQ = ctx->dSecondaryVoltageControlMaxQ.as<double>(); T.loadTargetQ = ctx->dSecondaryVoltageControlLoadTargetQ.as<double>();
-    T.reactiveTermStart = ctx->dSecondaryVoltageControlReactiveTermStart.as<int>(); T.reactiveTermKind = ctx->dSecondaryVoltageControlReactiveTermKind.as<int>();
-    T.reactiveTermSide = ctx->dSecondaryVoltageControlReactiveTermSide.as<int>();
-    T.reactiveTermElement = ctx->dSecondaryVoltageControlReactiveTermElement.as<int>(); T.reactiveTermShuntBRow = ctx->dSecondaryVoltageControlReactiveTermShuntBRow.as<int>();
-    T.zoneStart = ctx->dSecondaryVoltageControlZoneStart.as<int>(); T.zoneControllerBus = ctx->dSecondaryVoltageControlZoneControllerBus.as<int>();
-    T.zonePilotBusVRow = ctx->dSecondaryVoltageControlZonePilotBusVRow.as<int>(); T.zoneTargetV = ctx->dSecondaryVoltageControlZoneTargetV.as<double>();
-    T.controlledBusTargetV = ctx->dSecondaryVoltageControlTargetV.as<double>(); T.k0 = ctx->dSecondaryVoltageControlK0.as<double>();
-    T.jk = ctx->dSecondaryVoltageControlJk.as<double>(); T.jvpp = ctx->dSecondaryVoltageControlJvpp.as<double>(); T.secondaryVoltageControlReactiveLimitTargetV = ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>();
-    T.controllerBusEnabled = ctx->dSecondaryVoltageControlControllerBusEnabled.as<char>(); T.needsAdjustment = ctx->dSecondaryVoltageControlNeedsAdjustment.as<char>(); T.rejected = ctx->dSecondaryVoltageControlRejected.as<char>();
-    T.minPlausibleV = ctx->secondaryVoltageControlMinPlausibleTargetV; T.maxPlausibleV = ctx->secondaryVoltageControlMaxPlausibleTargetV;
+    T.nControllerBuses = ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses; T.nZones = ctx->secondaryVoltageControl.nSecondaryVoltageControlZones; T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries;
+    T.controlledBusVRow = ctx->secondaryVoltageControl.dSecondaryVoltageControlControlledBusVRow.as<int>(); T.controllerBusVRow = ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusVRow.as<int>(); T.reactiveLimitEntry = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitEntry.as<int>();
+    T.baseTargetV = ctx->secondaryVoltageControl.dSecondaryVoltageControlBaseTargetV.as<double>(); T.minQ = ctx->secondaryVoltageControl.dSecondaryVoltageControlMinQ.as<double>();
+    T.maxQ = ctx->secondaryVoltageControl.dSecondaryVoltageControlMaxQ.as<double>(); T.loadTargetQ = ctx->secondaryVoltageControl.dSecondaryVoltageControlLoadTargetQ.as<double>();
+    T.reactiveTermStart = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveTermStart.as<int>(); T.reactiveTermKind = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveTermKind.as<int>();
+    T.reactiveTermSide = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveTermSide.as<int>();
+    T.reactiveTermElement = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveTermElement.as<int>(); T.reactiveTermShuntBRow = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveTermShuntBRow.as<int>();
+    T.zoneStart = ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneStart.as<int>(); T.zoneControllerBus = ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneControllerBus.as<int>();
+    T.zonePilotBusVRow = ctx->secondaryVoltageControl.dSecondaryVoltageControlZonePilotBusVRow.as<int>(); T.zoneTargetV = ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneTargetV.as<double>();
+    T.controlledBusTargetV = ctx->secondaryVoltageControl.dSecondaryVoltageControlTargetV.as<double>(); T.k0 = ctx->secondaryVoltageControl.dSecondaryVoltageControlK0.as<double>();
+    T.jk = ctx->secondaryVoltageControl.dSecondaryVoltageControlJk.as<double>(); T.jvpp = ctx->secondaryVoltageControl.dSecondaryVoltageControlJvpp.as<double>(); T.secondaryVoltageControlReactiveLimitTargetV = ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.as<double>();
+    T.controllerBusEnabled = ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusEnabled.as<char>(); T.needsAdjustment = ctx->secondaryVoltageControl.dSecondaryVoltageControlNeedsAdjustment.as<char>(); T.rejected = ctx->secondaryVoltageControl.dSecondaryVoltageControlRejected.as<char>();
+    T.minPlausibleV = ctx->secondaryVoltageControl.secondaryVoltageControlMinPlausibleTargetV; T.maxPlausibleV = ctx->secondaryVoltageControl.secondaryVoltageControlMaxPlausibleTargetV;
     return T;
 }
 
 // Per-solve reset. Secondary voltage control: zone targets back at the network's own, nothing adjusted yet.
 void secondaryVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
-    const size_t nc = static_cast<size_t>(ctx->nSecondaryVoltageControlControllerBuses);
+    const size_t nc = static_cast<size_t>(ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlTargetV.as<double>(), nc, ctx->hSecondaryVoltageControlBaseTargetV.data());
-    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlNeedsAdjustment.as<char>(), 1, nullptr, char(0));
-    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlRejected.as<char>(), 1, nullptr, char(0));
-    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlControllerBusEnabled.as<char>(), nc, nullptr, char(1));
+    resetInstalledRows(ctx, ctx->secondaryVoltageControl.dSecondaryVoltageControlTargetV.as<double>(), nc, ctx->secondaryVoltageControl.hSecondaryVoltageControlBaseTargetV.data());
+    resetInstalledRows(ctx, ctx->secondaryVoltageControl.dSecondaryVoltageControlNeedsAdjustment.as<char>(), 1, nullptr, char(0));
+    resetInstalledRows(ctx, ctx->secondaryVoltageControl.dSecondaryVoltageControlRejected.as<char>(), 1, nullptr, char(0));
+    resetInstalledRows(ctx, ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusEnabled.as<char>(), nc, nullptr, char(1));
 }
 
 void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
@@ -342,7 +342,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& outer = drv.outer;
     std::vector<char>& active = drv.active;
     std::vector<char>& loopRejected = drv.loopRejected;
-    int nC = ctx->nSecondaryVoltageControlControllerBuses;
+    int nC = ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses;
     if (nC <= 0) return;
     if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
             && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
@@ -350,13 +350,13 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
         return;
     }
-    CUDA_CHECK(cudaMemsetAsync(ctx->dSecondaryVoltageControlNeedsAdjustment.p, 0, nS, ctx->stream));
-    secondaryVoltageControlTriggerBatch<<<grid(ctx->nSecondaryVoltageControlZones * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
+    CUDA_CHECK(cudaMemsetAsync(ctx->secondaryVoltageControl.dSecondaryVoltageControlNeedsAdjustment.p, 0, nS, ctx->stream));
+    secondaryVoltageControlTriggerBatch<<<grid(ctx->secondaryVoltageControl.nSecondaryVoltageControlZones * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
             ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimits.dReactiveLimitSavedRowMode.as<char>(),
             ctx->dMode.as<int>(), ctx->dTarget.as<double>());
     std::vector<char> need(nS);
-    CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSecondaryVoltageControlNeedsAdjustment.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->secondaryVoltageControl.dSecondaryVoltageControlNeedsAdjustment.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     bool any = false;
     for (char c : need) any |= c != 0;
@@ -366,7 +366,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     fillActiveBatch(ctx, drv, false);
     bool first = true;
     for (int i = 0; i < nC; i++) {
-        int row = ctx->structure->rowMap[ctx->hSecondaryVoltageControlControlledBusVRow[i]];
+        int row = ctx->structure->rowMap[ctx->secondaryVoltageControl.hSecondaryVoltageControlControlledBusVRow[i]];
         if (row < 0) continue;                           // controlled bus not a live identity: insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
@@ -381,35 +381,35 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
     // ---- the zone systems: assembled into device memory, solved by cuBLAS's BATCHED dense LU ----
-    if (ctx->secondaryVoltageControlBlasHandle == nullptr) {
-        CUBLAS_CHECK(cublasCreate(&ctx->secondaryVoltageControlBlasHandle));
+    if (ctx->secondaryVoltageControl.secondaryVoltageControlBlasHandle == nullptr) {
+        CUBLAS_CHECK(cublasCreate(&ctx->secondaryVoltageControl.secondaryVoltageControlBlasHandle));
     }
-    CUBLAS_CHECK(cublasSetStream(ctx->secondaryVoltageControlBlasHandle, ctx->stream));
+    CUBLAS_CHECK(cublasSetStream(ctx->secondaryVoltageControl.secondaryVoltageControlBlasHandle, ctx->stream));
     secondaryVoltageControlAssembleBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
-            ctx->dOuterLoopCheckActive.as<char>(), ctx->dSecondaryVoltageControlControllerBusZone.as<int>(), ctx->dX.as<double>(),
-            ctx->dSecondaryVoltageControlZoneMatrix.as<double>(), ctx->dSecondaryVoltageControlZoneRightHandSide.as<double>());
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusZone.as<int>(), ctx->dX.as<double>(),
+            ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrix.as<double>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSide.as<double>());
     secondaryVoltageControlPointersBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, nC,
-            ctx->dSecondaryVoltageControlZoneMatrix.as<double>(), ctx->dSecondaryVoltageControlZoneRightHandSide.as<double>(),
-            reinterpret_cast<double**>(ctx->dSecondaryVoltageControlZoneMatrixPointers.p), reinterpret_cast<double**>(ctx->dSecondaryVoltageControlZoneRightHandSidePointers.p));
-    CUBLAS_CHECK(cublasDgetrfBatched(ctx->secondaryVoltageControlBlasHandle, nC,
-            reinterpret_cast<double**>(ctx->dSecondaryVoltageControlZoneMatrixPointers.p), nC,
-            ctx->dSecondaryVoltageControlZonePivots.as<int>(), ctx->dSecondaryVoltageControlZoneFactorizationInfo.as<int>(), nS));
+            ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrix.as<double>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSide.as<double>(),
+            reinterpret_cast<double**>(ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrixPointers.p), reinterpret_cast<double**>(ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSidePointers.p));
+    CUBLAS_CHECK(cublasDgetrfBatched(ctx->secondaryVoltageControl.secondaryVoltageControlBlasHandle, nC,
+            reinterpret_cast<double**>(ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrixPointers.p), nC,
+            ctx->secondaryVoltageControl.dSecondaryVoltageControlZonePivots.as<int>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneFactorizationInfo.as<int>(), nS));
     int trsInfo = 0;
-    CUBLAS_CHECK(cublasDgetrsBatched(ctx->secondaryVoltageControlBlasHandle, CUBLAS_OP_N, nC, 1,
-            reinterpret_cast<const double* const*>(ctx->dSecondaryVoltageControlZoneMatrixPointers.p), nC,
-            ctx->dSecondaryVoltageControlZonePivots.as<int>(),
-            reinterpret_cast<double**>(ctx->dSecondaryVoltageControlZoneRightHandSidePointers.p), nC, &trsInfo, nS));
+    CUBLAS_CHECK(cublasDgetrsBatched(ctx->secondaryVoltageControl.secondaryVoltageControlBlasHandle, CUBLAS_OP_N, nC, 1,
+            reinterpret_cast<const double* const*>(ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrixPointers.p), nC,
+            ctx->secondaryVoltageControl.dSecondaryVoltageControlZonePivots.as<int>(),
+            reinterpret_cast<double**>(ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSidePointers.p), nC, &trsInfo, nS));
     if (trsInfo != 0) {
         throw std::runtime_error("cublasDgetrsBatched rejected its arguments");
     }
     secondaryVoltageControlCommitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS,
-            ctx->dOuterLoopCheckActive.as<char>(), ctx->dSecondaryVoltageControlZoneFactorizationInfo.as<int>(), ctx->dSecondaryVoltageControlZoneRightHandSide.as<double>(),
+            ctx->dOuterLoopCheckActive.as<char>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneFactorizationInfo.as<int>(), ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSide.as<double>(),
             ctx->dOuterLoopUnstable.as<char>());
     secondaryVoltageControlApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(secondaryVoltageControlTables(ctx), nS, n,
             ctx->dOuterLoopCheckActive.as<char>(), ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->dTarget.as<double>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> rej(nS);
-    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSecondaryVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(rej.data(), ctx->secondaryVoltageControl.dSecondaryVoltageControlRejected.p, nS, cudaMemcpyDeviceToHost));
     int nRej = 0;
     for (int s2 = 0; s2 < nS; s2++) {
         if (rej[s2]) { loopRejected[s2] = 1; nRej++; traceReject(s2, "svc-kernel-reject", outer, 0); }
@@ -418,7 +418,7 @@ void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
         int nNeed = 0;
         for (char c : need) nNeed += c ? 1 : 0;
         std::fprintf(stderr, "SVC_KERNEL nS=%d nControllerBuses=%d nZones=%d adjusting=%d rejected=%d\n",
-                     nS, nC, ctx->nSecondaryVoltageControlZones, nNeed, nRej);
+                     nS, nC, ctx->secondaryVoltageControl.nSecondaryVoltageControlZones, nNeed, nRej);
     }
 }
 

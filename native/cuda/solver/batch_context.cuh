@@ -30,6 +30,7 @@
 #include "context/distributed_slack_context.cuh"
 #include "context/transformer_voltage_control_context.cuh"
 #include "context/incremental_transformer_voltage_control_context.cuh"
+#include "context/shunt_voltage_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -300,12 +301,7 @@ struct BatchSolverContext {
     DeviceBuf dGeneratorVoltageControlFreezeVRow, dGeneratorVoltageControlFreezeLoadTargetQ;                       // per candidate
     DeviceBuf dGeneratorVoltageControlFrozen, dGeneratorVoltageControlFreezeSavedMode, dGeneratorVoltageControlFreezeSavedTarget;   // per (scenario, candidate)
     DeviceBuf dGeneratorVoltageControlFreezeReactiveLimitEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
-    // DISCRETE SHUNT VOLTAGE CONTROL — GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL (OLF order 10): ShuntVoltageControlOuterLoop
-    // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
-    int nShuntVoltageControlMembers = 0, nShuntVoltageControlGroups = 0, nShuntVoltageControlDeltaRows = 0, nShuntVoltageControlShuntCompensators = 0, shuntVoltageControlEntryOn = 0;
-    DeviceBuf dShuntVoltageControlGroupMemberStart, dShuntVoltageControlDeltaStart, dShuntVoltageControlDeltaRow, dShuntVoltageControlDeltaModeOn, dShuntVoltageControlDeltaModeOff, dShuntVoltageControlDeltaTargetOn, dShuntVoltageControlDeltaTargetOff;
-    DeviceBuf dShuntVoltageControlMemberShuntBRow, dShuntVoltageControlMemberElement, dShuntVoltageControlMemberShuntCompensatorStart, dShuntVoltageControlSectionStart, dShuntVoltageControlSectionB, dShuntVoltageControlShuntCompensatorMinPosition, dShuntVoltageControlShuntCompensatorBasePosition;
-    DeviceBuf dShuntVoltageControlGroupStep, dShuntVoltageControlMemberState, dShuntVoltageControlMemberContinuousB, dShuntVoltageControlShuntCompensatorPosition, dShuntVoltageControlSavedDeltaTarget;
+    ShuntVoltageControlContext shuntVoltageControl;
 
     SlotTable frozenRows{1, 0};                            // per slot: the rows an islanding outage froze to a flat identity state
     SlotRows<double> reactiveLimitSeedTargetQ{std::numeric_limits<double>::quiet_NaN()};   // per (slot, entry): the frozen target Q a continued

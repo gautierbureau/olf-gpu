@@ -178,7 +178,7 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL) {
         incrementalShuntVoltageControlStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL) {
-        if (ctx->nPhaseControlControllerBranches > 0) phaseControlStep(ctx, drv); else incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::ACTIVE_POWER) | controlledFlowMaskBit(GpuControlledFlow::CURRENT));  // continuous, or incremental phase
+        if (ctx->phaseControl.nPhaseControlControllerBranches > 0) phaseControlStep(ctx, drv); else incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::ACTIVE_POWER) | controlledFlowMaskBit(GpuControlledFlow::CURRENT));  // continuous, or incremental phase
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL) {
         incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::REACTIVE_POWER));
     } else if (loopKind == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL) {

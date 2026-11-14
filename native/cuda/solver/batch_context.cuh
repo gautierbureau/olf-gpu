@@ -34,6 +34,7 @@
 #include "context/incremental_shunt_voltage_control_context.cuh"
 #include "context/secondary_voltage_control_context.cuh"
 #include "context/incremental_flow_control_context.cuh"
+#include "context/phase_control_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -253,15 +254,7 @@ struct BatchSolverContext {
     IncrementalTransformerVoltageControlContext incrementalTransformerVoltageControl;
     IncrementalShuntVoltageControlContext incrementalShuntVoltageControl;
     IncrementalFlowControlContext incrementalFlowControl;
-    // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
-    // phase slot: kind = the GpuPhaseControlMode: CONTROLLER (a1 solved free under row mode BRANCH_TARGET_P for the first
-    // solve, then switched off and rounded to the closest tap at the loop's first check), LIMITER (from the second
-    // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
-    int nPhaseControlControllerBranches = 0;
-    DeviceBuf dPhaseControlMode, dPhaseControlA1Row, dPhaseControlControlledSide, dPhaseControlCurrentLimit, dPhaseControlElement, dPhaseControlTapStart, dPhaseControlTapRows, dPhaseControlBaseTap;
-    DeviceBuf dPhaseControlTap, dPhaseControlAppliedTap, dPhaseControlCheckCount;                // per (scenario, controller) tap; per scenario check count
-    std::vector<int> hPhaseControlElement, hPhaseControlTapStart, hPhaseControlBaseTap;
-    std::vector<double> hPhaseControlTapRows;
+    PhaseControlContext phaseControl;
     TransformerVoltageControlContext transformerVoltageControl;
     SecondaryVoltageControlContext secondaryVoltageControl;
 

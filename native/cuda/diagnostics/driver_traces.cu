@@ -64,7 +64,7 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, int nC
             case GpuOuterLoopKind::REACTIVE_LIMITS:           kindName = "ReactiveLimits"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL:   kindName = "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
-            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->phaseControl.nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL:  kindName = "TransformerReactivePowerControl"; break;
             case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->transformerVoltageControl.transformerVoltageControlMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;

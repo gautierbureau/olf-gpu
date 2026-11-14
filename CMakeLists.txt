@@ -189,6 +189,7 @@ add_library(olfgpu SHARED
     native/cuda/diagnostics/batched_lu_compare.cu
     native/cuda/diagnostics/driver_traces.cu
     native/cuda/diagnostics/matrix_scan.cu
+    native/cuda/diagnostics/structure_fingerprint.cu
     native/cuda/sa/olf_gpu_violations.cu
     native/cuda/lu/amd_order.cu
     ${SUITESPARSE_AMD_SOURCES}

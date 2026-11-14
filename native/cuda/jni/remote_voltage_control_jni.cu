@@ -112,20 +112,20 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchReMergedVol
     if (ctx == nullptr) {
         return;
     }
-    std::vector<int> slots = ctx->nReactiveLimitEntries > 0 ? jniInts(env, jSlots) : std::vector<int>();
+    std::vector<int> slots = ctx->reactiveLimits.nReactiveLimitEntries > 0 ? jniInts(env, jSlots) : std::vector<int>();
     std::vector<double> voltageTargets = jniDoubles(env, jVoltageTargets);
     SlotRuns runs = slotRuns(slots, {jniInts(env, jMainEntries)}, jniInts(env, jControllerCounts), jniInts(env, jControllerEntries));
     ctx->reMergedVoltageTargets.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(slots.size()), runs.entryInts.data(),
                                         voltageTargets.data());
     ctx->reMergedVoltageTargetControllers.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2),
                                                   runs.itemInts.data(), nullptr);
-    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-    if (ctx->reMergedVoltageTargets.entries() > 0 && ctx->dReactiveLimitReMergedVoltageRow.cap < scenarioEntries * sizeof(int)) {
+    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries;
+    if (ctx->reMergedVoltageTargets.entries() > 0 && ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.cap < scenarioEntries * sizeof(int)) {
         // the bank's first re-merge: nothing held anywhere (a fresh allocation is zeroed, the rows are -1); the solve's
         // start resets its installed slots' rows (launchReMergedVoltageTargetRowUpdate), never a slot still solving
-        ctx->dReactiveLimitHoldsReMergedVoltageTarget.ensure(scenarioEntries);
-        ctx->dReactiveLimitReMergedVoltageRow.ensure(scenarioEntries * sizeof(int));
-        CUDA_CHECK(cudaMemset(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int)));
+        ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.ensure(scenarioEntries);
+        ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.ensure(scenarioEntries * sizeof(int));
+        CUDA_CHECK(cudaMemset(ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int)));
     }
 }
 

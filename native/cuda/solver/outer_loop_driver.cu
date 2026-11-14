@@ -182,7 +182,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before. The
     // distributed-slack and reactive-limit tables are packed whatever the run's loops: they count only for a run
     // that has the loop (distributedSlackOuterLoop / reactiveLimitsOuterLoop).
-    bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0)
+    bool fullLoadflow = !deviceFixedIter && ((ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0)
                                              || (ctx->distributedSlackOuterLoop && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution))
                                              || ctx->nMonitoringVoltageControllers > 0 || ctx->nIncrementalTransformerVoltageControlControllerBranches > 0 || ctx->nIncrementalShuntVoltageControlControllerShunts > 0 || ctx->nIncrementalFlowControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0
                                              || ctx->nTransformerVoltageControlMembers > 0 || ctx->nShuntVoltageControlMembers > 0 || ctx->nSecondaryVoltageControlControllerBuses > 0
@@ -211,7 +211,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // A lost voltage-controlling SVC also takes its share of the entry's quadratic limit coefficients (an SVC's
     // limit is its susceptance times v^2): per (scenario, entry) coefficients, read by the reactive-limits check
     // in place of the run-constant ones. Built only when some override carries such a share.
-    const SlotTable& reactiveLimitDeltaOverrides = ctx->reactiveLimitDeltaOverrides;
+    const SlotTable& reactiveLimitDeltaOverrides = ctx->reactiveLimits.reactiveLimitDeltaOverrides;
     bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
     hasPerScenarioSvcSusceptanceLimits = false;
     for (int t = 0; t < nS && !hasPerScenarioSvcSusceptanceLimits; t++) {
@@ -219,11 +219,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             hasPerScenarioSvcSusceptanceLimits = reactiveLimitDeltaOverrides.doubleOf(t, k, 3) != 0.0 || reactiveLimitDeltaOverrides.doubleOf(t, k, 4) != 0.0;
         }
     }
-    if (hasPerScenarioSvcSusceptanceLimits && ctx->nReactiveLimitEntries > 0) {
-        size_t nReactiveLimitEntries = static_cast<size_t>(ctx->nReactiveLimitEntries);
+    if (hasPerScenarioSvcSusceptanceLimits && ctx->reactiveLimits.nReactiveLimitEntries > 0) {
+        size_t nReactiveLimitEntries = static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries);
         std::vector<double> bmin(nReactiveLimitEntries), bmax(nReactiveLimitEntries);
-        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->dReactiveLimitSvcMinB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->dReactiveLimitSvcMaxB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(bmin.data(), ctx->reactiveLimits.dReactiveLimitSvcMinB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(bmax.data(), ctx->reactiveLimits.dReactiveLimitSvcMaxB.p, nReactiveLimitEntries * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<double> dynMin(static_cast<size_t>(nS) * nReactiveLimitEntries), dynMax(static_cast<size_t>(nS) * nReactiveLimitEntries);
         for (int t = 0; t < nS; t++) {
             std::copy(bmin.begin(), bmin.end(), dynMin.begin() + static_cast<size_t>(t) * nReactiveLimitEntries);
@@ -236,23 +236,23 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 dynMax[at] += reactiveLimitDeltaOverrides.doubleOf(t, k, 4);
             }
         }
-        if (!ctx->dReactiveLimitSvcMinBPerScenario.p) {
-            ctx->dReactiveLimitSvcMinBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
-            ctx->dReactiveLimitSvcMaxBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
+        if (!ctx->reactiveLimits.dReactiveLimitSvcMinBPerScenario.p) {
+            ctx->reactiveLimits.dReactiveLimitSvcMinBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
+            ctx->reactiveLimits.dReactiveLimitSvcMaxBPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * nReactiveLimitEntries * sizeof(double));
         }
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMinBPerScenario.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSvcMinBPerScenario.p, dynMin.data(), dynMin.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSvcMaxBPerScenario.p, dynMax.data(), dynMax.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
-    drv.usePerScenarioReactiveLimits = ctx->nReactiveLimitEntries > 0 && (ctx->nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->nForcedTargetQLimitEntries > 0);
+    drv.usePerScenarioReactiveLimits = ctx->reactiveLimits.nReactiveLimitEntries > 0 && (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 || reactiveLimitDeltaOverrides.entries() > 0 || ctx->nForcedTargetQLimitEntries > 0);
     // The per-scenario limits exist, and the seed computes each installed scenario's (solve_seed.cu), whether or not this
     // call's scenarios read them: an install whose overrides turn usePerScenarioReactiveLimits on, while scenarios of
     // earlier calls still solve, has them read theirs. Curves allocate these on their own table upload; a Q override
     // alone must too, and a guard that names only ONE of them silently leaves the others null on a curve network
     // (measured: the whole precompute fell back to the CPU).
-    if (ctx->nReactiveLimitEntries > 0 && (!ctx->dReactiveLimitMinQPerScenario.p || !ctx->dReactiveLimitLoadQPerScenario.p)) {
-        ctx->dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+    if (ctx->reactiveLimits.nReactiveLimitEntries > 0 && (!ctx->reactiveLimits.dReactiveLimitMinQPerScenario.p || !ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.p)) {
+        ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
     }
     int maxOuter = fullLoadflow ? 8 * MAX_OUTER_LOOP_ITERATIONS : 1;
     // The two kernels that lay a group's rows out from the CURRENT PV/PQ states (the RL pass runs them after
@@ -273,12 +273,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     drv.reactiveLimitsAuditLog.assign(drv.reactiveLimitsAuditOn ? nS : 0, {});
     if (traceOn(Trace::BATCH_TRACE) && nS == 1) {
         std::fprintf(stderr, "CTX_FLAGS nS=1 nReactiveLimitEntries=%d nReactiveLimitRemoteEntries=%d hasDistrQRelocationGroups=%d nReactiveRelocationGroups=%d nDistrQ=%d nDistributedSlackBuses=%d nDistributedSlackGenerators=%d nZeroImpedanceBranch=%d nBaseClosedZeroImpedanceBranches=%d nRemoteMemberReactiveTerms=%d fullLoadflow=%d\n",
-                     ctx->nReactiveLimitEntries, ctx->nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
+                     ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.nReactiveLimitRemoteEntries, ctx->hasDistrQRelocationGroups ? 1 : 0, ctx->structure->nReactiveRelocationGroups, ctx->nDistrQ, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->nZeroImpedanceBranch, ctx->nBaseClosedZeroImpedanceBranches, ctx->nRemoteMemberReactiveTerms, fullLoadflow ? 1 : 0);
     }
     if (fullLoadflow && ctx->nSecondaryVoltageControlControllerBuses > 0) {
         // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
         resetInstalledRows(ctx, ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>(),
-                           static_cast<size_t>(std::max(ctx->nReactiveLimitEntries, 1)), nullptr, std::nan(""));
+                           static_cast<size_t>(std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1)), nullptr, std::nan(""));
     }
     // no inner solve has converged yet: the start
     copyInstalledRows(ctx, ctx->dXLastConv.as<double>(), ctx->dX.as<double>(), static_cast<size_t>(n));
@@ -334,7 +334,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         loopOrder[nLoops++] = GpuOuterLoopKind::MONITORING_VOLTAGE;  // OLF order 5: MonitoringVoltage
     }
     // the run's loop, not the table alone: the table also holds the stand-by SVCs MonitoringVoltage activates
-    if (ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {
+    if (ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0) {
         loopOrder[nLoops++] = GpuOuterLoopKind::REACTIVE_LIMITS;  // OLF order 6: ReactiveLimits
     }
     if (ctx->nIncrementalPhaseControlControllerBranches > 0 || ctx->nPhaseControlControllerBranches > 0) {

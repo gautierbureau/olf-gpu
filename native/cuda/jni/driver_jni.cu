@@ -13,6 +13,6 @@ OLF_JNI(ac_solver_gpu, DriverNative, setBatchOuterLoops)(
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
         ctx->distributedSlackOuterLoop = distributedSlackOuterLoop == JNI_TRUE;
-        ctx->reactiveLimitsOuterLoop = reactiveLimitsOuterLoop == JNI_TRUE;
+        ctx->reactiveLimits.reactiveLimitsOuterLoop = reactiveLimitsOuterLoop == JNI_TRUE;
     }
 }

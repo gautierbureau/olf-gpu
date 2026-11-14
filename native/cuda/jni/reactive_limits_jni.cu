@@ -20,60 +20,60 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveCapabilityCurves
     if (ctx == nullptr) {
         return;
     }
-    ctx->reactiveCapabilityCurveHasHvdc = false;
+    ctx->reactiveLimits.reactiveCapabilityCurveHasHvdc = false;
     if (jReactiveCapabilityCurveIndices == nullptr || jReactiveCapabilityCurveParameters == nullptr || jReactiveCapabilityCurvePoints == nullptr) {
-        ctx->nReactiveCapabilityCurves = 0;
+        ctx->reactiveLimits.nReactiveCapabilityCurves = 0;
         return;
     }
     int nReactiveCapabilityCurves = env->GetArrayLength(jReactiveCapabilityCurveIndices) / 5;   // stride 5: {reactiveLimitEntry, pRow, ptsOff, npts, distributedSlackGeneratorIndex}
     if (nReactiveCapabilityCurves == 0) {
-        ctx->nReactiveCapabilityCurves = 0;
+        ctx->reactiveLimits.nReactiveCapabilityCurves = 0;
         return;
     }
     if (jReactiveCapabilityCurveHvdcStation != nullptr) {                      // stride 2 per entry: {hvdc, GpuTwoSides side}, -1 / NONE for a plain generator
         jint* reactiveCapabilityCurveHvdcStation = env->GetIntArrayElements(jReactiveCapabilityCurveHvdcStation, nullptr);
-        ctx->dReactiveCapabilityCurveHvdcStation.upload(reactiveCapabilityCurveHvdcStation, static_cast<size_t>(nReactiveCapabilityCurves) * 2 * sizeof(int));
+        ctx->reactiveLimits.dReactiveCapabilityCurveHvdcStation.upload(reactiveCapabilityCurveHvdcStation, static_cast<size_t>(nReactiveCapabilityCurves) * 2 * sizeof(int));
         env->ReleaseIntArrayElements(jReactiveCapabilityCurveHvdcStation, reactiveCapabilityCurveHvdcStation, JNI_ABORT);
-        ctx->reactiveCapabilityCurveHasHvdc = true;
+        ctx->reactiveLimits.reactiveCapabilityCurveHasHvdc = true;
     }
     jint* reactiveCapabilityCurveIndices = env->GetIntArrayElements(jReactiveCapabilityCurveIndices, nullptr);
     jdouble* reactiveCapabilityCurveParameters = env->GetDoubleArrayElements(jReactiveCapabilityCurveParameters, nullptr);
     jdouble* reactiveCapabilityCurvePoints = env->GetDoubleArrayElements(jReactiveCapabilityCurvePoints, nullptr);
-    ctx->dReactiveCapabilityCurveIndices.upload(reactiveCapabilityCurveIndices, static_cast<size_t>(nReactiveCapabilityCurves) * 5 * sizeof(int));
-    ctx->dReactiveCapabilityCurveParameters.upload(reactiveCapabilityCurveParameters, static_cast<size_t>(nReactiveCapabilityCurves) * 5 * sizeof(double));
-    ctx->dReactiveCapabilityCurvePoints.upload(reactiveCapabilityCurvePoints, static_cast<size_t>(env->GetArrayLength(jReactiveCapabilityCurvePoints)) * sizeof(double));
+    ctx->reactiveLimits.dReactiveCapabilityCurveIndices.upload(reactiveCapabilityCurveIndices, static_cast<size_t>(nReactiveCapabilityCurves) * 5 * sizeof(int));
+    ctx->reactiveLimits.dReactiveCapabilityCurveParameters.upload(reactiveCapabilityCurveParameters, static_cast<size_t>(nReactiveCapabilityCurves) * 5 * sizeof(double));
+    ctx->reactiveLimits.dReactiveCapabilityCurvePoints.upload(reactiveCapabilityCurvePoints, static_cast<size_t>(env->GetArrayLength(jReactiveCapabilityCurvePoints)) * sizeof(double));
     // The curves of each reactive-limit entry, CSR (pack order kept within an entry): reactiveCapabilityCurveLimitsBatch runs
     // one thread per (entry, scenario) and walked EVERY curve to find its own.
     {
-        std::vector<int> ptr(static_cast<size_t>(ctx->nReactiveLimitEntries) + 1, 0);
+        std::vector<int> ptr(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) + 1, 0);
         std::vector<int> list(nReactiveCapabilityCurves);
         for (int g = 0; g < nReactiveCapabilityCurves; g++) {
             int e = reactiveCapabilityCurveIndices[g * 5];
-            if (e < 0 || e >= ctx->nReactiveLimitEntries) {
+            if (e < 0 || e >= ctx->reactiveLimits.nReactiveLimitEntries) {
                 env->ReleaseIntArrayElements(jReactiveCapabilityCurveIndices, reactiveCapabilityCurveIndices, JNI_ABORT);
                 env->ReleaseDoubleArrayElements(jReactiveCapabilityCurveParameters, reactiveCapabilityCurveParameters, JNI_ABORT);
                 env->ReleaseDoubleArrayElements(jReactiveCapabilityCurvePoints, reactiveCapabilityCurvePoints, JNI_ABORT);
-                ctx->nReactiveCapabilityCurves = 0;
+                ctx->reactiveLimits.nReactiveCapabilityCurves = 0;
                 env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                               "GPU batch: a curve's reactive-limit entry is outside the pack");
                 return;
             }
             ptr[e + 1]++;
         }
-        for (int e = 0; e < ctx->nReactiveLimitEntries; e++) ptr[e + 1] += ptr[e];
+        for (int e = 0; e < ctx->reactiveLimits.nReactiveLimitEntries; e++) ptr[e + 1] += ptr[e];
         std::vector<int> cursor(ptr.begin(), ptr.end() - 1);
         for (int g = 0; g < nReactiveCapabilityCurves; g++) list[cursor[reactiveCapabilityCurveIndices[g * 5]]++] = g;
-        ctx->dReactiveLimitEntryCurveStart.upload(ptr.data(), ptr.size() * sizeof(int));
-        ctx->dReactiveLimitEntryCurves.upload(list.data(), list.size() * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitEntryCurveStart.upload(ptr.data(), ptr.size() * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitEntryCurves.upload(list.data(), list.size() * sizeof(int));
     }
-    ctx->dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
-    ctx->dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
-    ctx->dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitMinQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries * sizeof(double));
     env->ReleaseIntArrayElements(jReactiveCapabilityCurveIndices, reactiveCapabilityCurveIndices, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jReactiveCapabilityCurveParameters, reactiveCapabilityCurveParameters, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jReactiveCapabilityCurvePoints, reactiveCapabilityCurvePoints, JNI_ABORT);
-    ctx->nReactiveCapabilityCurves = nReactiveCapabilityCurves;
-    ctx->reactiveCapabilityCurveExtrapolate = extrapolate;
+    ctx->reactiveLimits.nReactiveCapabilityCurves = nReactiveCapabilityCurves;
+    ctx->reactiveLimits.reactiveCapabilityCurveExtrapolate = extrapolate;
 }
 
 // forceTargetQInReactiveLimits channel (GpuBatchForcedTargetQ): forcedTargetQIndices stride 7 {qRow, distributedSlackGeneratorIndex, ptsOff, npts,
@@ -132,12 +132,12 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitStrongestPv
     if (ctx == nullptr) {
         return;
     }
-    ctx->hasReactiveLimitStrongestPvKeys = 0;
-    if (ctx->nReactiveLimitEntries == 0 || jNomV == nullptr || jPRow == nullptr || jStaticP == nullptr || jIdRank == nullptr) {
+    ctx->reactiveLimits.hasReactiveLimitStrongestPvKeys = 0;
+    if (ctx->reactiveLimits.nReactiveLimitEntries == 0 || jNomV == nullptr || jPRow == nullptr || jStaticP == nullptr || jIdRank == nullptr) {
         return;
     }
-    if (env->GetArrayLength(jNomV) != ctx->nReactiveLimitEntries || env->GetArrayLength(jPRow) != ctx->nReactiveLimitEntries
-            || env->GetArrayLength(jStaticP) != ctx->nReactiveLimitEntries || env->GetArrayLength(jIdRank) != ctx->nReactiveLimitEntries) {
+    if (env->GetArrayLength(jNomV) != ctx->reactiveLimits.nReactiveLimitEntries || env->GetArrayLength(jPRow) != ctx->reactiveLimits.nReactiveLimitEntries
+            || env->GetArrayLength(jStaticP) != ctx->reactiveLimits.nReactiveLimitEntries || env->GetArrayLength(jIdRank) != ctx->reactiveLimits.nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchReactiveLimitStrongestPvKeys: array length != nReactiveLimitEntries");
         return;
     }
@@ -145,15 +145,15 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitStrongestPv
     jint* pr = env->GetIntArrayElements(jPRow, nullptr);
     jdouble* sp = env->GetDoubleArrayElements(jStaticP, nullptr);
     jint* ir = env->GetIntArrayElements(jIdRank, nullptr);
-    ctx->dReactiveLimitNominalV.upload(nv, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
-    ctx->dReactiveLimitActivePowerRow.upload(pr, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int));
-    ctx->dReactiveLimitTargetP.upload(sp, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
-    ctx->dReactiveLimitIdRank.upload(ir, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int));
+    ctx->reactiveLimits.dReactiveLimitNominalV.upload(nv, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitActivePowerRow.upload(pr, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(int));
+    ctx->reactiveLimits.dReactiveLimitTargetP.upload(sp, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitIdRank.upload(ir, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(int));
     env->ReleaseDoubleArrayElements(jNomV, nv, JNI_ABORT);
     env->ReleaseIntArrayElements(jPRow, pr, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jStaticP, sp, JNI_ABORT);
     env->ReleaseIntArrayElements(jIdRank, ir, JNI_ABORT);
-    ctx->hasReactiveLimitStrongestPvKeys = 1;
+    ctx->reactiveLimits.hasReactiveLimitStrongestPvKeys = 1;
 }
 
 // voltageRemoteControlRobustMode (OLF's default): install the robust-mode channel on a batch context —
@@ -168,20 +168,20 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitsRobustMode
     if (ctx == nullptr) {
         return;
     }
-    ctx->reactiveLimitsRobustMode = 0;
-    if (ctx->nReactiveLimitEntries == 0 || robust == 0 || jInitTgtQ == nullptr) {
+    ctx->reactiveLimits.reactiveLimitsRobustMode = 0;
+    if (ctx->reactiveLimits.nReactiveLimitEntries == 0 || robust == 0 || jInitTgtQ == nullptr) {
         return;
     }
-    if (env->GetArrayLength(jInitTgtQ) != ctx->nReactiveLimitEntries) {
+    if (env->GetArrayLength(jInitTgtQ) != ctx->reactiveLimits.nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchReactiveLimitsRobustMode: array length != nReactiveLimitEntries");
         return;
     }
     jdouble* q0 = env->GetDoubleArrayElements(jInitTgtQ, nullptr);
-    ctx->dReactiveLimitInitialTargetQ.upload(q0, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitInitialTargetQ.upload(q0, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
     env->ReleaseDoubleArrayElements(jInitTgtQ, q0, JNI_ABORT);
-    ctx->reactiveLimitsRobustMinRealisticVoltage = vLo;
-    ctx->reactiveLimitsRobustMaxRealisticVoltage = vHi;
-    ctx->reactiveLimitsRobustMode = 1;
+    ctx->reactiveLimits.reactiveLimitsRobustMinRealisticVoltage = vLo;
+    ctx->reactiveLimits.reactiveLimitsRobustMaxRealisticVoltage = vHi;
+    ctx->reactiveLimits.reactiveLimitsRobustMode = 1;
 }
 
 // AcloadFlowEngine's realistic-voltage check: install (or clear) the per-row "this row is a
@@ -215,11 +215,11 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitSvcSusceptanceLimits)(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jBmin, jdoubleArray jBmax, jdoubleArray jV2Base) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nReactiveLimitEntries == 0) {
+    if (ctx == nullptr || ctx->reactiveLimits.nReactiveLimitEntries == 0) {
         return;
     }
-    if (env->GetArrayLength(jBmin) != ctx->nReactiveLimitEntries || env->GetArrayLength(jBmax) != ctx->nReactiveLimitEntries
-            || env->GetArrayLength(jV2Base) != ctx->nReactiveLimitEntries) {
+    if (env->GetArrayLength(jBmin) != ctx->reactiveLimits.nReactiveLimitEntries || env->GetArrayLength(jBmax) != ctx->reactiveLimits.nReactiveLimitEntries
+            || env->GetArrayLength(jV2Base) != ctx->reactiveLimits.nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
                       "setBatchReactiveLimitSvcSusceptanceLimits: array length != nReactiveLimitEntries");
         return;
@@ -227,9 +227,9 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitSvcSuscepta
     jdouble* bmin = env->GetDoubleArrayElements(jBmin, nullptr);
     jdouble* bmax = env->GetDoubleArrayElements(jBmax, nullptr);
     jdouble* v2b = env->GetDoubleArrayElements(jV2Base, nullptr);
-    ctx->dReactiveLimitSvcMinB.upload(bmin, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
-    ctx->dReactiveLimitSvcMaxB.upload(bmax, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
-    ctx->dReactiveLimitBaseVSquared.upload(v2b, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitSvcMinB.upload(bmin, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitSvcMaxB.upload(bmax, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
+    ctx->reactiveLimits.dReactiveLimitBaseVSquared.upload(v2b, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(double));
     env->ReleaseDoubleArrayElements(jBmin, bmin, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jBmax, bmax, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jV2Base, v2b, JNI_ABORT);
@@ -243,19 +243,19 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitBaseQLimitT
         return;
     }
     if (jKinds == nullptr || env->GetArrayLength(jKinds) == 0) {
-        ctx->hasReactiveLimitBaseQLimitType = 0;
+        ctx->reactiveLimits.hasReactiveLimitBaseQLimitType = 0;
         return;
     }
-    if (env->GetArrayLength(jKinds) != ctx->nReactiveLimitEntries) {
+    if (env->GetArrayLength(jKinds) != ctx->reactiveLimits.nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
                       "setBatchReactiveLimitBaseQLimitType: array length != nReactiveLimitEntries");
         return;
     }
     jbyte* kinds = env->GetByteArrayElements(jKinds, nullptr);
-    ctx->dReactiveLimitBaseQLimitType.alloc(static_cast<size_t>(ctx->nReactiveLimitEntries));
-    CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitBaseQLimitType.p, kinds, static_cast<size_t>(ctx->nReactiveLimitEntries), cudaMemcpyHostToDevice));
+    ctx->reactiveLimits.dReactiveLimitBaseQLimitType.alloc(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries));
+    CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitBaseQLimitType.p, kinds, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries), cudaMemcpyHostToDevice));
     env->ReleaseByteArrayElements(jKinds, kinds, JNI_ABORT);
-    ctx->hasReactiveLimitBaseQLimitType = 1;
+    ctx->reactiveLimits.hasReactiveLimitBaseQLimitType = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -270,14 +270,14 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
         return;
     }
     if (jReactiveLimitVoltageControlRole == nullptr || jReactiveLimitComparedVoltageRow == nullptr || env->GetArrayLength(jReactiveLimitVoltageControlRole) == 0) {
-        ctx->nReactiveLimitRemoteEntries = 0;
+        ctx->reactiveLimits.nReactiveLimitRemoteEntries = 0;
         ctx->nRemoteMemberReactiveTerms = 0;
         ctx->nDistrQDynamicKeys = 0;
         ctx->hasDistrQRelocationGroups = 0;
         return;
     }
     int nReactiveLimitEntries = env->GetArrayLength(jReactiveLimitVoltageControlRole);
-    if (nReactiveLimitEntries != ctx->nReactiveLimitEntries || env->GetArrayLength(jReactiveLimitComparedVoltageRow) != ctx->nReactiveLimitEntries) {
+    if (nReactiveLimitEntries != ctx->reactiveLimits.nReactiveLimitEntries || env->GetArrayLength(jReactiveLimitComparedVoltageRow) != ctx->reactiveLimits.nReactiveLimitEntries) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
                       "setBatchReactiveLimitRemoteEntries: array length != nReactiveLimitEntries");
         return;
@@ -294,12 +294,12 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitRemoteEntri
             selfCount++;
         }
     }
-    ctx->nReactiveLimitPilotSelfEntries = selfCount;
-    ctx->dReactiveLimitVoltageControlRole.upload(voltageControlRole, static_cast<size_t>(nReactiveLimitEntries) * sizeof(char));
-    ctx->dReactiveLimitComparedVoltageRow.upload(comparedVoltageRow, static_cast<size_t>(nReactiveLimitEntries) * sizeof(int));
+    ctx->reactiveLimits.nReactiveLimitPilotSelfEntries = selfCount;
+    ctx->reactiveLimits.dReactiveLimitVoltageControlRole.upload(voltageControlRole, static_cast<size_t>(nReactiveLimitEntries) * sizeof(char));
+    ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.upload(comparedVoltageRow, static_cast<size_t>(nReactiveLimitEntries) * sizeof(int));
     env->ReleaseByteArrayElements(jReactiveLimitVoltageControlRole, voltageControlRole, JNI_ABORT);
     env->ReleaseIntArrayElements(jReactiveLimitComparedVoltageRow, comparedVoltageRow, JNI_ABORT);
-    ctx->nReactiveLimitRemoteEntries = count;
+    ctx->reactiveLimits.nReactiveLimitRemoteEntries = count;
     ctx->nRemoteMemberReactiveTerms = 0;
     if (jRemoteMemberReactiveTermRow != nullptr && env->GetArrayLength(jRemoteMemberReactiveTermRow) > 0) {
         int nRemoteMemberReactiveTerms = env->GetArrayLength(jRemoteMemberReactiveTermRow);
@@ -411,7 +411,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitSeedTargetQ
         JNIEnv* env, jclass, jlong handle, jdoubleArray jTargets) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotRows(env, ctx, ctx->reactiveLimitSeedTargetQ, ctx->nReactiveLimitEntries,
+        installSlotRows(env, ctx, ctx->reactiveLimitSeedTargetQ, ctx->reactiveLimits.nReactiveLimitEntries,
                         jTargets != nullptr && env->GetArrayLength(jTargets) > 0 ? jTargets : nullptr, "setBatchReactiveLimitSeedTargetQ");
     }
 }
@@ -420,16 +420,16 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0) {
+    if (ctx == nullptr || ctx->reactiveLimits.nReactiveLimitEntries <= 0) {
         return nullptr;
     }
     int nS = ctx->nScenarios;
     int n = ctx->structure->n;
     DeviceBuf out;
-    out.alloc(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS * sizeof(double));
-    exportReactiveLimitTargetQ<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
-            ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr, ctx->dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(),
-            ctx->dTarget.as<double>(), ctx->reactiveLimitIslanded.deviceOrNull(),
+    out.alloc(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS * sizeof(double));
+    exportReactiveLimitTargetQ<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, n, ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
+            ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr, ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->dMode.as<int>(),
+            ctx->dTarget.as<double>(), ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(),
             ctx->hasDistrQRelocationGroups ? ctx->structure->nReactiveRelocationGroups : 0, pilotSelfReactiveLimitEntryOrNull(ctx),
             ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
             ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
@@ -437,7 +437,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitTargetQ)(
             ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr, out.as<double>());
     std::vector<double> host;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(readInstalledRows(ctx, out.p, static_cast<size_t>(ctx->nReactiveLimitEntries), host));
+    CUDA_CHECK(readInstalledRows(ctx, out.p, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries), host));
     jdoubleArray arr = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(arr, 0, static_cast<jsize>(host.size()), host.data());
     return arr;
@@ -449,13 +449,13 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, readBatchReactiveLimitsFinalState)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nReactiveLimitEntries <= 0) {
+    if (ctx == nullptr || ctx->reactiveLimits.nReactiveLimitEntries <= 0) {
         return nullptr;
     }
     std::vector<char> qLimitType, switchCount;
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitQLimitType.p, static_cast<size_t>(ctx->nReactiveLimitEntries), qLimitType));
-    CUDA_CHECK(readInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.p, static_cast<size_t>(ctx->nReactiveLimitEntries), switchCount));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitQLimitType.p, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries), qLimitType));
+    CUDA_CHECK(readInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.p, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries), switchCount));
     std::vector<int> state(qLimitType.size());
     for (size_t k = 0; k < state.size(); k++) {
         state[k] = reactiveLimitsState(qLimitType[k], switchCount[k]);
@@ -474,7 +474,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitGeneratorsL
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
         std::vector<int> pairs = jniInts(env, jPairs);
-        ctx->reactiveLimitGeneratorsLost.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nReactiveLimitEntries, static_cast<int>(pairs.size() / 2),
+        ctx->reactiveLimits.reactiveLimitGeneratorsLost.installEntries(ctx->nScenarios, ctx->installSlots, ctx->reactiveLimits.nReactiveLimitEntries, static_cast<int>(pairs.size() / 2),
                                            pairs.data(), nullptr, 1);
     }
 }
@@ -485,7 +485,7 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitIslanded)(
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
         std::vector<int> pairs = jniInts(env, jPairs);
-        ctx->reactiveLimitIslanded.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nReactiveLimitEntries, static_cast<int>(pairs.size() / 2),
+        ctx->reactiveLimits.reactiveLimitIslanded.installEntries(ctx->nScenarios, ctx->installSlots, ctx->reactiveLimits.nReactiveLimitEntries, static_cast<int>(pairs.size() / 2),
                                            pairs.data(), nullptr, 1);
     }
 }
@@ -503,8 +503,8 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitLocalOverri
     std::vector<int> pairs = jVt != nullptr ? jniInts(env, jPairs) : std::vector<int>();
     std::vector<double> targetV = jniDoubles(env, jVt);
     int nPairs = static_cast<int>(std::min(pairs.size() / 2, targetV.size()));
-    ctx->reactiveLimitLocalOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nReactiveLimitEntries, nPairs, pairs.data(), nullptr, 1);
-    ctx->reactiveLimitLocalTargetV.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nReactiveLimitEntries, nPairs, pairs.data(), targetV.data());
+    ctx->reactiveLimits.reactiveLimitLocalOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->reactiveLimits.nReactiveLimitEntries, nPairs, pairs.data(), nullptr, 1);
+    ctx->reactiveLimits.reactiveLimitLocalTargetV.installEntries(ctx->nScenarios, ctx->installSlots, ctx->reactiveLimits.nReactiveLimitEntries, nPairs, pairs.data(), targetV.data());
 }
 
 // Remote controllers OLF re-merges onto a NEW pilot after a zero-impedance split: per (scenario, entry) the V row
@@ -520,6 +520,6 @@ OLF_JNI(ac_outerloop_gpu, ReactiveLimitsNative, setBatchReactiveLimitComparedVol
     std::vector<int> pairs = jCmp != nullptr ? jniInts(env, jPairs) : std::vector<int>();
     std::vector<int> rows = jniInts(env, jCmp);
     int nPairs = static_cast<int>(std::min(pairs.size() / 2, rows.size()));
-    ctx->reactiveLimitComparedVoltageRowOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nReactiveLimitEntries, nPairs,
+    ctx->reactiveLimits.reactiveLimitComparedVoltageRowOverride.installEntries(ctx->nScenarios, ctx->installSlots, ctx->reactiveLimits.nReactiveLimitEntries, nPairs,
                                                                pairs.data(), rows.data());
 }

@@ -279,8 +279,8 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
     BatchResult& res = drv.res;
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
         double gate[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // see the gateLast write
-        if (ctx->dDistributedSlackLastPassAccounting.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDistributedSlackLastPassAccounting.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
+        if (ctx->distributedSlack.dDistributedSlackLastPassAccounting.p) {
+            CUDA_CHECK(cudaMemcpy(gate, ctx->distributedSlack.dDistributedSlackLastPassAccounting.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
         }
         std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
                      " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"

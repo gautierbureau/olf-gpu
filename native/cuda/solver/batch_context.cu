@@ -270,38 +270,38 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         ctx->reactiveLimits.dReactiveLimitBaseVSquared.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
     }
     ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
-    ctx->nDistributedSlackBuses = nDistributedSlackBuses;
-    ctx->slackBusTargetP = slackBusTargetP;
-    ctx->distributedSlackFactorMode = distributedSlackFactorMode;
-    ctx->slackBusMarginUp = slackBusMarginUp;
-    ctx->slackBusMarginDown = slackBusMarginDown;
+    ctx->distributedSlack.nDistributedSlackBuses = nDistributedSlackBuses;
+    ctx->distributedSlack.slackBusTargetP = slackBusTargetP;
+    ctx->distributedSlack.distributedSlackFactorMode = distributedSlackFactorMode;
+    ctx->distributedSlack.slackBusMarginUp = slackBusMarginUp;
+    ctx->distributedSlack.slackBusMarginDown = slackBusMarginDown;
     if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN && nDistributedSlackBuses > 0) {
-        ctx->dDistributedSlackBusMarginUp.upload(distributedSlackBusMarginUp, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMarginDown.upload(distributedSlackBusMarginDown, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMarginUp.upload(distributedSlackBusMarginUp, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMarginDown.upload(distributedSlackBusMarginDown, nDistributedSlackBuses * sizeof(double));
     }
-    ctx->slackBusPhiRow = slackBusPhiRow >= 0 ? rowMap[slackBusPhiRow] : -1;
-    ctx->slackOnlyDistribution = (nDistributedSlackBuses == 0 && ctx->slackBusPhiRow >= 0);
-    if (ctx->slackOnlyDistribution) {
-        ctx->dSlackOnlyAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+    ctx->distributedSlack.slackBusPhiRow = slackBusPhiRow >= 0 ? rowMap[slackBusPhiRow] : -1;
+    ctx->distributedSlack.slackOnlyDistribution = (nDistributedSlackBuses == 0 && ctx->distributedSlack.slackBusPhiRow >= 0);
+    if (ctx->distributedSlack.slackOnlyDistribution) {
+        ctx->distributedSlack.dSlackOnlyAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
     if (nDistributedSlackBuses > 0) {
         std::vector<int> distributedSlackBusPhiRowMapped(nDistributedSlackBuses);
         for (int i = 0; i < nDistributedSlackBuses; i++) {
             distributedSlackBusPhiRowMapped[i] = rowMap[distributedSlackBusPhiRow[i]];
         }
-        ctx->dDistributedSlackBusPhiRow.upload(distributedSlackBusPhiRowMapped.data(), nDistributedSlackBuses * sizeof(int));
-        ctx->dDistributedSlackBusFactor.upload(distributedSlackBusFactor, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusBaseTargetP.upload(distributedSlackBusBaseTargetP, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMaxDelta.upload(distributedSlackBusMaxDelta, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMinDelta.upload(distributedSlackBusMinDelta, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusPhiRow.upload(distributedSlackBusPhiRowMapped.data(), nDistributedSlackBuses * sizeof(int));
+        ctx->distributedSlack.dDistributedSlackBusFactor.upload(distributedSlackBusFactor, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusBaseTargetP.upload(distributedSlackBusBaseTargetP, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMaxDelta.upload(distributedSlackBusMaxDelta, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMinDelta.upload(distributedSlackBusMinDelta, nDistributedSlackBuses * sizeof(double));
         double factorSum = 0.0;
         for (int i = 0; i < nDistributedSlackBuses; i++) {
             factorSum += distributedSlackBusFactor[i];
         }
-        ctx->distributedSlackFactorSum = factorSum > 0 ? factorSum : 1.0;
-        ctx->dSlackRetainedShare.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDistributedSlackLastPassAccounting.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
-        ctx->dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->distributedSlack.distributedSlackFactorSum = factorSum > 0 ? factorSum : 1.0;
+        ctx->distributedSlack.dSlackRetainedShare.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackLastPassAccounting.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
+        ctx->distributedSlack.dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
     CUDA_CHECK(cudaStreamCreate(&ctx->stream));

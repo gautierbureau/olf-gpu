@@ -123,14 +123,14 @@ __global__ void forcedTargetQLimitsBatch(int nForcedTargetQ, int nS, int n, int 
 // forceTargetQInReactiveLimits on voltage-controlled buses: after every rebuild of the dynamic reactive limits.
 void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n, const char* active) {
     if (ctx->nForcedTargetQLimitEntries <= 0) return;
-    forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->nDistributedSlackBuses, ctx->nDistributedSlackGenerators, ctx->reactiveLimits.nReactiveLimitEntries,
+    forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nForcedTargetQ, nS, n, ctx->distributedSlack.nDistributedSlackBuses, ctx->distributedSlack.nDistributedSlackGenerators, ctx->reactiveLimits.nReactiveLimitEntries,
             ctx->forcedTargetQExtrapolate, ctx->dForcedTargetQIndices.as<int>(), ctx->dForcedTargetQParameters.as<double>(), ctx->dForcedTargetQPoints.as<double>(),
             ctx->forcedTargetQPreDistribution.deviceOrNull(),
-            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-            ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(),
-            ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->distributedSlackBusRowOverride.deviceOrNull(),
-            ctx->distributedSlackLostGenerators.view(),
-            ctx->distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
+            ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+            ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(),
+            ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr, ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(),
+            ctx->distributedSlack.distributedSlackLostGenerators.view(),
+            ctx->distributedSlack.distributedSlackIslanded.deviceOrNull(), ctx->dMode.as<int>(),
             ctx->dTarget.as<double>(), ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(), active);
 }
 

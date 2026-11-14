@@ -110,9 +110,9 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
                 shuntAdmittanceOverrides(ctx));
     }
     // a link on the slack bus, as OLF's slack mismatch sees it: read by the DistributedSlack check alone
-    if (ctx->distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {
-        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->slackBusPhiRow,
-                ctx->slackBusRowOverride.deviceOrNull(),
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->distributedSlack.slackBusPhiRow >= 0) {
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->distributedSlack.slackBusPhiRow,
+                ctx->distributedSlack.slackBusRowOverride.deviceOrNull(),
                 ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
                 ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulationStatus.device(),
                 ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(), ctx->hvdcContingencyOutage.device(),
@@ -223,12 +223,12 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     traceReactiveLimitsSwitches(ctx, drv, auditLog, reactiveLimitsAuditOn, reactiveLimitsTraceScenario);
     traceReactiveLimitsState(ctx, drv, inDistributedSlackPhase, reactiveLimitTol, outerLoopUnstable);
     bool inDistributionPhase = inDistributedSlackPhase || loopKind == GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;
-    if (inDistributionPhase && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) && rejectSlackDistributionFailure) {
+    if (inDistributionPhase && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution) && rejectSlackDistributionFailure) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
         // to the CPU fallback (status -2), which replays it with the run's real failure behavior.
         std::vector<char> slackDistributionFailure(nS);
-        CUDA_CHECK(cudaMemcpy(slackDistributionFailure.data(), ctx->dSlackDistributionFailure.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(slackDistributionFailure.data(), ctx->distributedSlack.dSlackDistributionFailure.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
             if (slackDistributionFailure[s] && live[s]) {
                 traceReject(s, "ds-residual-saturated", outer, 0);

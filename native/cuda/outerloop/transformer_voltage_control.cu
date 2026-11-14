@@ -391,12 +391,12 @@ static TransformerVoltageControlTables transformerVoltageControlTables(BatchSolv
     T.groupSharedMinR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMinR1.as<double>(); T.groupSharedMaxR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMaxR1.as<double>(); T.groupSharedInitialR1 = ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedInitialR1.as<double>();
     T.memberState = ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.as<int>(); T.memberTap = ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap.as<int>(); T.memberRoundingR1 = ctx->transformerVoltageControl.dTransformerVoltageControlMemberRoundingR1.as<double>();
     T.savedDeltaTarget = ctx->transformerVoltageControl.dTransformerVoltageControlSavedDeltaTarget.as<double>(); T.rejected = ctx->transformerVoltageControl.dTransformerVoltageControlRejected.as<char>();
-    T.nGeneratorVoltageControlFreezeCandidates = ctx->nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.on() ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControl.transformerVoltageControlFixWords;
-    T.generatorVoltageControlFreezeVRow = ctx->dGeneratorVoltageControlFreezeVRow.as<int>(); T.generatorVoltageControlFreezeLoadTargetQ = ctx->dGeneratorVoltageControlFreezeLoadTargetQ.as<double>();
-    T.generatorVoltageControlFreezeReactiveLimitEntry = ctx->dGeneratorVoltageControlFreezeReactiveLimitEntry.as<int>(); T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries; T.reactiveLimitQLimitType = ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>();
+    T.nGeneratorVoltageControlFreezeCandidates = ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates; T.hasFixMasks = ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.on() ? 1 : 0; T.fixMaskWords = ctx->transformerVoltageControl.transformerVoltageControlFixWords;
+    T.generatorVoltageControlFreezeVRow = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeVRow.as<int>(); T.generatorVoltageControlFreezeLoadTargetQ = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeLoadTargetQ.as<double>();
+    T.generatorVoltageControlFreezeReactiveLimitEntry = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeReactiveLimitEntry.as<int>(); T.nReactiveLimitEntries = ctx->reactiveLimits.nReactiveLimitEntries; T.reactiveLimitQLimitType = ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>();
     T.fixPvRow = ctx->transformerVoltageControl.dTransformerVoltageControlFixPvRow.as<int>();
     T.fixMinMask = ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.device(); T.fixMaxMask = ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.device();
-    T.generatorVoltageControlFrozen = ctx->dGeneratorVoltageControlFrozen.as<int>(); T.generatorVoltageControlFreezeSavedMode = ctx->dGeneratorVoltageControlFreezeSavedMode.as<int>(); T.generatorVoltageControlFreezeSavedTarget = ctx->dGeneratorVoltageControlFreezeSavedTarget.as<double>();
+    T.generatorVoltageControlFrozen = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.as<int>(); T.generatorVoltageControlFreezeSavedMode = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedMode.as<int>(); T.generatorVoltageControlFreezeSavedTarget = ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedTarget.as<double>();
     return T;
 }
 
@@ -415,7 +415,7 @@ void transformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     // after its PV -> PQ switches; the freeze happens two loops later and would otherwise leave the pilot holding
     // a target for a control that no longer exists until the next sweep reached RL again (measured
     // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
-    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
+    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0 && ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates > 0) {
         launchPilotTargetVEquationUpdate(ctx, drv);
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -455,8 +455,8 @@ void transformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& dr
     resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMaxR1.as<double>(), ng, nullptr, 0.0);
     resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedInitialR1.as<double>(), ng, nullptr, 0.0);
     resetInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlRejected.as<char>(), 1, nullptr, char(0));
-    if (ctx->nGeneratorVoltageControlFreezeCandidates > 0) {
-        resetInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.as<int>(), ctx->nGeneratorVoltageControlFreezeCandidates, nullptr, 0);
+    if (ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates > 0) {
+        resetInstalledRows(ctx, ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.as<int>(), ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates, nullptr, 0);
     }
     transformerVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(transformerVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->transformerVoltageControl.transformerVoltageControlEntryOn,
             ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), installMaskOrNull(ctx));

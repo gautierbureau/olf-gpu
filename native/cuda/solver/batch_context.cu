@@ -128,7 +128,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     if (ctx->layout.interleaved) {
         ctx->dFillMismatch.alloc(static_cast<size_t>(n) * ctx->layout.stride * sizeof(double));
     }
-    ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
+    ctx->newtonRaphson.dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
     ctx->dActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
@@ -338,17 +338,17 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
     int n = ctx->n;
     int nS = ctx->nScenarios;
     bool clampStep = stateVectorScalingMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
-    if (clampStep && !ctx->dVarType.p) {
-        ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
-        ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+    if (clampStep && !ctx->newtonRaphson.dVarType.p) {
+        ctx->newtonRaphson.dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
+        ctx->newtonRaphson.dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
     if (stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                       // LINE_SEARCH backtracking buffers
-        if (!ctx->dLineSearchPreviousX.p) ctx->dLineSearchPreviousX.alloc(static_cast<size_t>(n) * nS * sizeof(double));
-        if (!ctx->dStepFactor.p) ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+        if (!ctx->newtonRaphson.dLineSearchPreviousX.p) ctx->newtonRaphson.dLineSearchPreviousX.alloc(static_cast<size_t>(n) * nS * sizeof(double));
+        if (!ctx->newtonRaphson.dStepFactor.p) ctx->newtonRaphson.dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
-    ctx->clampStep = clampStep;
-    ctx->maxDv = maxDv;
-    ctx->maxDphi = maxDphi;
+    ctx->newtonRaphson.clampStep = clampStep;
+    ctx->newtonRaphson.maxDv = maxDv;
+    ctx->newtonRaphson.maxDphi = maxDphi;
     // Per-scenario shunt admittance overrides (section shifts / reconnection), PACK-indexed elements (shunt family
     // index, not the global element index).
     installShuntAdmittanceOverrides(ctx, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta);

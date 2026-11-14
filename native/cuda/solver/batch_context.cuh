@@ -43,6 +43,7 @@
 #include "context/realistic_voltage_context.cuh"
 #include "context/remote_voltage_control_context.cuh"
 #include "context/linear_solver_context.cuh"
+#include "context/newton_raphson_context.cuh"
 #include "slot_rows.cuh"
 #include "slot_solve_state.cuh"
 #include "slot_table.cuh"
@@ -99,17 +100,7 @@ struct BatchSolverContext {
     DeviceBuf dHandBackSlots, dHandBackStates;               // a paused call's handed-back slots and their states, gathered
     DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
     LinearSolverContext linearSolver;
-    bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
-    double maxDv = 0.0, maxDphi = 0.0;
-    DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
-    DeviceBuf dLineSearchPreviousX;                                      // n*nS pre-step iterates (lazy, LINE_SEARCH solves)
-    int lineSearchStateVectorScalingMaxIteration = 10;                                      // LINE_SEARCH backtracks (setBatchLineSearch)
-    double lineSearchStateVectorScalingStepFold = 4.0 / 3.0;
-    DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
-    DeviceBuf dFixedVariableRowMaxMismatch, dEquationRowMaxMismatch;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
-    bool perRowCriteria = false;
-    DeviceBuf dAlternateRowMaxMismatch, dAlternateRowMaxMismatchSelector;                              // n each: the alternate threshold and its selector row (see residualNormsBatch)
-    bool perRowAlternateCriteria = false;
+    NewtonRaphsonContext newtonRaphson;
     // Per-slot shunt admittance overrides (scenario_override_tables.cuh): the caller's, a CSR per slot installed per
     // solve ((slot + 1) starts, PACK shunt element, (dG, dB)), and the incremental shunt loop's moved sections per
     // (slot, controller), with the controllers acting on each PACK shunt element.
@@ -146,11 +137,6 @@ struct BatchSolverContext {
     // DISTR_RHO coefficient overrides (setBatchDistrRhoCoefficientOverrides): a member outage renormalizes the
     // group's 1/count coefficients per scenario — per slot, (contribution; new coefficient), the last one wins.
     SlotTable distrRhoCoefficientOverrides{1, 1};
-    // Per-scenario ACTIVE equation counts (setBatchActiveRowCounts): OLF's L2 stopping threshold is
-    // sqrt(eps^2 * nActive) and the CPU REMOVES equations for outaged elements carrying variables
-    // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%
-    // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
-    std::vector<int> hNActive;
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (BUS_TARGET_V_WITH_SLOPE V rows), 0 elsewhere
     // dQbuf holds the q of every row (dQbufClosed's closed branches plus the other families, refilled at every check);
     // dOuterLoopCheckActive marks the scenarios an outer loop checks this pass, dOuterLoopUnstable those it changed.

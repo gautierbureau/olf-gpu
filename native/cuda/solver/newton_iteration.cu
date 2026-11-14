@@ -161,8 +161,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
     // equation count, since disabled-branch rows keep the bus equations and identity pads contribute 0.
     const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
     auto norm2ThresholdOf = [&](int sIdx) {
-        return convEpsPerEq > 0.0 && !ctx->hNActive.empty()
-                ? std::sqrt(convEpsPerEq * convEpsPerEq * ctx->hNActive[sIdx]) : olf2NormThreshold;
+        return convEpsPerEq > 0.0 && !ctx->newtonRaphson.hNActive.empty()
+                ? std::sqrt(convEpsPerEq * convEpsPerEq * ctx->newtonRaphson.hNActive[sIdx]) : olf2NormThreshold;
     };
     // The test of one scenario after a fill, at its own iteration: its traces, and the end of its solve when it
     // converged, diverged or ran its budget out. Returns whether it left the Newton loop.
@@ -189,7 +189,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         }
         // PER_EQUATION_TYPE (per-row thresholds set on the context): OLF's
         // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
-        bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
+        bool converged = ctx->newtonRaphson.perRowCriteria ? (finite && maxRatio < 1.0)
                 : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < norm2ThresholdOf(s)) : (norm < tol);
         static const char* sdEnv = traceValue(Trace::STATE_DUMP);
         if (sdEnv != nullptr && s == 0 && it[s] <= std::atoi(sdEnv) && n <= 64) {
@@ -214,8 +214,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             CUDA_CHECK(cudaMemcpy(hT.data(), ctx->dTarget.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hX.data(), ctx->dX.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hM.data(), ctx->dMode.as<int>() + (size_t) s * n, n * sizeof(int), cudaMemcpyDeviceToHost));
-            if (ctx->clampStep && ctx->dStepFactor.p) {
-                CUDA_CHECK(cudaMemcpy(&fac, ctx->dStepFactor.as<double>() + s, sizeof(double), cudaMemcpyDeviceToHost));
+            if (ctx->newtonRaphson.clampStep && ctx->newtonRaphson.dStepFactor.p) {
+                CUDA_CHECK(cudaMemcpy(&fac, ctx->newtonRaphson.dStepFactor.as<double>() + s, sizeof(double), cudaMemcpyDeviceToHost));
             }
             int wr = 0;
             for (int r = 1; r < n; r++) if (std::fabs(hFs[r]) > std::fabs(hFs[wr])) wr = r;
@@ -379,12 +379,12 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                     for (int s2 = 0; s2 < nS; s2++) {
                         if (needsBt(s2)) anyBt = true;
                     }
-                    for (int b = 1; anyBt && b <= ctx->lineSearchStateVectorScalingMaxIteration; b++) {
-                        double mu = 1.0 / std::pow(ctx->lineSearchStateVectorScalingStepFold, b);
+                    for (int b = 1; anyBt && b <= ctx->newtonRaphson.lineSearchStateVectorScalingMaxIteration; b++) {
+                        double mu = 1.0 / std::pow(ctx->newtonRaphson.lineSearchStateVectorScalingStepFold, b);
                         for (int s2 = 0; s2 < nS; s2++) hMu[s2] = needsBt(s2) ? mu : -1.0;
-                        CUDA_CHECK(cudaMemcpyAsync(ctx->dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+                        CUDA_CHECK(cudaMemcpyAsync(ctx->newtonRaphson.dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
                         stepFromPrevBatchMasked<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS,
-                                ctx->dLineSearchPreviousX.as<double>(), ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+                                ctx->newtonRaphson.dLineSearchPreviousX.as<double>(), ctx->dDx.as<double>(), ctx->newtonRaphson.dStepFactor.as<double>(), ctx->dX.as<double>());
                         fillActiveBatch(ctx, drv, false);              // full fill: J must sit at the accepted x (like the seq path)
                         readNormsBatch(ctx, drv, hNorms);
                         anyBt = false;
@@ -501,7 +501,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             }
         }
         if (lineSearch) {                                    // LINE_SEARCH: remember the pre-step iterates
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
+            CUDA_CHECK(cudaMemcpyAsync(ctx->newtonRaphson.dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
         }
         if (ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH || ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
@@ -704,9 +704,9 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                 }
             }
         }
-        if (ctx->clampStep) {
-            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
-            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+        if (ctx->newtonRaphson.clampStep) {
+            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->newtonRaphson.dVarType.as<int>(), ctx->dActive.as<char>(), ctx->newtonRaphson.maxDv, ctx->newtonRaphson.maxDphi, ctx->newtonRaphson.dStepFactor.as<double>());
+            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->newtonRaphson.dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
         }
@@ -734,12 +734,12 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                     ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
-            if (ctx->clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
+            if (ctx->newtonRaphson.clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
                 // unclamped, the robust mode took full Newton steps and its base load flow on network.xiidm's
                 // busbar scope settled 0.32 kV away from OLF's
-                maxVoltageChangeFactorBatch<<<1, BLOCK, 0, ctx->stream>>>(n, dxS, ctx->dVarType.as<int>(), nullptr,
-                        ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>() + s);
-                axpy1BatchScaled<<<grid(n), BLOCK, 0, ctx->stream>>>(n, n, dxS, ctx->dStepFactor.as<double>() + s, xS);
+                maxVoltageChangeFactorBatch<<<1, BLOCK, 0, ctx->stream>>>(n, dxS, ctx->newtonRaphson.dVarType.as<int>(), nullptr,
+                        ctx->newtonRaphson.maxDv, ctx->newtonRaphson.maxDphi, ctx->newtonRaphson.dStepFactor.as<double>() + s);
+                axpy1BatchScaled<<<grid(n), BLOCK, 0, ctx->stream>>>(n, n, dxS, ctx->newtonRaphson.dStepFactor.as<double>() + s, xS);
             } else {
                 axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
             }

@@ -19,14 +19,12 @@ OLF_JNI(ac_outerloop_gpu, VoltageMonitoringNative, setBatchMonitoringLoops)(
         return;
     }
     auto upI = [&](jintArray a, DeviceBuf& b) {
-        jint* q = env->GetIntArrayElements(a, nullptr);
+        const JniInts q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(int));
-        env->ReleaseIntArrayElements(a, q, JNI_ABORT);
     };
     auto upD = [&](jdoubleArray a, DeviceBuf& b) {
-        jdouble* q = env->GetDoubleArrayElements(a, nullptr);
+        const JniDoubles q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
-        env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
     upI(jVRow, ctx->monitoringVoltage.dMonitoringVoltageBusVRow);
     upD(jBand, ctx->monitoringVoltage.dMonitoringVoltageBand);

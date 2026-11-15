@@ -36,20 +36,20 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         jint jDistributedSlackFactorMode, jdoubleArray jDistributedSlackBusMarginUp, jdoubleArray jDistributedSlackBusMarginDown,
         jdouble jSlackBusMarginUp, jdouble jSlackBusMarginDown) {
     auto* structurePointer = reinterpret_cast<SharedStructurePtr*>(structureHandle);
-    jint* reactiveLimitVoltageRow = env->GetIntArrayElements(jReactiveLimitVoltageRow, nullptr);
-    jdouble* reactiveLimitMinQ = env->GetDoubleArrayElements(jReactiveLimitMinQ, nullptr);
-    jdouble* reactiveLimitMaxQ = env->GetDoubleArrayElements(jReactiveLimitMaxQ, nullptr);
-    jdouble* reactiveLimitLoadQ = env->GetDoubleArrayElements(jReactiveLimitLoadQ, nullptr);
-    jdouble* reactiveLimitTargetV = env->GetDoubleArrayElements(jReactiveLimitTargetV, nullptr);
-    jbyte* reactiveLimitFlags = env->GetByteArrayElements(jReactiveLimitFlags, nullptr);
-    jdouble* rowSlope = env->GetDoubleArrayElements(jrowSlope, nullptr);
-    jint* distributedSlackBusPhiRow = env->GetIntArrayElements(jDistributedSlackBusPhiRow, nullptr);
-    jdouble* distributedSlackBusFactor = env->GetDoubleArrayElements(jDistributedSlackBusFactor, nullptr);
-    jdouble* distributedSlackBusBaseTargetP = env->GetDoubleArrayElements(jDistributedSlackBusBaseTargetP, nullptr);
-    jdouble* distributedSlackBusMaxDelta = env->GetDoubleArrayElements(jDistributedSlackBusMaxDelta, nullptr);
-    jdouble* distributedSlackBusMinDelta = env->GetDoubleArrayElements(jDistributedSlackBusMinDelta, nullptr);
-    jdouble* distributedSlackBusMarginUp = env->GetDoubleArrayElements(jDistributedSlackBusMarginUp, nullptr);
-    jdouble* distributedSlackBusMarginDown = env->GetDoubleArrayElements(jDistributedSlackBusMarginDown, nullptr);
+    const JniInts reactiveLimitVoltageRow(env, jReactiveLimitVoltageRow);
+    const JniDoubles reactiveLimitMinQ(env, jReactiveLimitMinQ);
+    const JniDoubles reactiveLimitMaxQ(env, jReactiveLimitMaxQ);
+    const JniDoubles reactiveLimitLoadQ(env, jReactiveLimitLoadQ);
+    const JniDoubles reactiveLimitTargetV(env, jReactiveLimitTargetV);
+    const JniBytes reactiveLimitFlags(env, jReactiveLimitFlags);
+    const JniDoubles rowSlope(env, jrowSlope);
+    const JniInts distributedSlackBusPhiRow(env, jDistributedSlackBusPhiRow);
+    const JniDoubles distributedSlackBusFactor(env, jDistributedSlackBusFactor);
+    const JniDoubles distributedSlackBusBaseTargetP(env, jDistributedSlackBusBaseTargetP);
+    const JniDoubles distributedSlackBusMaxDelta(env, jDistributedSlackBusMaxDelta);
+    const JniDoubles distributedSlackBusMinDelta(env, jDistributedSlackBusMinDelta);
+    const JniDoubles distributedSlackBusMarginUp(env, jDistributedSlackBusMarginUp);
+    const JniDoubles distributedSlackBusMarginDown(env, jDistributedSlackBusMarginDown);
 
     int nReactiveLimitEntries = env->GetArrayLength(jReactiveLimitVoltageRow);
     int nDistributedSlackBuses = env->GetArrayLength(jDistributedSlackBusPhiRow);
@@ -71,20 +71,6 @@ OLF_JNI(ac_solver_gpu, BatchSolveNative, createBatchContext)(
         error = "unknown native error";
     }
 
-    env->ReleaseIntArrayElements(jReactiveLimitVoltageRow, reactiveLimitVoltageRow, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jReactiveLimitMinQ, reactiveLimitMinQ, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jReactiveLimitMaxQ, reactiveLimitMaxQ, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jReactiveLimitLoadQ, reactiveLimitLoadQ, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jReactiveLimitTargetV, reactiveLimitTargetV, JNI_ABORT);
-    env->ReleaseByteArrayElements(jReactiveLimitFlags, reactiveLimitFlags, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jrowSlope, rowSlope, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistributedSlackBusPhiRow, distributedSlackBusPhiRow, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusFactor, distributedSlackBusFactor, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusBaseTargetP, distributedSlackBusBaseTargetP, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMaxDelta, distributedSlackBusMaxDelta, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMinDelta, distributedSlackBusMinDelta, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginUp, distributedSlackBusMarginUp, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistributedSlackBusMarginDown, distributedSlackBusMarginDown, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),

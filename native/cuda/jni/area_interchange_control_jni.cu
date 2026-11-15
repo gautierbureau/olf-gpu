@@ -26,14 +26,12 @@ OLF_JNI(ac_outerloop_gpu, AreaInterchangeControlNative, setBatchAreaInterchangeC
         return;                                                     // no area: the phase is OLF's DistributedSlackOuterLoop
     }
     auto upI = [&](jintArray a, DeviceBuf& buf) {
-        jint* p = env->GetIntArrayElements(a, nullptr);
+        const JniInts p(env, a);
         buf.upload(p, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(a))) * sizeof(int));
-        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
     };
     auto upD = [&](jdoubleArray a, DeviceBuf& buf) {
-        jdouble* p = env->GetDoubleArrayElements(a, nullptr);
+        const JniDoubles p(env, a);
         buf.upload(p, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(a))) * sizeof(double));
-        env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
     };
     upD(jInterchangeTarget, ctx->areaInterchangeControl.dAreaInterchangeTarget);
     upD(jSlackDistributionFactor, ctx->areaInterchangeControl.dAreaSlackDistributionFactor);

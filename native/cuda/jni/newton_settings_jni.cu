@@ -90,12 +90,10 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
         return;
     }
     int n = ctx->structure->n;
-    jdouble* fixedVariableRowMaxMismatch = env->GetDoubleArrayElements(jFixedVariableRowMaxMismatch, nullptr);
-    jdouble* equationRowMaxMismatch = env->GetDoubleArrayElements(jEquationRowMaxMismatch, nullptr);
+    const JniDoubles fixedVariableRowMaxMismatch(env, jFixedVariableRowMaxMismatch);
+    const JniDoubles equationRowMaxMismatch(env, jEquationRowMaxMismatch);
     ctx->newtonRaphson.dFixedVariableRowMaxMismatch.upload(fixedVariableRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
     ctx->newtonRaphson.dEquationRowMaxMismatch.upload(equationRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
-    env->ReleaseDoubleArrayElements(jFixedVariableRowMaxMismatch, fixedVariableRowMaxMismatch, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jEquationRowMaxMismatch, equationRowMaxMismatch, JNI_ABORT);
     ctx->newtonRaphson.perRowCriteria = true;
 }
 
@@ -114,12 +112,10 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlternate)(
         return;
     }
     int n = ctx->structure->n;
-    jdouble* alternateRowMaxMismatch = env->GetDoubleArrayElements(jAlternateRowMaxMismatch, nullptr);
-    jint* alternateRowMaxMismatchSelector = env->GetIntArrayElements(jAlternateRowMaxMismatchSelector, nullptr);
+    const JniDoubles alternateRowMaxMismatch(env, jAlternateRowMaxMismatch);
+    const JniInts alternateRowMaxMismatchSelector(env, jAlternateRowMaxMismatchSelector);
     ctx->newtonRaphson.dAlternateRowMaxMismatch.upload(alternateRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
     ctx->newtonRaphson.dAlternateRowMaxMismatchSelector.upload(alternateRowMaxMismatchSelector, static_cast<size_t>(n) * sizeof(int));
-    env->ReleaseDoubleArrayElements(jAlternateRowMaxMismatch, alternateRowMaxMismatch, JNI_ABORT);
-    env->ReleaseIntArrayElements(jAlternateRowMaxMismatchSelector, alternateRowMaxMismatchSelector, JNI_ABORT);
     ctx->newtonRaphson.perRowAlternateCriteria = true;
 }
 

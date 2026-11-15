@@ -143,24 +143,8 @@ public final class GpuShuntVoltageControlOuterLoop {
             // ON/OFF diffed against each other (not the caller's base): a base extracted with the
             // control already ON (the base load flow, whose network OLF's initialize switched on)
             // yields the same rows as a control-off base
-            List<Integer> dRows = new ArrayList<>();
-            for (int r = 0; r < baseTargets.length; r++) {
-                if (onAct.rowMode()[r] != offAct.rowMode()[r] || onTargets[r] != offTargets[r]) {
-                    dRows.add(r);
-                }
-            }
-            int[] deltaRows = dRows.stream().mapToInt(Integer::intValue).toArray();
-            int[] deltaModesOn = new int[deltaRows.length];
-            double[] deltaTargetsOn = new double[deltaRows.length];
-            int[] deltaModesOff = new int[deltaRows.length];
-            double[] deltaTargetsOff = new double[deltaRows.length];
-            for (int k = 0; k < deltaRows.length; k++) {
-                deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
-                deltaTargetsOn[k] = onTargets[deltaRows[k]];
-                deltaModesOff[k] = offAct.rowMode()[deltaRows[k]];
-                deltaTargetsOff[k] = offTargets[deltaRows[k]];
-            }
-            out.add(new Group(deltaRows, deltaModesOn, deltaTargetsOn, members, deltaModesOff, deltaTargetsOff));
+            ControlDeltas deltas = ControlDeltas.between(baseTargets.length, onAct.rowMode(), onTargets, offAct.rowMode(), offTargets);
+            out.add(new Group(deltas.rows(), deltas.modesOn(), deltas.targetsOn(), members, deltas.modesOff(), deltas.targetsOff()));
         }
         return out;
     }

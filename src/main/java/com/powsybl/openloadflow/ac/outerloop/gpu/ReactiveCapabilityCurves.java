@@ -120,10 +120,7 @@ public final class ReactiveCapabilityCurves {
                 if (vVar == null || vVar.getRow() < 0 || pilotVar == null || pilotVar.getRow() < 0) {
                     continue;                                // not packed
                 }
-                if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vVar.getRow()) {
-                    throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
-                            + bus.getId() + ")");
-                }
+                requirePackedEntry(gpuData, reactiveLimitEntry, vVar.getRow(), bus);
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
@@ -141,10 +138,7 @@ public final class ReactiveCapabilityCurves {
             if (vVar == null || vVar.getRow() < 0 || bus.getGeneratorVoltageControl().isEmpty() || !(basePv || basePqCapable)) {
                 continue;
             }
-            if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vVar.getRow()) {
-                throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
-                        + bus.getId() + ")");
-            }
+            requirePackedEntry(gpuData, reactiveLimitEntry, vVar.getRow(), bus);
             packBusCurves(bus, reactiveLimitEntry, es, distributedSlack ? distributedSlackParameters : null,
                     baseTargets, busPRow, reactiveCapabilityCurveIndices, reactiveCapabilityCurveParameters,
                     reactiveCapabilityCurvePoints,
@@ -262,6 +256,14 @@ public final class ReactiveCapabilityCurves {
             // scenario losing a sibling can renormalize it
             reactiveCapabilityCurveGeneratorId.add(gen.getId());
             reactiveCapabilityCurveBusFactor.add(busFactor);
+        }
+    }
+
+    /** The curve packing walks the buses in the reactive-limit pack's own order: entry by entry, the same voltage rows. */
+    private static void requirePackedEntry(GpuAcData gpuData, int reactiveLimitEntry, int vRow, LfBus bus) {
+        if (reactiveLimitEntry >= gpuData.reactiveLimits().voltageRow().length || gpuData.reactiveLimits().voltageRow()[reactiveLimitEntry] != vRow) {
+            throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
+                    + bus.getId() + ")");
         }
     }
 }

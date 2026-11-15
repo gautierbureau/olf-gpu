@@ -29,6 +29,7 @@
 #include "../common/codes/gpu_two_sides.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
+#include "distr_q_columns.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -256,20 +257,11 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             if (pass == 1) {
                 pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
             }
-            if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
-                pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
-            } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
-                const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                pat.emplace_back(mappedRow, distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5]);
-            } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
-                pat.emplace_back(mappedRow, distrQElement[c]);
-            } else {                                         // closed branch: v1 v2 ph1 ph2 r1
-                const int* q = closedBranchIndices + static_cast<size_t>(distrQElement[c]) * 12;
-                pat.emplace_back(mappedRow, q[5]);
-                pat.emplace_back(mappedRow, q[7]);
-                pat.emplace_back(mappedRow, q[4]);
-                pat.emplace_back(mappedRow, q[6]);
-                if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+            int columns[5];
+            const int count = distrQTermColumns(distrQKind[c], distrQElement[c], distrQSide[c], closedBranchIndices,
+                                                openBranchIndices, shuntIndices, columns);
+            for (int k = 0; k < count; k++) {
+                pat.emplace_back(mappedRow, columns[k]);
             }
         }
     }

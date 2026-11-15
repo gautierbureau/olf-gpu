@@ -13,6 +13,27 @@
 
 namespace olfgpu {
 
+namespace {
+
+// Group g's candidates as the destinations of one +-dummyQ term: on the F slot each candidate row (-2 - row), on the J
+// slot each candidate row's entry in the dummy column. Each slot records the group and where its candidates start.
+void appendGroupPool(const SharedStructure* structure, const CsrPattern& pos, int g, int dummyColumn, int fSlot, int jSlot,
+                     std::vector<int>& relocationGroup, std::vector<int>& relocationCandidateOffset,
+                     std::vector<int>& candidateDestinations) {
+    relocationGroup[fSlot] = g;
+    relocationCandidateOffset[fSlot] = static_cast<int>(candidateDestinations.size());
+    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
+        candidateDestinations.push_back(-2 - structure->hReactiveRelocationCandidateRows[c]);
+    }
+    relocationGroup[jSlot] = g;
+    relocationCandidateOffset[jSlot] = static_cast<int>(candidateDestinations.size());
+    for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
+        candidateDestinations.push_back(pos.at(structure->hReactiveRelocationCandidateRows[c], dummyColumn));
+    }
+}
+
+}  // namespace
+
 // Element e (indices z, its F/J destinations dd, its endpoint rows b1P / b2P / b1Q / b2Q): the q slots of a GROUP
 // relocation (one per candidate), a STOCK PAIR, a DEPENDENT pilot or a two-way alternate, then the COUPLER-TREE
 // stock-placement fallback of its P and Q terms. Slot layout: see buildZeroImpedanceBranchDestination.
@@ -29,16 +50,8 @@ void buildZeroImpedanceRelocationDestinations(const SharedStructure* structure, 
         int jSlot = static_cast<int>(e) * 8 + 2 + side;
         if (alternateRow <= -2) {                          // GROUP relocation: one slot per candidate
             int g = -2 - alternateRow;
-            zeroImpedanceRelocationGroup[fSlot] = g;
-            relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-            for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
-                zeroImpedanceRelocationCandidateDestinations.push_back(-2 - structure->hReactiveRelocationCandidateRows[c]);
-            }
-            zeroImpedanceRelocationGroup[jSlot] = g;
-            relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-            for (int c = structure->hReactiveRelocationGroupStart[g]; c < structure->hReactiveRelocationGroupStart[g + 1]; c++) {
-                zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(structure->hReactiveRelocationCandidateRows[c], z[5]));
-            }
+            appendGroupPool(structure, pos, g, z[5], fSlot, jSlot, zeroImpedanceRelocationGroup, relocationCandidateOffset,
+                            zeroImpedanceRelocationCandidateDestinations);
             dd[2 + side] = -2 - structure->hReactiveRelocationCandidateRows[structure->hReactiveRelocationGroupStart[g]];   // frozen F -> fallback (qBuf)
             anyDynamicRelocation = true;
         } else if (stockPairOut(frozenQ[side], alternateRow, relocatedChildOwnRow)) {
@@ -67,16 +80,8 @@ void buildZeroImpedanceRelocationDestinations(const SharedStructure* structure, 
             // DEPENDENT pilot (dependentPilotDestination): the group's pool for this +-dummyQ, plus the two-way home row
             int own = stockPlacementAlternateRow(frozenQ[side], alternateRow, relocatedChildOwnRow);
             int dependentGroup = dependentGroupOfHomeRow(frozenQ[side], own, relocatedChildOwnRow, reactiveRelocationDependentGroupOfRow);
-            zeroImpedanceRelocationGroup[fSlot] = dependentGroup;
-            relocationCandidateOffset[fSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-            for (int c = structure->hReactiveRelocationGroupStart[dependentGroup]; c < structure->hReactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                zeroImpedanceRelocationCandidateDestinations.push_back(-2 - structure->hReactiveRelocationCandidateRows[c]);
-            }
-            zeroImpedanceRelocationGroup[jSlot] = dependentGroup;
-            relocationCandidateOffset[jSlot] = static_cast<int>(zeroImpedanceRelocationCandidateDestinations.size());
-            for (int c = structure->hReactiveRelocationGroupStart[dependentGroup]; c < structure->hReactiveRelocationGroupStart[dependentGroup + 1]; c++) {
-                zeroImpedanceRelocationCandidateDestinations.push_back(pos.at(structure->hReactiveRelocationCandidateRows[c], z[5]));
-            }
+            appendGroupPool(structure, pos, dependentGroup, z[5], fSlot, jSlot, zeroImpedanceRelocationGroup, relocationCandidateOffset,
+                            zeroImpedanceRelocationCandidateDestinations);
             zeroImpedanceRelocationDependentPilot[fSlot] = 1;
             zeroImpedanceRelocationDependentPilot[jSlot] = 1;
             if (own >= 0 && own != frozenQ[side]) {

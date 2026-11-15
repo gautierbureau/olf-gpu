@@ -602,23 +602,7 @@ public final class GpuTransformerVoltageControlOuterLoop {
             // the ON/OFF deltas are diffed against each other, not against the caller's base: a base
             // extracted with the control already ON (the WITH_GENERATOR base load flow, whose network
             // OLF's initialize switched on) yields the same rows as a control-off base
-            List<Integer> dRows = new ArrayList<>();
-            for (int r = 0; r < baseTargets.length; r++) {
-                if (onAct.rowMode()[r] != offAct.rowMode()[r] || onTargets[r] != offTargets[r]) {
-                    dRows.add(r);
-                }
-            }
-            int[] deltaRows = dRows.stream().mapToInt(Integer::intValue).toArray();
-            int[] deltaModesOn = new int[deltaRows.length];
-            double[] deltaTargetsOn = new double[deltaRows.length];
-            int[] deltaModesOff = new int[deltaRows.length];
-            double[] deltaTargetsOff = new double[deltaRows.length];
-            for (int k = 0; k < deltaRows.length; k++) {
-                deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
-                deltaTargetsOn[k] = onTargets[deltaRows[k]];
-                deltaModesOff[k] = offAct.rowMode()[deltaRows[k]];
-                deltaTargetsOff[k] = offTargets[deltaRows[k]];
-            }
+            ControlDeltas deltas = ControlDeltas.between(baseTargets.length, onAct.rowMode(), onTargets, offAct.rowMode(), offTargets);
             Member[] members = new Member[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
                 LfBranch branch = memberBranches.get(m);
@@ -664,8 +648,8 @@ public final class GpuTransformerVoltageControlOuterLoop {
                 memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
             out.add(new TransformerController(vCol, voltageControl.getTargetValue(), halfDeadband,
-                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition,
-                    deltaModesOff, deltaTargetsOff));
+                    deltas.rows(), deltas.modesOn(), deltas.targetsOn(), members, useInitialTapPosition,
+                    deltas.modesOff(), deltas.targetsOff()));
         }
         return out;
     }

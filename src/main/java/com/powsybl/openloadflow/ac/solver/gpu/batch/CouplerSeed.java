@@ -67,10 +67,7 @@ final class CouplerSeed {
             // (dummies held at 0) — the inverse of a close
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-            rs.rowModes.set(s, dpRow, GpuRowMode.FIXED_VARIABLE);
-            rs.rowModes.set(s, distrQRow, GpuRowMode.FIXED_VARIABLE);
-            rs.overrides.add(s * n + dpRow, 0.0);
-            rs.overrides.add(s * n + distrQRow, 0.0);
+            dummyRowsToIdentities(rs, n, s, dpRow, distrQRow);
             // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
             // coupler open that equation is gone, and OLF's post-contingency system has
             // BUS_TARGET_V active on that bus instead (read off the CPU dump for
@@ -101,14 +98,7 @@ final class CouplerSeed {
                 // OLF has removed the bus, so moving an injection target onto them would
                 // overwrite the freeze - these overrides are applied after it.
                 int[] frozenForCtg = frozenRowsByIndex[ci];
-                boolean childFrozen = false;
-                for (int fr : frozenForCtg) {
-                    if (fr == childPhiRow || fr == childVRow) {
-                        childFrozen = true;
-                        break;
-                    }
-                }
-                if (childFrozen) {
+                if (frozen(frozenForCtg, childPhiRow, childVRow)) {
                     continue;
                 }
                 // The child keeps controlling its own voltage once the coupler that carried
@@ -151,19 +141,7 @@ final class CouplerSeed {
                     }
                     // The DS participant on that bus has to follow its equation. Its
                     // structural row is this coupler's DUMMY_P, now an identity.
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        if (gpuData.distributedSlack().busPhiRow()[i] != dpRow) {
-                            continue;
-                        }
-                        cl.distributedSlackBusRowOverrideList.add(s);
-                        cl.distributedSlackBusRowOverrideList.add(i);
-                        cl.distributedSlackBusRowOverrideList.add(childPhiRow);
-                        if (cl.distributedSlackBusRowOverrideByScenario[s] == null) {
-                            cl.distributedSlackBusRowOverrideByScenario[s] = new int[nDistributedSlackBuses];
-                            java.util.Arrays.fill(cl.distributedSlackBusRowOverrideByScenario[s], -1);
-                        }
-                        cl.distributedSlackBusRowOverrideByScenario[s][i] = childPhiRow;
-                    }
+                    participantRowFollows(cl, gpuData, nDistributedSlackBuses, s, dpRow, childPhiRow);
                 }
                 // A child that is NOT voltage-controlled has its reactive balance on the
                 // coupler's DUMMY_Q instead, so its Q target follows the same way.
@@ -224,10 +202,7 @@ final class CouplerSeed {
             rs.spanningTreeOverrideScenarioElementValueList.add(0);
             int dpRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
-            rs.rowModes.set(s, dpRow, GpuRowMode.FIXED_VARIABLE);         // identity rows, target 0
-            rs.rowModes.set(s, distrQRow, GpuRowMode.FIXED_VARIABLE);
-            rs.overrides.add(s * n + dpRow, 0.0);
-            rs.overrides.add(s * n + distrQRow, 0.0);
+            dummyRowsToIdentities(rs, n, s, dpRow, distrQRow);             // identity rows, target 0
             // ...and if the RELOCATION put a child bus's power balance on those dummy rows,
             // its TARGETS have to travel with it, exactly as on the coupler-OPENING path
             // above. Holding the row with an identity is what makes the kernel's
@@ -250,34 +225,15 @@ final class CouplerSeed {
             int childPhiRow = treeChildSide == GpuTwoSides.ONE ? gpuData.zeroImpedanceBranch().indices()[ze * 11 + 8]
                     : gpuData.zeroImpedanceBranch().indices()[ze * 11 + 9];
             int childVRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + (treeChildSide == GpuTwoSides.ONE ? 6 : 7)];
-            boolean childFrozen = false;
-            for (int fr : frozenRowsByIndex[ci]) {
-                if (fr == childPhiRow || fr == childVRow) {
-                    childFrozen = true;  // islanded: the freeze holds these rows flat
-                    break;
-                }
-            }
-            if (childFrozen) {
-                continue;
+            if (frozen(frozenRowsByIndex[ci], childPhiRow, childVRow)) {
+                continue;                                    // islanded: the freeze holds these rows flat
             }
             slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, distrQRow, childVRow);
             if (childPhiRow >= 0 && dpRow >= 0) {
                 if (!GenOutage.planSeedsRow(slotGos, childPhiRow)) {   // the plan's own target wins
                     rs.overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
                 }
-                for (int i = 0; i < nDistributedSlackBuses; i++) {   // the DS participant follows its equation
-                    if (gpuData.distributedSlack().busPhiRow()[i] != dpRow) {
-                        continue;
-                    }
-                    cl.distributedSlackBusRowOverrideList.add(s);
-                    cl.distributedSlackBusRowOverrideList.add(i);
-                    cl.distributedSlackBusRowOverrideList.add(childPhiRow);
-                    if (cl.distributedSlackBusRowOverrideByScenario[s] == null) {
-                        cl.distributedSlackBusRowOverrideByScenario[s] = new int[nDistributedSlackBuses];
-                        java.util.Arrays.fill(cl.distributedSlackBusRowOverrideByScenario[s], -1);
-                    }
-                    cl.distributedSlackBusRowOverrideByScenario[s][i] = childPhiRow;
-                }
+                participantRowFollows(cl, gpuData, nDistributedSlackBuses, s, dpRow, childPhiRow);   // the DS participant follows its equation
             }
             if (childVRow >= 0 && distrQRow >= 0 && !GenOutage.planSeedsRow(slotGos, childVRow)) {
                 rs.overrides.put(s * n + childVRow, baseTargets[distrQRow]);
@@ -301,5 +257,41 @@ final class CouplerSeed {
             }
         }
         return slotGos;
+    }
+
+    /** A coupler's DUMMY_P and DUMMY_Q rows back to identities held at 0 in slot s: the coupler couples nothing there. */
+    private static void dummyRowsToIdentities(RunScratch rs, int n, int s, int dpRow, int distrQRow) {
+        rs.rowModes.set(s, dpRow, GpuRowMode.FIXED_VARIABLE);
+        rs.rowModes.set(s, distrQRow, GpuRowMode.FIXED_VARIABLE);
+        rs.overrides.add(s * n + dpRow, 0.0);
+        rs.overrides.add(s * n + distrQRow, 0.0);
+    }
+
+    /** Whether the contingency froze (islanded) either of a bus's two rows. */
+    private static boolean frozen(int[] frozenRows, int phiRow, int vRow) {
+        for (int fr : frozenRows) {
+            if (fr == phiRow || fr == vRow) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The distributed-slack participant whose P balance sat on the coupler's DUMMY_P row follows it to the bus's own row. */
+    private static void participantRowFollows(ChunkLists cl, GpuAcData gpuData, int nDistributedSlackBuses, int s, int dpRow,
+                                              int childPhiRow) {
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            if (gpuData.distributedSlack().busPhiRow()[i] != dpRow) {
+                continue;
+            }
+            cl.distributedSlackBusRowOverrideList.add(s);
+            cl.distributedSlackBusRowOverrideList.add(i);
+            cl.distributedSlackBusRowOverrideList.add(childPhiRow);
+            if (cl.distributedSlackBusRowOverrideByScenario[s] == null) {
+                cl.distributedSlackBusRowOverrideByScenario[s] = new int[nDistributedSlackBuses];
+                java.util.Arrays.fill(cl.distributedSlackBusRowOverrideByScenario[s], -1);
+            }
+            cl.distributedSlackBusRowOverrideByScenario[s][i] = childPhiRow;
+        }
     }
 }

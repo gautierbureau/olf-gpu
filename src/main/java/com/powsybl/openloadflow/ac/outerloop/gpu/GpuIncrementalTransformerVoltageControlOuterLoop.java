@@ -56,7 +56,6 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuIncrementalTransformerVoltageControlOuterLoop.class);
 
-    private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalTransformerVoltageControlOuterLoop
     private static final double MIN_SENSI_FILTER = 0.05;
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
@@ -70,24 +69,6 @@ public final class GpuIncrementalTransformerVoltageControlOuterLoop {
                       double[][] tapRows, int baseTapIndex, int elemIndex) {
         double r1(int tap) {
             return tapRows[tap][GpuPiModelColumn.R1];
-        }
-    }
-
-    /** Per-(scenario, controller) OLF ControllerContext ratchet state. */
-    private static final class ControllerContext {
-        int directionChangeCount;
-        int currentDirection;                                // 0 = none, +1 = increase, -1 = decrease
-        int allowedDirection;                                // 0 = both, +1 = increase-only, -1 = decrease-only
-
-        void update(int direction) {                         // OLF ControllerContext.updateAllowedDirection
-            if (directionChangeCount < MAX_DIRECTION_CHANGE) {
-                if (currentDirection != 0 && currentDirection != direction) {
-                    directionChangeCount++;
-                }
-                currentDirection = direction;
-            } else {
-                allowedDirection = direction;
-            }
         }
     }
 

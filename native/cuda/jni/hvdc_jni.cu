@@ -25,14 +25,12 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
     }
     int nh = env->GetArrayLength(jElem);
     auto upI = [&](jintArray a, DeviceBuf& b) {
-        jint* q = env->GetIntArrayElements(a, nullptr);
+        const JniInts q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(int));
-        env->ReleaseIntArrayElements(a, q, JNI_ABORT);
     };
     auto upD = [&](jdoubleArray a, DeviceBuf& b) {
-        jdouble* q = env->GetDoubleArrayElements(a, nullptr);
+        const JniDoubles q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
-        env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
     upI(jElem, ctx->hvdcAcEmulation.dHvdcElement);
     upI(jHvdcBus1PRow, ctx->hvdcAcEmulation.dHvdcBus1PRow);

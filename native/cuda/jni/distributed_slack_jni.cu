@@ -87,17 +87,15 @@ OLF_JNI(ac_outerloop_gpu, DistributedSlackNative, setBatchDistributedSlackGenera
     }
     int nDistributedSlackGenerators = env->GetArrayLength(jBus);
     auto upI = [&](jintArray a, DeviceBuf& buf) {
-        jint* p = env->GetIntArrayElements(a, nullptr);
+        const JniInts p(env, a);
         buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(int));
-        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
     };
     auto upD = [&](jdoubleArray a, DeviceBuf& buf) {
         if (a == nullptr || env->GetArrayLength(a) == 0) {
             return;
         }
-        jdouble* p = env->GetDoubleArrayElements(a, nullptr);
+        const JniDoubles p(env, a);
         buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(double));
-        env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
     };
     upI(jBus, ctx->distributedSlack.distributedSlackGeneratorBus);
     upD(jFactor, ctx->distributedSlack.distributedSlackGeneratorFactor);

@@ -22,20 +22,17 @@ OLF_JNI(ac_outerloop_gpu, AutomationSystemNative, setBatchAutomationSystem)(
         return;
     }
     auto upI = [&](jintArray a, DeviceBuf& buf) {
-        jint* p = env->GetIntArrayElements(a, nullptr);
+        const JniInts p(env, a);
         buf.upload(p, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(a))) * sizeof(int));
-        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
     };
     upI(jMonitoredElement, ctx->automationSystem.dOverloadManagementSystemMonitoredElement);
     upI(jMonitoredSide, ctx->automationSystem.dOverloadManagementSystemMonitoredSide);
     upI(jTrippingStart, ctx->automationSystem.dOverloadManagementSystemTrippingStart);
     upI(jOperatedMaskSlot, ctx->automationSystem.dOverloadManagementSystemOperatedMaskSlot);
-    jbyte* open = env->GetByteArrayElements(jOpenAction, nullptr);
+    const JniBytes open(env, jOpenAction);
     ctx->automationSystem.dOverloadManagementSystemOpenAction.upload(open, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jOpenAction))));
-    env->ReleaseByteArrayElements(jOpenAction, open, JNI_ABORT);
-    jdouble* threshold = env->GetDoubleArrayElements(jThreshold, nullptr);
+    const JniDoubles threshold(env, jThreshold);
     ctx->automationSystem.dOverloadManagementSystemThreshold.upload(threshold, std::max<size_t>(1, static_cast<size_t>(env->GetArrayLength(jThreshold))) * sizeof(double));
-    env->ReleaseDoubleArrayElements(jThreshold, threshold, JNI_ABORT);
     std::vector<int> operatedMaskSlot(static_cast<size_t>(env->GetArrayLength(jOperatedMaskSlot)));
     env->GetIntArrayRegion(jOperatedMaskSlot, 0, static_cast<jsize>(operatedMaskSlot.size()), operatedMaskSlot.data());
     ctx->automationSystem.hOverloadManagementSystemOperatedMaskSlot = operatedMaskSlot;

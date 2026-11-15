@@ -90,4 +90,34 @@
 using namespace powsybl::openloadflow;
 using namespace olfgpu;
 
+// A Java primitive array's elements, read in place and released without copying back (JNI_ABORT) when this goes out of
+// scope, on every exit: early returns and exceptions included. Converts to the element pointer; a null array gives a null
+// pointer and length 0.
+template <typename JArray, typename T, T* (JNIEnv::*GET)(JArray, jboolean*), void (JNIEnv::*RELEASE)(JArray, T*, jint)>
+class JniElements {
+public:
+    JniElements(JNIEnv* env, JArray array)
+        : env_(env), array_(array), p_(array != nullptr ? (env->*GET)(array, nullptr) : nullptr),
+          length_(array != nullptr ? env->GetArrayLength(array) : 0) {}
+    ~JniElements() {
+        if (p_ != nullptr) {
+            (env_->*RELEASE)(array_, p_, JNI_ABORT);
+        }
+    }
+    JniElements(const JniElements&) = delete;
+    JniElements& operator=(const JniElements&) = delete;
+    operator T*() const { return p_; }
+    jsize length() const { return length_; }
+
+private:
+    JNIEnv* env_;
+    JArray array_;
+    T* p_;
+    jsize length_;
+};
+
+using JniInts = JniElements<jintArray, jint, &JNIEnv::GetIntArrayElements, &JNIEnv::ReleaseIntArrayElements>;
+using JniDoubles = JniElements<jdoubleArray, jdouble, &JNIEnv::GetDoubleArrayElements, &JNIEnv::ReleaseDoubleArrayElements>;
+using JniBytes = JniElements<jbyteArray, jbyte, &JNIEnv::GetByteArrayElements, &JNIEnv::ReleaseByteArrayElements>;
+
 #endif  // OLF_GPU_JNI_JNI_COMMON_CUH

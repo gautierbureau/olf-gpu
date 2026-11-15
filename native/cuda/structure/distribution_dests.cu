@@ -29,6 +29,7 @@
 #include "../common/codes/gpu_two_sides.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
+#include "distr_q_columns.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -69,20 +70,11 @@ void buildDistrQDest(SharedStructure* structure, const CsrPattern& pos, const st
                     continue;
                 }
                 d[0] = -2 - row;                             // q value -> F row
-                if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt: dq/dv on the bus V column
-                    d[1] = pos.at(row, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
-                } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: dq/dv on the connected-side V col
-                    const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                    d[1] = pos.at(row, distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5]);
-                } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-impedance: J slot on the dummyQ column
-                    d[1] = pos.at(row, distrQElement[c]);
-                } else {                                     // closed branch
-                    const int* q = closedBranchIndices + static_cast<size_t>(distrQElement[c]) * 12;
-                    d[1] = pos.at(row, q[5]);                // dq/dv1
-                    d[2] = pos.at(row, q[7]);                // dq/dv2
-                    d[3] = pos.at(row, q[4]);                // dq/dph1
-                    d[4] = pos.at(row, q[6]);                // dq/dph2
-                    d[5] = q[9] >= 0 ? pos.at(row, q[9]) : -1;   // dq/dr1
+                int columns[5];                              // the derivatives -> J slots (an absent dq/dr1 stays -1)
+                const int count = distrQTermColumns(distrQKind[c], distrQElement[c], distrQSide[c], closedBranchIndices,
+                                                    openBranchIndices, shuntIndices, columns);
+                for (int k = 0; k < count; k++) {
+                    d[1 + k] = pos.at(row, columns[k]);
                 }
             }
         }

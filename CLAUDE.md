@@ -16,9 +16,9 @@ needs (currently ONE 4-line `PropagatedContingency.getShuntIdsToShift()` commit,
 candidate upstream PR). Rebuild the dependency after changing it:
 `cd ../powsybl-open-loadflow-3 && mvn -s ~/Projects/powsybl/tmp/settings.xml
 -DskipTests -Dcheckstyle.skip -Dmaven.javadoc.skip -Dlicense.skip install`.
-It is also what `OLF_SRC` points at for the codegen parse. **Since the core 7.4.0 port** the dependency is
-`2.4.1-SNAPSHOT` instead, built from the fork's `gb/release-2.4.1-gpu-api` (2.4.0 release + the
-extension points only); point `OLF_SRC` at that branch. Never build the
+It is also what `OLF_SRC` points at for the codegen parse. **Since the port to OLF main** the dependency is
+`2.5.0-SNAPSHOT-gpu` instead, built from the fork's `gb/main-olf-gpu-port` (OLF main + the extension-point
+PRs merged as is, + #93); point `OLF_SRC` at that branch. Never build the
 dependency from `olf_gpu` — its jar would duplicate this project's classes. GPU classes live in
 `com.powsybl.openloadflow.*` SPLIT packages (classpath access to OLF internals);
 `CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's

@@ -195,7 +195,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     /** A reclose that brings an islanded bus back: OLF re-enables every branch at a bus it adds back to the main component
-     *  that is not connected at both ends (AbstractLfBranchAction.updateBusesAndBranchStatus), even one the contingency
+     *  that is not connected at both ends (AbstractLfBranchAction.getNetworkActivations), even one the contingency
      *  itself outaged. The contingency takes la and the dangling lh off vx; closing la brings vx back with lh's charging,
      *  which the device left out (network.xiidm LUSW, propagated to LSZO and the dangling LVAV: LAHV 99.08 kV against
      *  OLF's 99.82). */

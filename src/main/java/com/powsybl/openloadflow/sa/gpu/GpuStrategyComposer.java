@@ -322,7 +322,7 @@ final class GpuStrategyComposer {
         generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
         if (!reenabled.isEmpty()) {
             // OLF re-enables every branch at a bus its actions bring back into the main component that is not connected
-            // at both ends (AbstractLfBranchAction.updateBusesAndBranchStatus), even one the contingency outaged
+            // at both ends (AbstractLfBranchAction.getNetworkActivations), even one the contingency outaged
             List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
             ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
             ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));

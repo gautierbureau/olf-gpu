@@ -12,6 +12,7 @@
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
 #include "lu_split.cuh"
+#include "transposed_solve.cuh"
 
 namespace olfgpu {
 
@@ -260,6 +261,56 @@ __global__ void levelSplit(bool backward, int nRows, int width, int capacity, co
     }
 }
 
+// One level of the transposed solves (transposed_solve.cuh): U^T forward (upper) on a backward level, L^T backward on
+// a forward one, each row reading its column of the factors.
+__global__ void transposedLevel(bool upper, int nRows, int width, int capacity, const int* __restrict__ selected,
+                                const int* __restrict__ rows, const int* __restrict__ columnStart,
+                                const int* __restrict__ columnSplit, const int* __restrict__ columnRow,
+                                const int* __restrict__ columnEntry, const int* __restrict__ luDiag,
+                                const double* __restrict__ lu, double* __restrict__ z) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nRows) * width) {
+        return;
+    }
+    const int t = static_cast<int>(g / width);
+    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
+    if (upper) {
+        upperTransposedRow(rows[t], a, capacity, columnStart, columnSplit, columnRow, columnEntry, luDiag, lu, z);
+    } else {
+        lowerTransposedRow(rows[t], a, capacity, columnStart, columnSplit, columnRow, columnEntry, lu, z);
+    }
+}
+
+// transposedLevel with each row's terms split over blockDim.y warps, as levelSplit splits the plain solve's.
+__global__ void transposedLevelSplit(bool upper, int width, int capacity, const int* __restrict__ selected,
+                                     const int* __restrict__ rows, const int* __restrict__ columnStart,
+                                     const int* __restrict__ columnSplit, const int* __restrict__ columnRow,
+                                     const int* __restrict__ columnEntry, const int* __restrict__ luDiag,
+                                     const double* __restrict__ lu, double* __restrict__ z) {
+    extern __shared__ double partial[];                      // [slice][lane of the block]
+    const int tiles = (width + SPLIT_LANES - 1) / SPLIT_LANES;
+    const int t = blockIdx.x / tiles;
+    const int slot = (blockIdx.x - t * tiles) * SPLIT_LANES + threadIdx.x;
+    const int slices = blockDim.y;
+    const bool active = slot < width;
+    const int a = active ? laneOf(slot, selected) : 0;
+    const int i = rows[t];
+    double sum = 0.0;
+    if (active) {
+        sum = subtractColumnTerms(0.0, (upper ? columnStart[i] : columnSplit[i]) + threadIdx.y,
+                                  upper ? columnSplit[i] : columnStart[i + 1], slices, a, capacity, columnRow,
+                                  columnEntry, lu, z);
+    }
+    partial[threadIdx.y * SPLIT_LANES + threadIdx.x] = sum;
+    __syncthreads();
+    if (threadIdx.y == 0 && active) {
+        double y = z[static_cast<size_t>(i) * capacity + a];
+        for (int k = 0; k < slices; k++) {
+            y += partial[k * SPLIT_LANES + threadIdx.x];
+        }
+        z[static_cast<size_t>(i) * capacity + a] = upper ? y / lu[static_cast<size_t>(luDiag[i]) * capacity + a] : y;
+    }
+}
 void launchLevel(ScalarLu& lu, bool backward, int level, const int* selected, int width, cudaStream_t stream) {
     const std::vector<int>& start = backward ? lu.backwardLevelStart : lu.forwardLevelStart;
     const int rows = start[level + 1] - start[level];
@@ -322,6 +373,71 @@ void solveScalar(ScalarLu& lu, const int* selected, int width, const double* b, 
     CUDA_CHECK(cudaGetLastError());
 }
 
+// One level of the transposed solves: U^T forward on backward level `level` (upper), L^T backward on forward level
+// `level`, split over several warps as launchLevel splits the plain solve's levels.
+void launchTransposedLevel(ScalarLu& lu, bool upper, int level, const int* selected, int width, cudaStream_t stream) {
+    const std::vector<int>& start = upper ? lu.backwardLevelStart : lu.forwardLevelStart;
+    const int rows = start[level + 1] - start[level];
+    if (rows == 0) {
+        return;
+    }
+    const int* levelRows = (upper ? lu.dBackwardRow : lu.dForwardRow).as<int>() + start[level];
+    const int slices = splitSlices(rows, width, (upper ? lu.transposedUpperLongest : lu.transposedLowerLongest)[level],
+                                   lu.residentThreads);
+    if (slices > 1) {
+        gBatchedLuSplitLaunches++;
+        const unsigned int blocks = static_cast<unsigned int>(rows) * ((width + SPLIT_LANES - 1) / SPLIT_LANES);
+        transposedLevelSplit<<<blocks, dim3(SPLIT_LANES, slices), slices * SPLIT_LANES * sizeof(double), stream>>>(
+                upper, width, lu.capacity, selected, levelRows, lu.dColumnStart.as<int>(), lu.dColumnSplit.as<int>(),
+                lu.dColumnRow.as<int>(), lu.dColumnEntry.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(),
+                lu.dWork.as<double>());
+    } else {
+        transposedLevel<<<blocksFor(static_cast<size_t>(rows) * width), LU_BLOCK, 0, stream>>>(upper, rows, width,
+                lu.capacity, selected, levelRows, lu.dColumnStart.as<int>(), lu.dColumnSplit.as<int>(),
+                lu.dColumnRow.as<int>(), lu.dColumnEntry.as<int>(), lu.dLuDiag.as<int>(), lu.dLu.as<double>(),
+                lu.dWork.as<double>());
+    }
+}
+
+// The factors' column lists the transposed solves read (buildScalarLuColumns), uploaded from lu's plan by the first
+// of them.
+void prepareTransposedSolve(ScalarLu& lu, const ScalarLuPlan& plan) {
+    if (lu.transposedReady) {
+        return;
+    }
+    if (plan.n != lu.n || plan.nnzLu != lu.nnzLu) {
+        throw std::runtime_error("batched LU transposed solve: not the plan the factors were built on");
+    }
+    const ScalarLuColumns columns = buildScalarLuColumns(plan);
+    uploadVector(lu.dColumnStart, columns.columnStart);
+    uploadVector(lu.dColumnSplit, columns.columnSplit);
+    uploadVector(lu.dColumnRow, columns.columnRow);
+    uploadVector(lu.dColumnEntry, columns.columnEntry);
+    lu.transposedUpperLongest = columns.upperLevelLongest;
+    lu.transposedLowerLongest = columns.lowerLevelLongest;
+    lu.transposedReady = true;
+}
+
+// The transposed solves on width lanes, as solveScalar: the right-hand side in through the column positions, U^T
+// forward on the backward levels from the last down, L^T backward on the forward levels from the last down, the
+// solution out through the row positions.
+void solveScalarTransposed(ScalarLu& lu, const int* selected, int width, const double* b, double* x,
+                           cudaStream_t stream) {
+    const dim3 tileBlock(TILE, TILE_ROWS);
+    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+    toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
+            lu.dColPosition.as<int>(), b, lu.dWork.as<double>());
+    for (int l = static_cast<int>(lu.backwardLevelStart.size()) - 2; l >= 0; l--) {
+        launchTransposedLevel(lu, true, l, selected, width, stream);
+    }
+    for (int l = static_cast<int>(lu.forwardLevelStart.size()) - 2; l >= 0; l--) {
+        launchTransposedLevel(lu, false, l, selected, width, stream);
+    }
+    fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
+            selected, lu.dRowPosition.as<int>(), lu.dWork.as<double>(), x);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 }  // namespace
 
 // A regrown factor buffer keeps 1 / LU_REGROWTH_HEADROOM more than it needs (createScalarLu).
@@ -336,6 +452,7 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
     lu.nnzLu = plan.nnzLu;
     lu.capacity = capacity;
     lu.width = 0;
+    lu.transposedReady = false;                              // the next transposed solve reads this plan's columns
     lu.stepStart = plan.stepStart;
     lu.forwardLevelStart = plan.forwardLevelStart;
     lu.backwardLevelStart = plan.backwardLevelStart;
@@ -451,6 +568,14 @@ void solveScalarSelectedLanes(ScalarLu& lu, const int* selected, int count, cons
                               cudaStream_t stream) {
     if (count > 0) {
         solveScalar(lu, selected, count, b, x, stream);
+    }
+}
+
+void solveScalarLanesTransposed(ScalarLu& lu, const ScalarLuPlan& plan, const double* b, double* x,
+                                cudaStream_t stream) {
+    if (lu.width > 0) {
+        prepareTransposedSolve(lu, plan);
+        solveScalarTransposed(lu, nullptr, lu.width, b, x, stream);
     }
 }
 

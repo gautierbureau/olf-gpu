@@ -23,6 +23,9 @@ import java.util.Objects;
  * handed over as is instead of copied (on rte6515 a copy is 14,260 x 13,040 doubles, ~0.5 s of allocation). Read
  * it by row, or take {@code Arrays.copyOf(state, n)} where a length-{@code n} array is required.
  *
+ * <p>{@code reactiveLimitDecisions}: the scenario's PV/PQ decisions as its solve ended, when the request asked for them
+ * ({@link BatchSolveRequest#reactiveLimitDecisions()}) and the network has reactive-limit entries; null otherwise.
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record BatchScenarioResult(String contingencyId, double[] state, int iterations,
@@ -37,7 +40,26 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
                                   /** The target P the scenario's distribution left each participating generator (null
                                    *  where not read: read for a contingency that has strategy pairs, under distributed
                                    *  slack). */
-                                  GeneratorTargets generatorTargets) {
+                                  GeneratorTargets generatorTargets,
+                                  /** The scenario's PV/PQ decisions as its solve ended (see the class comment). */
+                                  ReactiveLimitDecisions reactiveLimitDecisions,
+                                  /** The solutions of the request's sensitivity basis at the scenario's converged state
+                                   *  (SensitivityBasisRequest#resultLength values), null when not asked or not solved. */
+                                  double[] sensitivityBasis) {
+
+    /**
+     * A scenario's reactive-limit decisions as its solve ended, per reactive-limit entry (the order of
+     * {@code GpuAcData.reactiveLimits()}): its {@link com.powsybl.openloadflow.ac.solver.gpu.codes.GpuReactiveLimitsState}
+     * ({@code finalState}), and the target its switch to PQ froze on its row ({@code frozenRowTargetQ}, the limit minus
+     * the bus's load Q; NaN for an entry still PV or islanded, the whole array null when the device exported none). What
+     * a caller hands to OLF's network so that its equation system is the one the scenario converged on.
+     */
+    public record ReactiveLimitDecisions(int[] finalState, double[] frozenRowTargetQ) {
+        public ReactiveLimitDecisions {
+            Objects.requireNonNull(finalState);
+        }
+    }
+
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(automationSystemSwitchedBranchNums);
@@ -50,7 +72,7 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
     public BatchScenarioResult(String contingencyId, double[] state, int iterations,
                                double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
         this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN, Double.NaN, new int[0],
-                new double[0], null);
+                new double[0], null, null, null);
     }
 
     /** The target P each participating generator ends a scenario with, by generator id (its distribution anchor plus

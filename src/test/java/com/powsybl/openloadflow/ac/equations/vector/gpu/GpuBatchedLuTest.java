@@ -1493,4 +1493,206 @@ class GpuBatchedLuTest {
         assertEquals(cudssLuNnz, BatchedLuNative.scalarPlanStatistics(n, csr.rowPtr(), csr.colIdx(), rowOrder, colOrder)[0]);
         assertTrue(inverted[5] > asReturned[5], "the inverse permutation fills more: " + inverted[5]);
     }
+
+    /** A batch's systems with their rows moved: row i of every scenario becomes row pi[i]. */
+    private record MovedRows(Csr csr, double[] values) {
+    }
+
+    private static MovedRows moveRows(Csr csr, double[] values, int capacity, int[] pi) {
+        int n = csr.n();
+        int nnz = csr.nnz();
+        int[] from = new int[n];                                     // row of the moved system -> row of csr
+        for (int i = 0; i < n; i++) {
+            from[pi[i]] = i;
+        }
+        int[] rowPtr = new int[n + 1];
+        for (int r = 0; r < n; r++) {
+            rowPtr[r + 1] = rowPtr[r] + csr.rowPtr()[from[r] + 1] - csr.rowPtr()[from[r]];
+        }
+        int[] colIdx = new int[nnz];
+        double[] moved = new double[capacity * nnz];
+        for (int r = 0; r < n; r++) {
+            int start = csr.rowPtr()[from[r]];
+            int length = csr.rowPtr()[from[r] + 1] - start;
+            System.arraycopy(csr.colIdx(), start, colIdx, rowPtr[r], length);
+            for (int s = 0; s < capacity; s++) {
+                System.arraycopy(values, s * nnz + start, moved, s * nnz + rowPtr[r], length);
+            }
+        }
+        return new MovedRows(new Csr(n, rowPtr, colIdx), moved);
+    }
+
+    /** rowOrder for the moved rows' system to eliminate as the original did on order: pi o order. */
+    private static int[] movedRowOrder(int[] pi, int[] order) {
+        int[] rowOrder = new int[order.length];
+        for (int k = 0; k < order.length; k++) {
+            rowOrder[k] = pi[order[k]];
+        }
+        return rowOrder;
+    }
+
+    private static double[][] transpose(double[][] m) {
+        double[][] t = new double[m.length][m.length];
+        for (int i = 0; i < m.length; i++) {
+            for (int j = 0; j < m.length; j++) {
+                t[j][i] = m[i][j];
+            }
+        }
+        return t;
+    }
+
+    private static void assertClose(double[] expected, double[] actual, String message) {
+        double scale = Math.max(1, Arrays.stream(expected).map(Math::abs).max().orElse(0));
+        assertArrayEquals(expected, actual, 1e-12 * scale, message);
+    }
+
+    /**
+     * One factorization of the scenarios of {@code laneMap}, then both solves on it (factorizeAndSolveTransposed):
+     * {@code A x = b} and {@code Aᵀ y = c} against the dense pivoted solve of each, every other scenario's solutions left
+     * as they were, nothing clamped. Returns, per lane, whether the pivoting engine took it.
+     */
+    private static int[] assertSolvesBothWays(Csr csr, double[] values, int capacity, int[] laneMap, int[] rowOrder,
+                                              int[] colOrder, long seed) {
+        int n = csr.n();
+        Random random = new Random(seed);
+        double[] rightHandSides = new double[capacity * n];
+        double[] transposedRightHandSides = new double[capacity * n];
+        for (int k = 0; k < rightHandSides.length; k++) {
+            rightHandSides[k] = random.nextDouble() * 2 - 1;
+            transposedRightHandSides[k] = random.nextDouble() * 2 - 1;
+        }
+        double[] solutions = filled(capacity * n, 7);
+        double[] transposedSolutions = filled(capacity * n, 9);
+        int[] pivoted = new int[laneMap.length];
+        int[] clamps = new int[laneMap.length];
+        BatchedLuNative.factorizeAndSolveTransposed(n, csr.rowPtr(), csr.colIdx(), rowOrder, colOrder, capacity, values,
+                rightHandSides, transposedRightHandSides, laneMap, solutions, transposedSolutions, pivoted, clamps);
+        assertArrayEquals(new int[laneMap.length], clamps, "nothing clamped");
+        boolean[] solved = new boolean[capacity];
+        for (int s : laneMap) {
+            solved[s] = true;
+        }
+        for (int s = 0; s < capacity; s++) {
+            if (!solved[s]) {
+                assertArrayEquals(filled(n, 7), scenario(solutions, s, n), "scenario " + s + " is outside the lane map");
+                assertArrayEquals(filled(n, 9), scenario(transposedSolutions, s, n),
+                        "scenario " + s + " is outside the lane map");
+                continue;
+            }
+            double[][] a = dense(csr, values, s);
+            assertClose(denseSolve(a, scenario(rightHandSides, s, n)), scenario(solutions, s, n), "A x = b, scenario " + s);
+            assertClose(denseSolve(transpose(a), scenario(transposedRightHandSides, s, n)),
+                    scenario(transposedSolutions, s, n), "Aᵀ y = c, scenario " + s);
+        }
+        return pivoted;
+    }
+
+    /**
+     * The transposed solve on the plain solve's factors (the adjoint's solve, which cuDSS does not offer): one
+     * factorization, then {@code A x = b} and {@code Aᵀ y = c}, both the dense pivoted solve's to rounding, on the fast
+     * engine - shuffled orders, and every scenario's rows moved so the row and column orders differ: the plain solve
+     * takes its right-hand side in through the row positions and its solution out through the column ones, the
+     * transposed solve the other way round, and only differing orders tell the two apart (the host check,
+     * tools/run_lu_host_check.sh, fails with them swapped on such systems only). Lanes outside the lane map keep both
+     * their solutions.
+     */
+    @Test
+    void transposedSolveOnTheFastEngineFactors() {
+        for (int[] size : new int[][] {{40, 6}, {300, 70}, {257, 33}}) {
+            int n = size[0];
+            int capacity = size[1];
+            Csr csr = toCsr(jacobianLikePattern(n, 4.0 / n, n));
+            double[] values = diagonallyDominantValues(csr, capacity, n + 1L);
+            int[] laneMap = java.util.stream.IntStream.range(0, capacity).filter(s -> s % 3 != 1).toArray();
+            int[] order = shuffled(n, n + 2L);
+            assertArrayEquals(new int[laneMap.length],
+                    assertSolvesBothWays(csr, values, capacity, laneMap, order, order, n + 3L),
+                    "a diagonally dominant matrix needs no pivoting, n=" + n);
+            int[] pi = shuffled(n, n + 4L);
+            MovedRows moved = moveRows(csr, values, capacity, pi);
+            assertArrayEquals(new int[laneMap.length], assertSolvesBothWays(moved.csr(), moved.values(), capacity, laneMap,
+                    movedRowOrder(pi, order), order, n + 5L), "rows moved: the same elimination, n=" + n);
+        }
+    }
+
+    /**
+     * The pivoting engine's transposed solve: every diagonal of a dense block zero, so each lane pivots inside its
+     * supernodes (12 columns: one supernode, 40: three) with its own row and column orders, which the transposed solve
+     * takes the other way round - the column order in, U_sᵀ up from the leaves, L_sᵀ down from the root, the row order
+     * out. Rows moved too. Then the two lanes of {@link #eachLanePivotsInsideASupernode}, unsymmetric so that A and Aᵀ
+     * differ: [[0, 2], [1, 0]] on the pivoting engine (a row swap), [[4, 1], [2, 3]] on the fast one, both directions
+     * exact.
+     */
+    @Test
+    void transposedSolveOnThePivotingEngineFactors() {
+        for (int n : new int[] {12, 40}) {
+            boolean[][] pattern = new boolean[n][n];
+            for (boolean[] row : pattern) {
+                Arrays.fill(row, true);
+            }
+            Csr csr = toCsr(pattern);
+            int capacity = 3;
+            double[] values = diagonallyDominantValues(csr, capacity, 21L + n);
+            for (int s = 0; s < capacity; s++) {
+                for (int i = 0; i < n; i++) {
+                    values[s * csr.nnz() + i * n + i] = 0.0;
+                }
+            }
+            int[] everyLane = new int[capacity];
+            Arrays.fill(everyLane, 1);
+            assertArrayEquals(everyLane, assertSolvesBothWays(csr, values, capacity, identity(capacity), identity(n),
+                    identity(n), 23L + n), "every lane pivots, n=" + n);
+            int[] pi = shuffled(n, 24L + n);
+            MovedRows moved = moveRows(csr, values, capacity, pi);
+            assertArrayEquals(everyLane, assertSolvesBothWays(moved.csr(), moved.values(), capacity, identity(capacity),
+                    movedRowOrder(pi, identity(n)), identity(n), 25L + n), "rows moved, n=" + n);
+        }
+        Csr csr = toCsr(new boolean[][] {{true, true}, {true, true}});
+        double[] values = {0, 2, 1, 0, 4, 1, 2, 3};
+        double[] solutions = new double[4];
+        double[] transposedSolutions = new double[4];
+        int[] pivoted = new int[2];
+        int[] clamps = new int[2];
+        BatchedLuNative.factorizeAndSolveTransposed(2, csr.rowPtr(), csr.colIdx(), identity(2), identity(2), 2, values,
+                new double[] {1, 2, 1, 2}, new double[] {1, 2, 1, 2}, new int[] {0, 1}, solutions, transposedSolutions,
+                pivoted, clamps);
+        assertArrayEquals(new int[] {1, 0}, pivoted);
+        assertArrayEquals(new int[] {0, 0}, clamps);
+        assertArrayEquals(new double[] {2, 0.5, 0.1, 0.6}, solutions, 1e-15);
+        assertArrayEquals(new double[] {1, 1, -0.1, 0.7}, transposedSolutions, 1e-15);
+    }
+
+    /**
+     * A long column is summed by several warps in the transposed solve, as a long row is in the plain one
+     * (batchedLuSplitLongRows): a hub eliminated last has a U column of 299 terms (its row of Uᵀ), one eliminated first
+     * an L column as long, and the transposed solve launches split levels of its own - more split launches than the
+     * factorization and plain solve alone - and gives the dense solve's answer. With the parameter off, none.
+     */
+    @Test
+    void longColumnsSplitOverSeveralWarpsInTheTransposedSolve() {
+        try {
+            for (boolean split : new boolean[] {true, false}) {
+                new GpuLoadFlowParameters().setBatchedLuSplitLongRows(split).install();
+                for (boolean hubLast : new boolean[] {true, false}) {
+                    Csr csr = hubAndChain(hubLast ? 300 : 64, hubLast);
+                    int n = csr.n();
+                    int capacity = 37;
+                    double[] values = diagonallyDominantValues(csr, capacity, 61);
+                    long before = BatchedLuNative.factorizationCounts()[3];
+                    BatchedLuNative.factorizeAndSolve(n, csr.rowPtr(), csr.colIdx(), identity(n), identity(n), capacity,
+                            values, filled(capacity * n, 1), identity(capacity), new double[capacity * n],
+                            new int[capacity], new int[capacity]);
+                    long plain = BatchedLuNative.factorizationCounts()[3] - before;
+                    before = BatchedLuNative.factorizationCounts()[3];
+                    assertArrayEquals(new int[capacity], assertSolvesBothWays(csr, values, capacity, identity(capacity),
+                            identity(n), identity(n), 62), "the fast engine factorizes every lane");
+                    long both = BatchedLuNative.factorizationCounts()[3] - before;
+                    assertTrue(split ? both > plain : both == 0,
+                            "split=" + split + " hubLast=" + hubLast + ": " + plain + " then " + both + " split launches");
+                }
+            }
+        } finally {
+            new GpuLoadFlowParameters().install();                   // the next tests run with the defaults
+        }
+    }
 }

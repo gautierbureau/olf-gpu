@@ -12,6 +12,7 @@
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
 #include "lu_split.cuh"
+#include "transposed_solve.cuh"
 
 namespace olfgpu {
 
@@ -765,6 +766,41 @@ __global__ void backwardLevelRows(int width, int capacity, const int* __restrict
     }
 }
 
+// Up pass of the transposed solve, one level (transposed_solve.cuh): every (supernode, lane) after its descendants.
+__global__ void upTransposedLevel(int nItems, int width, int capacity, const int* __restrict__ selected,
+                                  const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
+                                  const int* __restrict__ diagonalBase, const int* __restrict__ forwardRunStart,
+                                  const int* __restrict__ forwardRunUpper, const int* __restrict__ forwardRunY,
+                                  const int* __restrict__ forwardRunLength,
+                                  const unsigned char* __restrict__ columnPermutation, const double* __restrict__ lu,
+                                  double* __restrict__ z) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nItems) * width) {
+        return;
+    }
+    const int t = static_cast<int>(g / width);
+    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
+    supernodeUpTransposed(levelSupernode[t], a, capacity, supernodeStart, diagonalBase, forwardRunStart,
+                          forwardRunUpper, forwardRunY, forwardRunLength, columnPermutation, lu, z);
+}
+
+// Down pass of the transposed solve, one level: every (supernode, lane) after its ancestors.
+__global__ void downTransposedLevel(int nItems, int width, int capacity, const int* __restrict__ selected,
+                                    const int* __restrict__ levelSupernode, const int* __restrict__ supernodeStart,
+                                    const int* __restrict__ rowStart, const int* __restrict__ rows,
+                                    const int* __restrict__ diagonalBase, const int* __restrict__ lowerBase,
+                                    const unsigned char* __restrict__ rowPermutation, const double* __restrict__ lu,
+                                    double* __restrict__ z) {
+    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (g >= static_cast<size_t>(nItems) * width) {
+        return;
+    }
+    const int t = static_cast<int>(g / width);
+    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
+    supernodeDownTransposed(levelSupernode[t], a, capacity, supernodeStart, rowStart, rows, diagonalBase, lowerBase,
+                            rowPermutation, lu, z);
+}
+
 template <typename T>
 void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
     if (!v.empty()) {
@@ -841,6 +877,48 @@ void solveSupernodal(SupernodalLu& lu, const int* selected, int width, const dou
     CUDA_CHECK(cudaGetLastError());
 }
 
+// The U panel runs of the up pass (the plan's forwardRunUpper), uploaded from lu's plan by the first transposed solve.
+void prepareTransposedSolve(SupernodalLu& lu, const SupernodalLuPlan& plan) {
+    if (lu.transposedReady) {
+        return;
+    }
+    if (plan.n != lu.n || plan.nStored != lu.nStored || plan.nSupernodes != lu.nSupernodes) {
+        throw std::runtime_error("batched LU transposed solve: not the plan the factors were built on");
+    }
+    uploadVector(lu.dForwardRunUpper, plan.forwardRunUpper);
+    lu.transposedReady = true;
+}
+
+// The transposed solves on width lanes, as solveSupernodal: the right-hand side in through the column positions, the up
+// pass level by level from the leaves, the down pass from the root, the solution out through the row positions.
+void solveSupernodalTransposed(SupernodalLu& lu, const int* selected, int width, const double* b, double* x,
+                               cudaStream_t stream) {
+    const dim3 tileBlock(TILE, TILE_ROWS);
+    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+    toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
+            lu.dColPosition.as<int>(), b, lu.dWork.as<double>());
+    const int levels = static_cast<int>(lu.levelStart.size()) - 1;
+    for (int l = 0; l < levels; l++) {
+        const int supernodes = lu.levelStart[l + 1] - lu.levelStart[l];
+        upTransposedLevel<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes,
+                width, lu.capacity, selected, lu.dLevelSupernode.as<int>() + lu.levelStart[l],
+                lu.dSupernodeStart.as<int>(), lu.dDiagonalBase.as<int>(), lu.dForwardRunStart.as<int>(),
+                lu.dForwardRunUpper.as<int>(), lu.dForwardRunY.as<int>(), lu.dForwardRunLength.as<int>(),
+                lu.dColumnPermutation.as<unsigned char>(), lu.dLu.as<double>(), lu.dWork.as<double>());
+    }
+    for (int l = levels - 1; l >= 0; l--) {
+        const int supernodes = lu.levelStart[l + 1] - lu.levelStart[l];
+        downTransposedLevel<<<blocksFor(static_cast<size_t>(supernodes) * width), LU_BLOCK, 0, stream>>>(supernodes,
+                width, lu.capacity, selected, lu.dLevelSupernode.as<int>() + lu.levelStart[l],
+                lu.dSupernodeStart.as<int>(), lu.dRowStart.as<int>(), lu.dRows.as<int>(), lu.dDiagonalBase.as<int>(),
+                lu.dLowerBase.as<int>(), lu.dRowPermutation.as<unsigned char>(), lu.dLu.as<double>(),
+                lu.dWork.as<double>());
+    }
+    fromInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(),
+            selected, lu.dRowPosition.as<int>(), lu.dWork.as<double>(), x);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 }  // namespace
 
 void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capacity) {
@@ -853,6 +931,7 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
     lu.nSupernodes = plan.nSupernodes;
     lu.capacity = capacity;
     lu.width = 0;
+    lu.transposedReady = false;                              // the next transposed solve reads this plan's runs
     lu.levelStart = plan.levelStart;
     lu.levelEntryStart = plan.levelEntryStart;
     lu.levelPanelStart = plan.levelPanelStart;
@@ -1034,6 +1113,14 @@ void solveSupernodalSelectedLanes(SupernodalLu& lu, const int* selected, int cou
                                   cudaStream_t stream) {
     if (count > 0) {
         solveSupernodal(lu, selected, count, b, x, stream);
+    }
+}
+
+void solveSupernodalLanesTransposed(SupernodalLu& lu, const SupernodalLuPlan& plan, const double* b, double* x,
+                                    cudaStream_t stream) {
+    if (lu.width > 0) {
+        prepareTransposedSolve(lu, plan);
+        solveSupernodalTransposed(lu, nullptr, lu.width, b, x, stream);
     }
 }
 

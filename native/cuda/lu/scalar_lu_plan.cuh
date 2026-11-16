@@ -69,6 +69,17 @@ struct ScalarLuPlanTooLarge : std::length_error {
 ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, const int* rowOrder, const int* colOrder,
                                const ScalarLuPlanLimits& limits = ScalarLuPlanLimits());
 
+// The factors' columns the transposed solve reads (transposed_solve.cuh): per column j of the LU, its entries above the
+// diagonal [columnStart[j], columnSplit[j]) then below it [columnSplit[j], columnStart[j + 1]), as (row, LU entry) with
+// rows ascending; per level, the longest of those runs its rows read: U columns on the backward levels (U^T forward),
+// L columns on the forward ones (L^T backward).
+struct ScalarLuColumns {
+    std::vector<int> columnStart, columnSplit, columnRow, columnEntry;
+    std::vector<int> upperLevelLongest, lowerLevelLongest;
+};
+
+ScalarLuColumns buildScalarLuColumns(const ScalarLuPlan& plan);
+
 // One line on how the factorization's work spreads over its steps: the steps narrower than a warp, the widest step,
 // the longest contribution list, and the share of the multiply-adds in the last tenth of the steps.
 std::string describeScalarLuPlan(const ScalarLuPlan& plan);

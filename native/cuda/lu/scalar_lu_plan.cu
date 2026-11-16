@@ -219,6 +219,58 @@ ScalarLuPlan buildScalarLuPlan(int n, const int* rowPtr, const int* colIdx, cons
     return plan;
 }
 
+ScalarLuColumns buildScalarLuColumns(const ScalarLuPlan& plan) {
+    const int n = plan.n;
+    ScalarLuColumns columns;
+    columns.columnStart.assign(n + 1, 0);
+    std::vector<int> above(n, 0);
+    for (int i = 0; i < n; i++) {
+        for (int q = plan.luRowPtr[i]; q < plan.luRowPtr[i + 1]; q++) {
+            if (q != plan.luDiag[i]) {
+                const int j = plan.luCol[q];
+                columns.columnStart[j + 1]++;
+                above[j] += j > i ? 1 : 0;
+            }
+        }
+    }
+    for (int j = 0; j < n; j++) {
+        columns.columnStart[j + 1] += columns.columnStart[j];
+    }
+    columns.columnSplit.resize(n);
+    for (int j = 0; j < n; j++) {
+        columns.columnSplit[j] = columns.columnStart[j] + above[j];
+    }
+    columns.columnRow.resize(columns.columnStart[n]);
+    columns.columnEntry.resize(columns.columnStart[n]);
+    std::vector<int> cursor(columns.columnStart.begin(), columns.columnStart.end() - 1);
+    for (int i = 0; i < n; i++) {                            // rows ascending: a column's U entries, then its L ones
+        for (int q = plan.luRowPtr[i]; q < plan.luRowPtr[i + 1]; q++) {
+            if (q != plan.luDiag[i]) {
+                const int p = cursor[plan.luCol[q]]++;
+                columns.columnRow[p] = i;
+                columns.columnEntry[p] = q;
+            }
+        }
+    }
+    columns.upperLevelLongest.assign(std::max(plan.backwardLevels(), 0), 0);
+    for (int l = 0; l < plan.backwardLevels(); l++) {
+        for (int k = plan.backwardLevelStart[l]; k < plan.backwardLevelStart[l + 1]; k++) {
+            const int i = plan.backwardRow[k];
+            columns.upperLevelLongest[l] = std::max(columns.upperLevelLongest[l],
+                                                    columns.columnSplit[i] - columns.columnStart[i]);
+        }
+    }
+    columns.lowerLevelLongest.assign(std::max(plan.forwardLevels(), 0), 0);
+    for (int l = 0; l < plan.forwardLevels(); l++) {
+        for (int k = plan.forwardLevelStart[l]; k < plan.forwardLevelStart[l + 1]; k++) {
+            const int i = plan.forwardRow[k];
+            columns.lowerLevelLongest[l] = std::max(columns.lowerLevelLongest[l],
+                                                    columns.columnStart[i + 1] - columns.columnSplit[i]);
+        }
+    }
+    return columns;
+}
+
 std::string describeScalarLuPlan(const ScalarLuPlan& plan) {
     const int steps = plan.factorSteps();
     int narrowSteps = 0;

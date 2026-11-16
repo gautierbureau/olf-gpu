@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.google.auto.service.AutoService;
+import com.powsybl.commons.extensions.ExtensionJsonSerializer;
 import com.powsybl.contingency.ContingenciesProvider;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -32,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -137,6 +139,17 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
     @Override
     public String getName() {
         return NAME;
+    }
+
+    /**
+     * None: this provider's specific parameters are OLF's ({@link OpenSecurityAnalysisParameters}), which OLF's
+     * provider already (de)serializes. powsybl collects the serializers of every security analysis provider by
+     * extension name, two under one name are a duplicate key, and the JSON form of security analysis parameters
+     * failed to write or read at all while both providers were registered.
+     */
+    @Override
+    public Optional<ExtensionJsonSerializer> getSpecificParametersSerializer() {
+        return Optional.empty();
     }
 
     @Override

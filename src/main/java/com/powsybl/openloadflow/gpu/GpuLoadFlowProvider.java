@@ -110,9 +110,9 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
      * Newton-Raphson as the AC solver. A copy: the caller's parameters are left as they were, so reusing them with
      * OLF's provider runs on the CPU. {@link LoadFlowParameters#copy()} goes through the JSON form, so it keeps every
      * extension, OLF's and the GPU solver's. A DC load flow keeps OLF's solver, and is not copied when there is
-     * nothing to apply.
+     * nothing to apply. The GPU sensitivity analysis provider runs its load flows on these parameters too.
      */
-    static LoadFlowParameters withGpuSolver(LoadFlowParameters parameters) {
+    public static LoadFlowParameters withGpuSolver(LoadFlowParameters parameters) {
         GpuLoadFlowParameters gpu = parameters.getExtension(GpuLoadFlowParameters.class);
         Map<String, String> openLoadFlowProperties = gpu != null ? gpu.getOpenLoadFlowParameters() : Map.of();
         if (parameters.isDc() && openLoadFlowProperties.isEmpty()) {

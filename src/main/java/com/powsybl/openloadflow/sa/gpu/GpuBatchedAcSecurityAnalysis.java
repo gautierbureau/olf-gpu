@@ -34,12 +34,12 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LimitScalingManager;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.sa.AbstractNetworkResult;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
 import com.powsybl.openloadflow.sa.ContingencyActivePowerLossDistribution;
-import com.powsybl.openloadflow.sa.LimitScalingManager;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.PostContingencyNetworkResult;
@@ -206,7 +206,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
             double mismatch = lfContingency.getActivePowerLoss();
             if (Math.abs(mismatch) > 0) {                    // a replayed value exists only with distributed slack on
-                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                com.powsybl.openloadflow.lf.util.LfReports.reportContingencyActivePowerLossDistribution(reportNode,
                         mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
             }
             LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
@@ -1265,7 +1265,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // nothing: the contingency already applied that topology. Then it applies the actions, as here.
             for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
                 if (!lfAction.apply(network, lfContingency, networkParameters)) {
-                    com.powsybl.openloadflow.util.Reports.reportActionApplicationFailure(lfAction.getId(), lfContingency.getId(),
+                    com.powsybl.openloadflow.network.util.NetworkReports.reportActionApplicationFailure(lfAction.getId(), lfContingency.getId(),
                             network.getReportNode());
                 }
             }
@@ -1420,7 +1420,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (reportNode != null) {                            // what ReplayedLossDistribution reports on the usual path
             double mismatch = lfContingency.getActivePowerLoss();
             if (Math.abs(mismatch) > 0) {
-                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                com.powsybl.openloadflow.lf.util.LfReports.reportContingencyActivePowerLossDistribution(reportNode,
                         mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
             }
             LAST_REPLAYED_LOSS_COUNT.incrementAndGet();

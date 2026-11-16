@@ -19,7 +19,7 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
-import com.powsybl.openloadflow.network.AutomationSystemNetworkFactory;
+import com.powsybl.openloadflow.network.GpuAutomationSystemNetworkFactory;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
@@ -127,7 +127,7 @@ class GpuSaAutomationSystemTest extends AbstractGpuSaTest {
     @Test
     void branchOutagesOpeningABranchOnTheDevice() {
         long switchedBefore = GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.sum();
-        SecurityAnalysisResult gpu = assertAutomationSystemMatchesCpu(AutomationSystemNetworkFactory::createMeshedWithBranchTripping,
+        SecurityAnalysisResult gpu = assertAutomationSystemMatchesCpu(GpuAutomationSystemNetworkFactory::createMeshedWithBranchTripping,
                 branchContingencies("tr2", "l34b", "l3b4", "l12", "l12b", "tr1", "l34", "l33p"));
         assertEquals(6, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "six outages on the device");
         assertEquals(Set.of("l34", "l33p"), GpuBatchScopeCensus.planRefusedIds(), "the system's own branches on the CPU");
@@ -142,7 +142,7 @@ class GpuSaAutomationSystemTest extends AbstractGpuSaTest {
 
     /** createMeshedWithBranchTripping with l33p open and a system that closes it above 140 A at l12's side 1. */
     private static Network meshedWithBranchToClose() {
-        Network network = AutomationSystemNetworkFactory.createMeshedWithBranchTripping();
+        Network network = GpuAutomationSystemNetworkFactory.createMeshedWithBranchTripping();
         network.getOverloadManagementSystem("l34_opens_l33p").remove();
         network.getLine("l33p").getTerminal1().disconnect();
         network.getLine("l33p").getTerminal2().disconnect();
@@ -211,7 +211,7 @@ class GpuSaAutomationSystemTest extends AbstractGpuSaTest {
         List<Contingency> contingencies = List.of(
                 new Contingency("l3b4", new BranchContingency("l3b4")),
                 new Contingency("l3b4+tr1", new BranchContingency("l3b4"), new BranchContingency("tr1")));
-        assertAutomationSystemMatchesCpu(AutomationSystemNetworkFactory::createMeshedWithBranchTripping, contingencies);
+        assertAutomationSystemMatchesCpu(GpuAutomationSystemNetworkFactory::createMeshedWithBranchTripping, contingencies);
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "l3b4's outage on the device");
         assertEquals(Set.of("l3b4+tr1"), GpuBatchScopeCensus.planRefusedIds());
         assertEquals("PLAN:AUTOMATION_SYSTEM_ISLAND_IF_OPENED", GpuBatchScopeCensus.planRefusalTag("l3b4+tr1"));
@@ -225,7 +225,7 @@ class GpuSaAutomationSystemTest extends AbstractGpuSaTest {
     void branchOpenedByThePreContingencyLoadFlow() {
         long switchedBefore = GpuAutomationSystemOuterLoop.DEVICE_SWITCHED_BRANCHES.sum();
         SecurityAnalysisResult gpu = assertAutomationSystemMatchesCpu(() -> {
-            Network network = AutomationSystemNetworkFactory.createMeshedWithBranchTripping();
+            Network network = GpuAutomationSystemNetworkFactory.createMeshedWithBranchTripping();
             network.getOverloadManagementSystem("l34_opens_l33p").getTrippings().getFirst().setCurrentLimit(100.);
             return network;
         }, branchContingencies("tr2", "l34b", "l3b4", "l12", "l12b", "tr1"));

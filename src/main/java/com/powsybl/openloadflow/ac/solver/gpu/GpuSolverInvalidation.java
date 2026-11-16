@@ -104,6 +104,11 @@ final class GpuSolverInvalidation
         activationChanged();                                 // OLF equation columns renumbered:
     }                                                        // structure is column-free, targetMap is not
 
+    @Override
+    public void onEquationTermConstantsChanged() {
+        structureChanged();                                  // a tap moved the pi model: as onTapPositionChange
+    }
+
     // --- LfNetworkListener ---
 
     @Override
@@ -174,8 +179,10 @@ final class GpuSolverInvalidation
     }
 
     @Override
-    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
-        structureChanged();                                  // r1/a1 in closedBranchParameters; run() downgrades to VALUES
+    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
+        // r1/a1 in closedBranchParameters even when the impedance stays (a pure ratio or phase move); run() downgrades
+        // to VALUES
+        structureChanged();
     }
 
     @Override

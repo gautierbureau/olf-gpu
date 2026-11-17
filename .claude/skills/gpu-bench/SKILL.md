@@ -12,7 +12,7 @@ tools/run_bench.sh              # builds libolfgpu vs the pinned cuDSS first
 ```
 
 Defaults (in the script): cuDSS 0.8.0 (`CUDSS_ROOT=~/Projects/powsybl/cuda/cudss`),
-UBATCH (the only batch mode), `OLF_GPU_MAXBATCH=500` (the bench test's chunk-size hook), K=4, FP64, the 500 matched
+UBATCH (the only batch mode), batch 500 and K=4 (both fixed in the bench test), FP64, the 500 matched
 non-islanding contingencies from `~/Projects/powsybl/cuda/matched_contingencies/`.
 
 Report BOTH lines and compare to the recorded baseline

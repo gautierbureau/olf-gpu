@@ -1,11 +1,14 @@
 # GPU environment variables
 
 Every one of these is read at runtime. The project's standing goal is to **match the CPU at machine
-precision on every difference**, so the dangerous category is the third table: a switch that selects a
-different computation can preserve a wrong answer behind a default, and nothing in CI explores it.
+precision on every difference**, so the dangerous category is a switch that selects a different computation:
+it can preserve a wrong answer behind a default, and nothing in CI explores it. None is left (see the removed
+table below and the last section).
 
-Three were removed on 2026-09-17 for exactly that reason, and five on 2026-11-10, the first two with the
-`olf.gpu.test.convEps` / `olf.gpu.test.slackTol` system properties that were read before them:
+Three were removed on 2026-09-17 for exactly that reason, five on 2026-11-10, the first two with the
+`olf.gpu.test.convEps` / `olf.gpu.test.slackTol` system properties that were read before them, and the
+eighteen remaining behaviour-changing ones on 2026-11-17 (every test now does what it did with the variable
+unset, except the two noted):
 
 | removed | why |
 |---|---|
@@ -17,6 +20,16 @@ Three were removed on 2026-09-17 for exactly that reason, and five on 2026-11-10
 | `OLF_GPU_CENSUS_CONV_EPS` | tightened OLF's Newton criterion on both arms of the scope census (`GpuRteScopeCensusTest`) |
 | `OLF_GPU_DISC_EPS` | tightened OLF's Newton criterion on both arms of `GpuSingleSolveRejectReasonProbe` |
 | `OLF_GPU_DISC_SLACKTOL` | tightened the slack band on both arms of `GpuSingleSolveRejectReasonProbe` |
+| `OLF_GPU_FIXED_ITERS` | the K sweep of the fixed-iteration bench: it runs K=4, its default and `tools/run_bench.sh`'s |
+| `OLF_GPU_MAXBATCH` | forced the chunk size of three benches: the fixed-iteration bench now fixes it at 500 (`tools/run_bench.sh` always set 500: the like-for-like comparison with gpusim2grid); the production-SA and Pegase load-flow benches take the production auto-sized chunk, their unset behaviour |
+| `OLF_GPU_BASE_ON_GPU` | ran the fixed-iteration bench's base load flow on the GPU; it runs on the CPU, as unset |
+| `OLF_GPU_SA_CONV_EPS`, `OLF_GPU_SA_SLACK_TOL`, `OLF_GPU_SA_RL_TOL`, `OLF_GPU_SA_MAX_OUTER` | overrode the RTE parameters' criteria on both arms of the production-SA bench |
+| `OLF_GPU_SA_GPU_CONV_EPS`, `OLF_GPU_SA_GPU_SLACK_TOL`, `OLF_GPU_SA_GPU_RL_TOL` | one-sided tolerances on the production-SA bench's GPU arm: both arms now run the same parameters |
+| `OLF_GPU_SA_CPU_SINGLE` | added a 1-thread CPU arm to the production-SA bench |
+| `OLF_GPU_SA_NO_RL`, `OLF_GPU_SA_NO_DS` | disabled an outer loop on both arms of the production-SA bench and the rte6515 harness |
+| `OLF_GPU_NO_DS`, `OLF_GPU_NO_RL` | disabled an outer loop in `GpuBatchedPegaseOutlierDiagnosticTest` |
+| `OLF_GPU_NO_DIST_SLACK` | disabled the distributed slack in `GpuCpuOuterLoopTrajectoryProbe` |
+| `OLF_GPU_SVC`, `OLF_GPU_SVC_PILOT_SHIFT` | secondary voltage control in the rte6515 harness: now its own test, `gpuSaMatchesCpuOnRte6515FullWithSecondaryVoltageControl`, with every pilot target shifted by 1.0 kV (the run recorded in docs/tasks.md) |
 
 Classification below is by NAME and call site, not an individual audit of each one's semantics.
 Anything in the third table should be treated as unverified until someone reads it.
@@ -137,49 +150,12 @@ Paths, set by `native/local-env.sh`.
 | variable | read at |
 |---|---|
 
-## Highest risk: tolerances that apply to the GPU ARM ONLY
+## No one-sided tolerance, no disabled outer loop
 
-These set a tolerance for the GPU arm that the CPU arm does not get:
-
-| variable |
-|---|
-| `OLF_GPU_SA_GPU_CONV_EPS` |
-| `OLF_GPU_SA_GPU_RL_TOL` |
-| `OLF_GPU_SA_GPU_SLACK_TOL` |
-
-A one-sided tolerance is the mechanism by which a GPU/CPU difference can be made to disappear without
-being fixed, which the project forbids: **a disagreement at the default tolerance is an orchestration
-bug to fix, not a tolerance to loosen.** Tightening both arms does not answer it
-either: the arms must take the same iterates at the default criterion, and the rte6515 harness's `OLF_GPU_DBG_NR`
-prints the CPU arm's trajectory to put beside the device's.
-
-Also in the list and wrong by construction, useful only as momentary bisection levers:
-`OLF_GPU_NO_DS`, `OLF_GPU_NO_RL`, `OLF_GPU_NO_DIST_SLACK`, `OLF_GPU_SA_NO_DS`, `OLF_GPU_SA_NO_RL`,
-`OLF_GPU_HOST_LOOP_NOOP`, `OLF_GPU_SVC_INERT`. Each disables an outer loop or makes it inert, so any
-run with one set cannot match the CPU. They should be deleted once the question that motivated them is
-answered — the three removed above were removed on exactly that ground.
-
-## BEHAVIOUR-CHANGING (18) — REVIEW
-
-Each selects a different computation. Several disable an outer loop or loosen a tolerance, which is wrong by construction (and note the standing rule: never loosen a tolerance to make the GPU agree with the CPU). These should be justified individually or deleted.
-
-| variable | read at |
-|---|---|
-| `OLF_GPU_BASE_ON_GPU` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:149 +2 |
-| `OLF_GPU_FIXED_ITERS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:79 |
-| `OLF_GPU_MAXBATCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:83 +5 |
-| `OLF_GPU_NO_DIST_SLACK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuCpuOuterLoopTrajectoryProbe.java:55 |
-| `OLF_GPU_NO_DS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedPegaseOutlierDiagnosticTest.java:69 |
-| `OLF_GPU_NO_RL` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedPegaseOutlierDiagnosticTest.java:70 |
-| `OLF_GPU_SA_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:197 |
-| `OLF_GPU_SA_CPU_SINGLE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:276 |
-| `OLF_GPU_SA_GPU_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:242 |
-| `OLF_GPU_SA_GPU_RL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:244 |
-| `OLF_GPU_SA_GPU_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:243 |
-| `OLF_GPU_SA_MAX_OUTER` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:219 |
-| `OLF_GPU_SA_NO_DS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:229 |
-| `OLF_GPU_SA_NO_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:226 |
-| `OLF_GPU_SA_RL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:211 |
-| `OLF_GPU_SA_SLACK_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:205 |
-| `OLF_GPU_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:310 |
-| `OLF_GPU_SVC_PILOT_SHIFT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:317 |
+None of the variables left sets a tolerance for the GPU arm only, or disables or empties an outer loop: the last
+ones were removed on 2026-11-17 (`OLF_GPU_SA_GPU_*`, `OLF_GPU_*NO_DS`, `OLF_GPU_*NO_RL`, `OLF_GPU_NO_DIST_SLACK`;
+`OLF_GPU_HOST_LOOP_NOOP` and `OLF_GPU_SVC_INERT` were already gone from the code). A one-sided tolerance is the
+mechanism by which a GPU/CPU difference can be made to disappear without being fixed, which the project forbids:
+**a disagreement at the default tolerance is an orchestration bug to fix, not a tolerance to loosen.** Tightening
+both arms does not answer it either: the arms must take the same iterates at the default criterion, and the
+rte6515 harness's `OLF_GPU_DBG_NR` prints the CPU arm's trajectory to put beside the device's.

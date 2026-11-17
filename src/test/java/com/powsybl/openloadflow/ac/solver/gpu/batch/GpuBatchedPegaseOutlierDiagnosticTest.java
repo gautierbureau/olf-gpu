@@ -63,16 +63,14 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     private static final String CONT = System.getenv().getOrDefault("OLF_GPU_OUTLIER", "TWT-14-2925");
     private static final double PV_EPS = 1e-6;                  // |V - targetV| below this ⇒ still voltage-controlled
 
-    private static final boolean NO_DS = System.getenv("OLF_GPU_NO_DS") != null;
-    private static final boolean NO_REACTIVE_LIMITS = System.getenv("OLF_GPU_NO_RL") != null;
     // DS tolerance (pu) applied on BOTH sides: GPU slackDistTol + CPU slackBusPMaxMismatch = SLACK_TOL_PU * SB.
     private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-2"));
 
     private static LoadFlowParameters gpuScopeParameters() {
         LoadFlowParameters lfp = new LoadFlowParameters()
                 .setVoltageInitMode(LoadFlowParameters.VoltageInitMode.DC_VALUES)
-                .setUseReactiveLimits(!NO_REACTIVE_LIMITS)
-                .setDistributedSlack(!NO_DS);
+                .setUseReactiveLimits(true)
+                .setDistributedSlack(true);
         OpenLoadFlowParameters.create(lfp)
                 .setVoltageRemoteControl(false)
                 .setLowImpedanceBranchMode(OpenLoadFlowParameters.LowImpedanceBranchMode.REPLACE_BY_MIN_IMPEDANCE_LINE)
@@ -136,7 +134,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
         List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                 BatchSolveRequest.of(network, baseState, conts, es, target, params, ReportNode.NO_OP)
                         .withTol(1e-10)
-                        .withOuterLoops(!NO_DS, !NO_REACTIVE_LIMITS)
+                        .withOuterLoops(true, true)
                         .withOuterLoopTolerances(convEps, SLACK_TOL_PU)
                         .withConvEpsPerEq(convEps));
         BatchScenarioResult r = results.get(0);

@@ -18,14 +18,12 @@ in `docs/archive/gpu_benchmark.md`.
 
    ```
    OLF_GPU_CONT_FILE=<out_dir>/contingencies.txt \
-   OLF_GPU_MAXBATCH=32 \
    mvn test -Dtest=GpuBatchedN1FixedIterTest
    ```
 
    Environment knobs (inherited by the surefire fork):
    - `OLF_GPU_CONT_FILE` — explicit contingency id list (unset → first N branches).
-   - `OLF_GPU_MAXBATCH` — chunk/batch size (default 32; a conservative default keeps
-     the test green on a 6 GB card).
+   - The batch size is fixed at 500 in the test (the like-for-like comparison with gpusim2grid).
    - `OLF_GPU_BATCHMODE` — `1` = uniform/lockstep batched cuDSS (single shared block,
      `CUDSS_CONFIG_UBATCH_SIZE`; cuDSS ≥ 0.8 required), `0` = per-scenario fallback
      (default). Both modes are compiled in and chosen at runtime via `-Dolf.gpu.batchMode`.

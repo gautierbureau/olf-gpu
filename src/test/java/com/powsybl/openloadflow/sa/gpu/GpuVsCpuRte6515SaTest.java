@@ -780,8 +780,25 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         return Math.max(worst, baseDiff);
     }
 
+    /** The pilot-point shift of the SVC run (docs/tasks.md: the run with SVC firing used 1.0 kV). */
+    private static final double SVC_PILOT_SHIFT_KV = 1.0;
+
     @Test
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
+        runRte6515(false);
+    }
+
+    /**
+     * The same comparison with secondary voltage control on. The RTE parameters leave it off, but rte6515 carries SVC
+     * zones: this is the path that differed between GPU and CPU while the SVC support was incomplete (the base load flow
+     * did not go through the chunk solver).
+     */
+    @Test
+    void gpuSaMatchesCpuOnRte6515FullWithSecondaryVoltageControl() throws Exception {
+        runRte6515(true);
+    }
+
+    private void runRte6515(boolean secondaryVoltageControl) throws Exception {
         Network network = readCase();
         List<Contingency> contingencies = allBranchContingencies(network);
         // OLF_GPU_SA_CTG_FIRST=<id>[,<id>]: move these to the FRONT of the list, keeping the list
@@ -825,23 +842,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // tolerance ball. Tightening the tolerance hides this instead of answering it.
         applyNewtonDebug();
         applyReactiveLimitsDebug();
-        // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -
-        // inner Newton only, vs +DS, vs +DS+RL - to find which stage first introduces a divergence.
-        // Decisive for a suspected PV -> PQ SWITCH mismatch: if the arms agree with reactive limits OFF, the
-        // underlying power flow (and every bus q) agrees and the fault is in the switch DECISION; if
-        // they still disagree, q itself is wrong and the switch is only reporting it.
-        if ("1".equals(System.getenv("OLF_GPU_SA_NO_RL"))) {
-            lfp.setUseReactiveLimits(false);
-            System.out.println("  reactive limits DISABLED on both arms (OLF_GPU_SA_NO_RL=1)");
+        if (secondaryVoltageControl) {
+            applySvcScope(lfp, network);
         }
-        if ("1".equals(System.getenv("OLF_GPU_SA_NO_DS"))) {
-            lfp.setDistributedSlack(false);
-            System.out.println("  distributed slack DISABLED on both arms (OLF_GPU_SA_NO_DS=1)");
-        }
-        // OLF_GPU_SVC=1: enable SecondaryVoltageControl — the RTE params default to off, but
-        // the rte6515 case carries SVC zones. This is the path that differed between GPU and
-        // CPU when SVC support was incomplete (the base LF didn't go through the chunk solver).
-        applySvcScope(lfp, network);
         // Non-zero increased-violations thresholds to avoid ulp-level flicker
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
@@ -1203,25 +1206,23 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
-    /** OLF_GPU_SVC=1: the secondary voltage control scope (the parameters and the network settings it needs). */
-    private void applySvcScope(final LoadFlowParameters lfp, final Network network) {
-        if ("1".equals(System.getenv("OLF_GPU_SVC"))) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
-            System.out.println("  SVC enabled (OLF_GPU_SVC=1)");
-            // OLF_GPU_SVC_PILOT_SHIFT=<kV>: move EVERY zone's pilot-point target so the loop actually
-            // FIRES (with the case's own targets it is stable at the base and on every contingency).
-            // rte6515 carries two zones — shifting only one leaves the other's controllers idle and the
-            // run then exercises half the zone systems.
-            String shift = System.getenv("OLF_GPU_SVC_PILOT_SHIFT");
-            var secondaryVoltageControl = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
-            if (shift != null && secondaryVoltageControl != null) {
-                for (var zone : secondaryVoltageControl.getControlZones()) {
-                    var pilot = zone.getPilotPoint();
-                    double before = pilot.getTargetV();
-                    pilot.setTargetV(before + Double.parseDouble(shift));
-                    System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
-                            zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
-                }
+    /**
+     * The secondary voltage control scope: the parameter, and every zone's pilot-point target moved by
+     * {@link #SVC_PILOT_SHIFT_KV} so that the loop actually FIRES (with the case's own targets it is stable at the base
+     * and on every contingency). rte6515 carries two zones: shifting only one leaves the other's controllers idle and
+     * the run then exercises half the zone systems.
+     */
+    private static void applySvcScope(final LoadFlowParameters lfp, final Network network) {
+        com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
+        System.out.println("  SVC enabled");
+        var secondaryVoltageControl = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
+        if (secondaryVoltageControl != null) {
+            for (var zone : secondaryVoltageControl.getControlZones()) {
+                var pilot = zone.getPilotPoint();
+                double before = pilot.getTargetV();
+                pilot.setTargetV(before + SVC_PILOT_SHIFT_KV);
+                System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
+                        zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
             }
         }
     }

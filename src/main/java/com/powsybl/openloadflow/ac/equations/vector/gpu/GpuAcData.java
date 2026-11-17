@@ -173,4 +173,19 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
     public int getTotalElementCount() {
         return getClosedBranchCount() + getOpenBranchCount() + getShuntCount() + getHvdcCount();
     }
+
+    /**
+     * The shunt elements on a bus with no voltage column, as element-mask indices: a bus out of the network at base
+     * (disabled by OLF's connectivity, so out of its equation system) still carries its shunts in the pack, and OLF
+     * evaluates nothing there. Every element mask starts with them disabled, as it does with the branches open at base:
+     * the fill would otherwise read the voltage at column -1.
+     */
+    public int[] deadShuntElements() {
+        int offset = getClosedBranchCount() + getOpenBranchCount();
+        int[] ix = shunt.indices();
+        return java.util.stream.IntStream.range(0, getShuntCount())
+                .filter(e -> ix[e * 5 + 2] < 0)
+                .map(e -> offset + e)
+                .toArray();
+    }
 }

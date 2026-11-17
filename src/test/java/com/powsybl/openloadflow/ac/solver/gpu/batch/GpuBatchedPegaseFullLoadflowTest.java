@@ -83,11 +83,10 @@ class GpuBatchedPegaseFullLoadflowTest {
     // initReactiveLimitQLimitTypeBatch; was the ~1e-3 TWT-14-2925 outlier); (2) the loose 1-MW default DS tolerance left a
     // ~1e-4 uniform-angle band, removed by matching a TIGHT DS tolerance on both sides. With all criteria tight
     // and matched the 40-sample agrees to worst ~1.5e-7 / median ~2e-8 — machine precision for this scale.
-    // Overridable to inspect outliers.
-    private static final double AGREE_TOL = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_AGREE_TOL", "1e-6"));
+    private static final double AGREE_TOL = 1e-6;
     // Distributed-slack tolerance (pu), MATCHED on both sides: device slackDistTol + CPU slackBusPMaxMismatch
     // (= SLACK_TOL_PU * SB). Tight so DS agrees to inner-Newton precision, not the loose 1-MW default band.
-    private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-8"));
+    private static final double SLACK_TOL_PU = 1e-8;
 
     @BeforeEach
     void check() {

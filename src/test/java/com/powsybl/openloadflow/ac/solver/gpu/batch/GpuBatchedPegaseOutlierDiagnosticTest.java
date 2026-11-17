@@ -64,7 +64,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     private static final double PV_EPS = 1e-6;                  // |V - targetV| below this ⇒ still voltage-controlled
 
     // DS tolerance (pu) applied on BOTH sides: GPU slackDistTol + CPU slackBusPMaxMismatch = SLACK_TOL_PU * SB.
-    private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-2"));
+    private static final double SLACK_TOL_PU = 1e-2;
 
     private static LoadFlowParameters gpuScopeParameters() {
         LoadFlowParameters lfp = new LoadFlowParameters()

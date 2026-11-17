@@ -20,7 +20,7 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
-import com.powsybl.openloadflow.sa.LimitReductionManager;
+import com.powsybl.openloadflow.sa.LimitScalingManager;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import org.junit.jupiter.api.Test;
 
@@ -112,7 +112,7 @@ class GpuLimitTableTest {
         List<LimitViolation> stock = detectStock(network);
         assertFalse(stock.isEmpty(), "the surviving line should be overloaded once its parallel line is out");
 
-        GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(List.of()));
+        GpuLimitTable table = GpuLimitTable.build(network, LimitScalingManager.create(List.of()));
         int b = -1;
         for (int k = 0; k < table.branches().length; k++) {
             if (table.branches()[k].getId().equals("NHV1_NHV2_2")) {
@@ -172,7 +172,7 @@ class GpuLimitTableTest {
         assertTrue(describe(stock).contains("NHV1_NHV2_2|") && describe(stock).contains("VLLOAD|"),
                 "the fixture needs the line's and the voltage level's violations: " + describe(stock));
 
-        GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(List.of()));
+        GpuLimitTable table = GpuLimitTable.build(network, LimitScalingManager.create(List.of()));
         int uncovered = -1;
         for (int k = 0; k < table.branches().length; k++) {
             if (table.branches()[k].getId().equals("NHV1_NHV2_2")) {
@@ -206,7 +206,7 @@ class GpuLimitTableTest {
 
     private static List<LimitViolation> detectTable(LfNetwork network) {
         var manager = new LimitViolationManager(List.of());
-        new GpuLimitScanner(GpuLimitTable.build(network, LimitReductionManager.create(List.of())))
+        new GpuLimitScanner(GpuLimitTable.build(network, LimitScalingManager.create(List.of())))
                 .detectViolations(network, manager);
         return manager.getLimitViolations();
     }
@@ -219,7 +219,7 @@ class GpuLimitTableTest {
             sb.append(v.getSubjectId()).append('|').append(v.getSide()).append('|').append(v.getLimitType())
                     .append('|').append(v.getOperationalLimitsGroupId()).append('|').append(v.getLimitName())
                     .append('|').append(v.getAcceptableDuration()).append('|').append(v.getLimit())
-                    .append('|').append(v.getLimitReduction()).append('|').append(v.getValue()).append('\n');
+                    .append('|').append(v.getLimitScaling()).append('|').append(v.getValue()).append('\n');
         }
         return sb.toString();
     }

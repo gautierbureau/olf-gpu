@@ -6,7 +6,7 @@ package com.powsybl.openloadflow.sa.gpu;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.StaticVarCompensator;
-import com.powsybl.iidm.network.extensions.VoltagePerReactivePowerControlAdder;
+import com.powsybl.iidm.network.regulation.RegulationMode;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -19,10 +19,12 @@ class SlopeProbeTest {
         Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
         network.getLoad("ld1").setQ0(q0);
         StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
-        svc1.setBmin(bmin).setBmax(bmax)
-                .setVoltageSetpoint(setpoint).setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE)
-                .setRegulating(true);
-        svc1.newExtension(VoltagePerReactivePowerControlAdder.class).withSlope(0.0001).add();
+        svc1.setBmin(bmin).setBmax(bmax).setLocalTargetV(setpoint);
+        svc1.newVoltageRegulation()
+                .withMode(RegulationMode.VOLTAGE_PER_REACTIVE_POWER)
+                .withSlope(0.0001)
+                .withRegulating(true)
+                .build();
         Line l1 = network.getLine("l1");
         network.newLine().setId("l1_BIS")
                 .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())

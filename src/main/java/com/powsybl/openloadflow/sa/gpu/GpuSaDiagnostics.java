@@ -21,7 +21,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.SecurityAnalysisParameters;
-import com.powsybl.security.limitreduction.LimitReduction;
+import com.powsybl.security.limitscaling.LimitScaling;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,10 +50,10 @@ final class GpuSaDiagnostics {
      *  cases that make the flattening delicate — three-winding legs, tie lines, several operational
      *  limits groups, temporary limits — so the check runs on whatever network the caller is running,
      *  and fails loudly on the first contingency that disagrees. */
-    static void crossCheck(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+    static void crossCheck(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
                                    LimitViolationManager reference, SecurityAnalysisParameters saParameters, String contingencyId) {
         CROSSCHECKED.increment();
-        var stock = new LimitViolationManager(reference, limitReductions, saParameters.getIncreasedViolationsParameters());
+        var stock = new LimitViolationManager(reference, limitScalings, saParameters.getIncreasedViolationsParameters());
         stock.detectViolations(network);
         List<com.powsybl.contingency.violations.LimitViolation> fromTable = manager.getLimitViolations();
         List<com.powsybl.contingency.violations.LimitViolation> fromStock = stock.getLimitViolations();
@@ -76,7 +76,7 @@ final class GpuSaDiagnostics {
     static String describe(com.powsybl.contingency.violations.LimitViolation v) {
         return v.getSubjectId() + "|" + v.getSide() + "|" + v.getLimitType() + "|" + v.getOperationalLimitsGroupId()
                 + "|" + v.getLimitName() + "|" + v.getAcceptableDuration() + "|" + v.getLimit()
-                + "|" + v.getLimitReduction() + "|" + v.getValue();
+                + "|" + v.getLimitScaling() + "|" + v.getValue();
     }
 
     /** OLF's residual at the injected device state, worst rows first — see {@code OLF_GPU_SA_RESID}. */

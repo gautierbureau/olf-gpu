@@ -241,7 +241,7 @@ final class GpuStateViewCheck {
         if (a.getAcceptableDuration() != b.getAcceptableDuration()) {
             return "acceptable duration";
         }
-        if (!same(a.getLimit(), b.getLimit()) || !same(a.getLimitReduction(), b.getLimitReduction())) {
+        if (!same(a.getLimit(), b.getLimit()) || !same(a.getLimitScaling(), b.getLimitScaling())) {
             return "limit or reduction";
         }
         if (!same(a.getValue(), b.getValue())) {

@@ -287,7 +287,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         }
         adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                 .setLoadTapChangingCapabilities(true)
-                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
                 .setRegulating(true).add();
         List<Contingency> ctgs = List.of(
@@ -467,7 +467,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
             }
             adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                     .setLoadTapChangingCapabilities(true)
-                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
                     .setRegulating(true).add();
         }

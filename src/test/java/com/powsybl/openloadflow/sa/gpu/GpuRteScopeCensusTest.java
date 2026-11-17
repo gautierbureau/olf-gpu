@@ -72,13 +72,8 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.exists(censusCase()), censusCase() + " not found");
         assumeTrue("1".equals(System.getenv("OLF_GPU_SCOPE_CENSUS")), "OLF_GPU_SCOPE_CENSUS not set");
-        // OLF_GPU_CENSUS_CPU=1 runs the STOCK provider — the control arm that says whether a base
-        // failure is the network/parameters or the GPU path.
-        securityAnalysisProvider = "1".equals(System.getenv("OLF_GPU_CENSUS_CPU"))
-                ? new com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
-                        new EvenShiloachGraphDecrementalConnectivityFactory<>())
-                : new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
-                        new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>());
     }
 
     @Test
@@ -87,52 +82,10 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
         assumeTrue(Files.exists(paramsFile), "rte-loadflow-default-parameters.json not found");
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_RL"))) {
-            lfp.setUseReactiveLimits(false);                  // diagnostic: is a gap the reactive-limits loop?
-        }
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_DS"))) {
-            lfp.setDistributedSlack(false);                   // diagnostic: is a gap the slack redistribution?
-        }
-        // OLF_GPU_CENSUS_NO_ACTIVE_LIMITS=1: let the slack water-fill run UNBOUNDED on both arms.
-        // OLF saturates per GENERATOR while the device pack aggregates per BUS, so the two can only
-        // diverge once something saturates — which needs a mismatch far larger than a normal outage's.
-        // With the limits off nothing saturates, so this separates "the split is wrong" from "the
-        // saturation granularity is wrong".
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_ACTIVE_LIMITS"))) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseActiveLimits(false);
-        }
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
-        // OLF_GPU_CENSUS_VIOL_TOL=<kV>: give the post-vs-base violation comparison a non-zero tolerance
-        // on BOTH arms. powsybl defaults the voltage thresholds to 0.0, so an element already violating
-        // at base is re-reported on any strictly-worse value, down to one ulp. Diagnostic: it separates
-        // "the two arms disagree about the physics" from "the two arms disagree about a tie".
-        String violTol = System.getenv("OLF_GPU_CENSUS_VIOL_TOL");
-        if (violTol != null) {
-            // BOTH thresholds: the rule is min(absolute, value * proportional) and the PROPORTIONAL
-            // default is 0.0, so setting the absolute alone leaves the min at zero and changes nothing.
-            double t = Double.parseDouble(violTol);
-            sap.getIncreasedViolationsParameters()
-                    .setLowVoltageAbsoluteThreshold(t).setLowVoltageProportionalThreshold(t)
-                    .setHighVoltageAbsoluteThreshold(t).setHighVoltageProportionalThreshold(t);
-        }
-        // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
-        // CPU baseline is only honest at the thread count production runs (default here is OLF's 1).
-        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_THREADS", "1"));
-        // OLF_GPU_CENSUS_NOFREEZE: turn OFF the SA's startWithFrozenACEmulation for BOTH arms. The
-        // freeze/unfreeze pair is a second solve per contingency on either path, and the only way to
-        // know whether the device port pays MORE for it than the CPU does is to price it on both.
-        boolean noFreeze = "1".equals(System.getenv("OLF_GPU_CENSUS_NOFREEZE"));
-        if (threads > 1 || noFreeze) {
-            var ext = new com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters();
-            if (threads > 1) {
-                ext.setThreadCount(threads);
-            }
-            if (noFreeze) {
-                ext.setStartWithFrozenACEmulation(false);
-            }
-            sap.addExtension(com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.class, ext);
-        }
+        // OpenLoadFlow's defaults: one thread, startWithFrozenACEmulation on.
+        int threads = 1;
 
         List<Contingency> ctgs = new ArrayList<>();
         // OLF_GPU_CENSUS_ONLY=<branch,branch,...>: run just these contingencies. For chasing a handful
@@ -164,28 +117,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             if (limit > 0 && ctgs.size() >= limit) {
                 break;
             }
-        }
-
-        // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the knob a throughput measurement most needs to sweep).
-        // OLF_GPU_CENSUS_SVC=1: force SecondaryVoltageControl on. The RTE parameters leave it at
-        // OLF's default (off) so the loop never fires here — but the case DOES carry control zones,
-        // so this is the only way to exercise the loop against the CPU on production data.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_SVC"))) {
-            // MUTATE the loaded extension. OpenLoadFlowParameters.create() does
-            // addExtension(new OpenLoadFlowParameters()) — it REPLACES the RTE configuration with
-            // fresh defaults (maxNewtonRaphsonIterations 30 -> 15, the realistic-voltage bounds, the
-            // transformer control mode...), which silently turns this into a different run.
-            com.powsybl.openloadflow.OpenLoadFlowParameters svcExtParams =
-                    lfp.getExtension(com.powsybl.openloadflow.OpenLoadFlowParameters.class);
-            org.junit.jupiter.api.Assertions.assertNotNull(svcExtParams,
-                    "the RTE parameter file must carry an open-load-flow-parameters extension");
-            svcExtParams.setSecondaryVoltageControl(true);
-            var svcExt = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
-            System.out.printf("SVC_ZONES %d%n", svcExt == null ? 0 : svcExt.getControlZones().size());
-        }
-        String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
-        if (chunk != null) {
-            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(chunk));
         }
 
         // OLF_GPU_CENSUS_MONITOR_VL=<vl,vl,...>: monitor those voltage levels so BOTH arms report the

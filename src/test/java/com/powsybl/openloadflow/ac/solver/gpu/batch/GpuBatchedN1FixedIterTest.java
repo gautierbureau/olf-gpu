@@ -75,10 +75,10 @@ class GpuBatchedN1FixedIterTest {
     // K=4 — the regression harness for the fixed-iteration throughput path (run after every batched-path change).
     private static final int[] FIXED_ITERS = {4};
     private static final double ACCURACY_TOL = 1e-6;            // the reference mismatch tolerance
-    // OLF_GPU_TOL > 0 switches every solve in this bench to the PRODUCTION path: per-iteration
-    // convergence check + retirement (host sync + full-mismatch D->H copy each iteration) instead
-    // of device fixed-iteration mode. K then only bounds maxIterations. Default 0 = bench as before.
-    private static final double TOL = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_TOL", "0"));
+    // Device fixed-iteration mode: no per-iteration convergence check (0 = fixed iterations).
+    private static final double TOL = 0;
+    // The end-to-end passes' K (tools/run_bench.sh's, always 4).
+    private static final int E2E_K = 4;
 
     private static final int MAX_CONTINGENCIES = 1000;
 
@@ -142,11 +142,9 @@ class GpuBatchedN1FixedIterTest {
         // measurement). JIT and the CUDA driver are warm; everything GPU-side is cold. This is the
         // long-running-service scenario: a new network snapshot arriving at a warm process,
         // repeated in-process runs. The [E2E] line from the first pass stays the single-shot cold number.
-        if (System.getenv("OLF_GPU_E2E") != null && !"0".equals(System.getenv("OLF_GPU_E2E_WARMJIT"))) {
-            Problem p2 = loadGpuScope(iidm);
-            try (AcLoadFlowContext context = p2.context()) {
-                e2ePass(p2, context, "E2E-warmJIT");
-            }
+        Problem p2 = loadGpuScope(iidm);
+        try (AcLoadFlowContext context = p2.context()) {
+            e2ePass(p2, context, "E2E-warmJIT");
         }
     }
 
@@ -168,7 +166,7 @@ class GpuBatchedN1FixedIterTest {
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();
         List<BatchContingency> contingencies = buildContingencies(network);
-        int kE2E = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_E2E_K", "4"));
+        int kE2E = E2E_K;
         NewtonRaphsonParameters params = new NewtonRaphsonParameters();
         params.setMaxIterations(kE2E);
         long g0 = System.nanoTime();
@@ -249,24 +247,21 @@ class GpuBatchedN1FixedIterTest {
                 + "qualified on-GPU; islanding outages routed to CPU)%n",
                 CASE.replace(".xiidm.gz", ""), n, contingencies.size());
 
-        // End-to-end (OLF_GPU_E2E): CPU base load flow + ONE COLD GPU SA pass at K (CUDA init +
+        // End-to-end: CPU base load flow + ONE COLD GPU SA pass at K (CUDA init +
         // extract + analysis + solve fall into this first GPU call — we have no GPU base-case phase
         // to absorb CUDA init, unlike the base-case warm-up path). The honest single-pass wall time.
-        if (System.getenv("OLF_GPU_E2E") != null) {
-            int kE2E = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_E2E_K", "4"));
-            NewtonRaphsonParameters params = new NewtonRaphsonParameters();
-            params.setMaxIterations(kE2E);
-            GpuBatchContextCache.clearContextCache();
-            long g0 = System.nanoTime();
-            List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    BatchSolveRequest.of(network, baseState, contingencies, es, target, params, ReportNode.NO_OP)
-                            .withTol(TOL));
-            long gpuMs = (System.nanoTime() - g0) / 1_000_000;
-            long batchedCount = cold.stream().filter(b -> !b.needsCpuFallback()).count();
-            System.out.printf("  [E2E K=%d] base CPU loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
-                    kE2E, baseLfMs, gpuMs,
-                    baseLfMs + gpuMs, batchedCount, (baseLfMs + gpuMs) / (double) Math.max(1, batchedCount));
-        }
+        NewtonRaphsonParameters e2eParams = new NewtonRaphsonParameters();
+        e2eParams.setMaxIterations(E2E_K);
+        GpuBatchContextCache.clearContextCache();
+        long e2eT0 = System.nanoTime();
+        List<BatchScenarioResult> e2eCold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                BatchSolveRequest.of(network, baseState, contingencies, es, target, e2eParams, ReportNode.NO_OP)
+                        .withTol(TOL));
+        long e2eGpuMs = (System.nanoTime() - e2eT0) / 1_000_000;
+        long e2eBatched = e2eCold.stream().filter(b -> !b.needsCpuFallback()).count();
+        System.out.printf("  [E2E K=%d] base CPU loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
+                E2E_K, baseLfMs, e2eGpuMs,
+                baseLfMs + e2eGpuMs, e2eBatched, (baseLfMs + e2eGpuMs) / (double) Math.max(1, e2eBatched));
 
         long totalBatched = 0;
         for (int k : FIXED_ITERS) {

@@ -14,7 +14,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
         jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jClosedBranchPhaseControlSide,
         jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jReactiveRelocationGroupStart, jintArray jReactiveRelocationCandidateRows,
-        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jReactiveRelocationDependentBaseGroup, jintArray jReactiveRelocationBaseTargetRow, jintArray jReactiveRelocationDependentGroupOfRow) {
+        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jReactiveRelocationDependentBaseGroup, jintArray jReactiveRelocationBaseTargetRow, jintArray jReactiveRelocationDependentGroupOfRow,
+        jintArray jIdentityRows) {
     const JniDoubles closedBranchParameters(env, jClosedBranchParameters);
     const JniInts closedBranchIndices(env, jClosedBranchIndices);
     const JniDoubles openBranchParameters(env, jOpenBranchParameters);
@@ -48,6 +49,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
     const JniInts reactiveRelocationDependentBaseGroup(env, jReactiveRelocationDependentBaseGroup);
     const JniInts reactiveRelocationBaseTargetRow(env, jReactiveRelocationBaseTargetRow);
     const JniInts reactiveRelocationDependentGroupOfRow(env, jReactiveRelocationDependentGroupOfRow);
+    const JniInts identityRows(env, jIdentityRows);
+    int nIdentityRows = env->GetArrayLength(jIdentityRows);
 
     int nClosedBranch = env->GetArrayLength(jClosedBranchIndices) / 12;             // closedBranchIndices stride 12 (…a1col r1col alternateQRow1 alternateQRow2)
     int nOpenBranch = env->GetArrayLength(jOpenBranchIndices) / 6;
@@ -106,6 +109,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         checkRange("distrShuntBRow", distrShuntBRow, nDistrShuntB, 1, {0}, 0, n);
         checkRange("distrShuntBColumn", distrShuntBColumn, nDistrShuntB, 1, {0}, 0, n);
         checkRange("loadModelIndices", loadModelIndices, nLoadModelTerms, 2, {0, 1}, 0, n);
+        checkRange("identityRows", identityRows, nIdentityRows, 1, {0}, 0, n);
         for (int e = 0; e < nClosedBranch; e++) {                      // encoded (a1Col << 1) | side, or -1
             if (closedBranchPhaseControlSide[e] >= 0 && (closedBranchPhaseControlSide[e] >> 1) >= n) {
                 throw std::runtime_error("bad closedBranchPhaseControlSide at elem " + std::to_string(e)
@@ -119,7 +123,8 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
                                                    nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, closedBranchPhaseControlSide,
                                                    nLoadModelTerms, loadModelParameters, loadModelIndices, nReactiveRelocationGroups, reactiveRelocationGroupStart, reactiveRelocationCandidateRows,
-                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow));
+                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow,
+                                                   nIdentityRows, identityRows));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {

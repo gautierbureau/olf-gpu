@@ -55,7 +55,8 @@ public final class StructureNative {
                                               int[] distrShuntBRow, int[] distrShuntBColumn, double[] distrShuntBCoefficient, int[] closedBranchPhaseControlSide,
                                               double[] loadModelParameters, int[] loadModelIndices, int[] reactiveRelocationGroupStart, int[] reactiveRelocationCandidateRows,
                                               int[] openBranchAlternateReactiveDestination, int[] zeroImpedanceBranchAlternateReactiveDestination,
-                                              int[] reactiveRelocationDependentBaseGroup, int[] reactiveRelocationBaseTargetRow, int[] reactiveRelocationDependentGroupOfRow);
+                                              int[] reactiveRelocationDependentBaseGroup, int[] reactiveRelocationBaseTargetRow, int[] reactiveRelocationDependentGroupOfRow,
+                                              int[] identityRows);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts

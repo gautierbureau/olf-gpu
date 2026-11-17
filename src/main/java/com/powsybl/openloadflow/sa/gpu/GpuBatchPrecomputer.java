@@ -520,6 +520,7 @@ final class GpuBatchPrecomputer {
                 var pairBt = config.distributedSlackParameters().balanceType();
                 if (pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX
                         && pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR) {
+                    GpuBatchScopeCensus.record("PAIR:REFUSED:BALANCE_TYPE");
                     continue;                        // pair handled by the CPU per-strategy path
                 }
                 // one pair per action list OLF may apply (a multi-stage strategy's stage combinations)

@@ -853,6 +853,23 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(withDeadSection(true, true), 1);
     }
 
+    @Test
+    void shuntOnADeadSectionStaysOutOfTheDeviceFill() {
+        // a shunt SH4 at BBS4, out of the network at base: its bus has no voltage column, and every element mask starts
+        // with it disabled (OLF evaluates nothing there). The fill used to read the voltage at column -1, out of bounds in
+        // the first scenario of a chunk: a CUDA illegal memory access on network.xiidm. The results do not show it (the
+        // shunt's outputs had no destination): run this test under compute-sanitizer memcheck to see the read. Closing BD
+        // would bring SH4 in: that pair and its contingency run on the CPU
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSection(false, false);
+        var vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(20).setNode2(23).add();
+        vl2.newShuntCompensator().setId("SH4").setNode(23).setSectionCount(1)
+                .newLinearModel().setBPerSection(1e-3).setGPerSection(1e-4).setMaximumSectionCount(1).add().add();
+        assertDeadSectionCloseMatchesCpu(network, 1);
+    }
+
     private void assertDeadSectionCloseMatchesCpu(Network network, int expectedPrecomputed) {
         List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
         List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));

@@ -835,10 +835,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // (constructor order: lowV abs, lowV prop, highV abs, highV prop, FLOW prop - the flow threshold is 0.1 %).
-        // OLF_GPU_SA_DEFAULT_INCREASED=1: powsybl's defaults instead (flow 10 %), as pypowsybl uses them.
-        sap.setIncreasedViolationsParameters("1".equals(System.getenv("OLF_GPU_SA_DEFAULT_INCREASED"))
-                ? new SecurityAnalysisParameters.IncreasedViolationsParameters()
-                : new SecurityAnalysisParameters.IncreasedViolationsParameters(0.5, 0.001, 0.5, 0.001, 0.001));
+        sap.setIncreasedViolationsParameters(new SecurityAnalysisParameters.IncreasedViolationsParameters(0.5, 0.001, 0.5, 0.001, 0.001));
 
         // CPU arm: 8 threads (production-realistic) on a BUS-BREAKER case, ONE thread on a
         // NODE-BREAKER one. OLF partitions the contingency list across threads and each partition
@@ -861,7 +858,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // scores 3273 against a 1-thread CPU arm and 3187 against an 8-thread one, and the
         // distributed-power worst goes from 1.4e-05 MW to 1.93 MW. That reads exactly like a GPU
         // regression and cost a full bisect to clear. Ask OLF instead of guessing.
-        // OLF_GPU_SA_CPU_THREADS still overrides.
         int cpuThreads = cpuThreadCount(network, contingencies, lfp);
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));
@@ -875,11 +871,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // second parse never lands inside a measured region.
         Network networkGpuCold = Network.read(CASE_FILE);
         Network networkGpuWarm = Network.read(CASE_FILE);
-        // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the
-        // JVM's first SA and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio
-        // flatters the GPU. The ratios are then quoted against CPU warm.
-        boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
-        Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
 
         // OLF_GPU_SA_STRATEGIES=1: operator strategies on every k-th contingency (OLF_GPU_SA_STRATEGY_EVERY, default 20),
         // one per action kind the device composes, built from the network's own elements (syntheticStrategies)
@@ -956,18 +947,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         BusVoltageSpill cpuSpill = cpuArm.cpuSpill();
         SecurityAnalysisResult cpu = cpuArm.cpu();
         long cpuMs = cpuArm.cpuMs();
-        // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the JVM's first SA
-        // and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio flatters the GPU. The ratios
-        // are quoted against CPU warm. Not available with a loaded (separate-JVM) CPU arm.
         armMark("cpu end");
-        long cpuWarmMs = -1;
-        if (cpuWarmRun && !"load".equals(cpuArmMode) && networkCpuWarm != null) {
-            long cpuT1 = System.nanoTime();
-            SecurityAnalysisResult cpuWarm = runSa(networkCpuWarm, contingencies, monitors, sap);
-            cpuWarmMs = (System.nanoTime() - cpuT1) / 1_000_000;
-            System.out.printf("  CPU warm run: violations=%d statuses=%s%n", violationCount(cpuWarm), statusCounts(cpuWarm));
-        }
-        long cpuRefMs = cpuWarmMs > 0 ? cpuWarmMs : cpuMs;
 
         // GPU arm: single-thread, cold + warm runs
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
@@ -982,16 +962,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // Report timing
         int n = contingencies.size();
         System.out.printf("%nRTE6515 SA BENCHMARK | %d contingencies | RTE production params%n", n);
-        System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg%s%n", cpuThreads, cpuMs, cpuMs / (double) n,
-                cpuWarmMs > 0 ? " (COLD)" : "");
-        if (cpuWarmMs > 0) {
-            System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg (warm) — the reference below%n",
-                    cpuThreads, cpuWarmMs, cpuWarmMs / (double) n);
-        }
+        System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg%n", cpuThreads, cpuMs, cpuMs / (double) n);
         System.out.printf("  GPU  (COLD)       : %6d ms | %.2f ms/ctg | vs CPU x%.2f%n",
-                gpuColdMs, gpuColdMs / (double) n, (double) cpuRefMs / gpuColdMs);
+                gpuColdMs, gpuColdMs / (double) n, (double) cpuMs / gpuColdMs);
         System.out.printf("  GPU  (warm)       : %6d ms | %.2f ms/ctg | vs CPU x%.2f%n",
-                gpuWarmMs, gpuWarmMs / (double) n, (double) cpuRefMs / gpuWarmMs);
+                gpuWarmMs, gpuWarmMs / (double) n, (double) cpuMs / gpuWarmMs);
         System.out.printf("  pre-ctg: CPU=%s GPU=%s%n",
                 cpu.getPreContingencyResult().getStatus(), gpuCold.getPreContingencyResult().getStatus());
         // The BASE load flow, bus by bus. Every post-contingency state is computed FROM the base, so a
@@ -1134,7 +1109,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                                           "com.powsybl.openloadflow.ac.AcloadFlowEngine",
                                           // "Contingency '<id>' impact on network ..." (DEBUG): heads each
                                           // post-contingency block, so a block can be addressed by id inside
-                                          // the full window (with OLF_GPU_SA_CPU_THREADS=1 they do not interleave)
+                                          // the full window (with one CPU thread they do not interleave)
                                           "com.powsybl.openloadflow.sa.AbstractSecurityAnalysis"}) {
                 ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
                 lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
@@ -1244,7 +1219,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // with ONE in common, which the intersection-only print rendered as a clean 1.4e-13.
             // At matched thread counts the same cases agree BIT-IDENTICALLY (worst 0.0e+00).
             System.out.printf("  BASE BUSDIFF: *** NOT COMPARABLE *** the arms disagree on the bus "
-                    + "decomposition (cpu=%d gpu=%d buses). Re-run with OLF_GPU_SA_CPU_THREADS=1 "
+                    + "decomposition (cpu=%d gpu=%d buses). Re-run with the CPU arm on one thread "
                     + "before reading any number above.%n", cpuAll, gpuBaseV.size());
         }
         cpuBase.stream()
@@ -1884,7 +1859,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         return reordered;
     }
 
-    /** The CPU arm's thread count: one in breaker mode (see the call site), eight otherwise; OLF_GPU_SA_CPU_THREADS overrides. */
+    /** The CPU arm's thread count: one in breaker mode (see the call site), eight otherwise. */
     private static int cpuThreadCount(Network network, List<Contingency> contingencies, LoadFlowParameters lfp) {
         com.powsybl.openloadflow.network.LfTopoConfig probeTopoConfig =
                 new com.powsybl.openloadflow.network.LfTopoConfig();
@@ -1895,8 +1870,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         .setSlackDistributionOnConformLoad(lfp.getBalanceType()
                                 == com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
                         .setHvdcAcEmulation(lfp.isHvdcAcEmulation()));
-        String defaultThreads = probeTopoConfig.isBreaker() ? "1" : "8";
-        return Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", defaultThreads));
+        return probeTopoConfig.isBreaker() ? 1 : 8;
     }
 
     /** The state monitors: bus voltages under OLF_GPU_SA_BUSDIFF*, the OLF_GPU_SA_MON_BRANCH flows, and the N state. */
@@ -1998,12 +1972,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult gpuWarm;
         long gpuColdMs;
         long gpuWarmMs;
-        // OLF_GPU_SA_BANK=<slots>: cap the GPU arms' bank at that many slots instead of the device-memory sizing (the bank
-        // is balanced over the call's scenarios, then refilled from the queue), to measure what its width costs
-        String bank = System.getenv("OLF_GPU_SA_BANK");
-        if (bank != null && !bank.isEmpty()) {
-            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(Integer.parseInt(bank));
-        }
         try {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
             sapGpu.setLoadFlowParameters(lfp);
@@ -2061,24 +2029,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         gpuPrecomputed, contingencies.size());
             }
 
-            // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
-            if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {
-                gpuWarm = gpuCold;
-                gpuWarmMs = gpuColdMs;
-            } else {
-                GpuBatchScopeCensus.reset();
-                long g1 = System.nanoTime();
-                SecurityAnalysisResult rawWarm = runSa(networkGpuWarm, contingencies, monitors, sapGpu);
-                gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
-                gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(rawWarm) : rawWarm;   // only its BASE is compared
-                rawWarm = null;
-                System.gc();
-                Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
-                System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
-                reportGpuSelfSpread(gpuCold, gpuWarm);
-            }
+            GpuBatchScopeCensus.reset();
+            long g1 = System.nanoTime();
+            SecurityAnalysisResult rawWarm = runSa(networkGpuWarm, contingencies, monitors, sapGpu);
+            gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
+            gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(rawWarm) : rawWarm;   // only its BASE is compared
+            rawWarm = null;
+            System.gc();
+            Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
+            System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
+            reportGpuSelfSpread(gpuCold, gpuWarm);
         } finally {
-            com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache.forceChunkSizeForTests(null);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
                     new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }

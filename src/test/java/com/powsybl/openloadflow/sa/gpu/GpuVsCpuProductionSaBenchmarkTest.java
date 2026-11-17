@@ -174,8 +174,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
         // The FAIR production CPU arm is multithreaded — OLF SA parallelizes contingencies across
         // threads in production.
-        // Default 4 threads (this machine's realistic budget); override with OLF_GPU_SA_CPU_THREADS.
-        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", "4"));
+        // 4 threads: this machine's realistic budget.
+        int threads = 4;
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // Non-zero increased-violations thresholds (0.5 kV / 0.1 %): with powsybl's ZERO defaults, a

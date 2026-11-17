@@ -7,8 +7,8 @@ table below and the last section).
 
 Three were removed on 2026-09-17 for exactly that reason, five on 2026-11-10, the first two with the
 `olf.gpu.test.convEps` / `olf.gpu.test.slackTol` system properties that were read before them, and the
-eighteen remaining behaviour-changing ones on 2026-11-17 (every test now does what it did with the variable
-unset, except the two noted):
+forty behaviour-changing ones on 2026-11-17: the eighteen filed as such, and twenty-two more read by tests but
+filed elsewhere or not documented (every test now does what it did with the variable unset, except where noted):
 
 | removed | why |
 |---|---|
@@ -30,6 +30,11 @@ unset, except the two noted):
 | `OLF_GPU_NO_DS`, `OLF_GPU_NO_RL` | disabled an outer loop in `GpuBatchedPegaseOutlierDiagnosticTest` |
 | `OLF_GPU_NO_DIST_SLACK` | disabled the distributed slack in `GpuCpuOuterLoopTrajectoryProbe` |
 | `OLF_GPU_SVC`, `OLF_GPU_SVC_PILOT_SHIFT` | secondary voltage control in the rte6515 harness: now its own test, `gpuSaMatchesCpuOnRte6515FullWithSecondaryVoltageControl`, with every pilot target shifted by 1.0 kV (the run recorded in docs/tasks.md) |
+| `OLF_GPU_TOL`, `OLF_GPU_E2E`, `OLF_GPU_E2E_K`, `OLF_GPU_E2E_WARMJIT` | the fixed-iteration bench's tolerance and end-to-end passes: it runs at tol 0 (fixed iterations) with both end-to-end passes at K=4, as `tools/run_bench.sh` always set them |
+| `OLF_GPU_AGREE_TOL`, `OLF_GPU_SLACK_TOL` | the Pegase load-flow test's agreement and slack tolerances (1e-6, 1e-8) and the outlier diagnostic's slack tolerance (1e-2), their defaults |
+| `OLF_GPU_SA_CPU_THREADS` | the CPU arm's thread count: 4 in the production-SA bench, 1 (bus-breaker) or 8 in the rte6515 harness, their defaults |
+| `OLF_GPU_CENSUS_CPU`, `_NO_RL`, `_NO_DS`, `_NO_ACTIVE_LIMITS`, `_VIOL_TOL`, `_THREADS`, `_NOFREEZE`, `_SVC`, `_CHUNK` | the scope census's control arm, outer-loop, tolerance, thread, freeze, SVC and chunk-size switches (filed as print-only diagnostics, they changed the computation): the census runs the GPU provider on the RTE parameters with OpenLoadFlow's SA defaults |
+| `OLF_GPU_SA_BANK`, `OLF_GPU_SA_CPU_WARM`, `OLF_GPU_SA_COLD_ONLY`, `OLF_GPU_SA_DEFAULT_INCREASED` | the rte6515 harness's forced bank size, extra warm CPU arm, skipped warm GPU run and powsybl-default violation thresholds: it runs the device-sized bank, one CPU arm, both GPU runs and the 0.5 kV / 0.1 % thresholds |
 
 Classification below is by NAME and call site, not an individual audit of each one's semantics.
 Anything in the third table should be treated as unverified until someone reads it.
@@ -87,31 +92,23 @@ from those two lists; add a channel there, then here.
 | `OLF_OL_STATS` | java | Each contingency's outer-loop passes and Newton iterations, in the shape of OLF's own `CPU_OL_STATS`. |
 | `OLF_TRACE_CTG` | java | `<contingency id>`: OLF's own filter for its debug dumps, which `OLF_GPU_SA_VAR_DUMP` follows. |
 
-## Test diagnostics (28) — print only, read by the tests
+## Test diagnostics (20) — print only, read by the tests
 
 | variable | read at |
 |---|---|
 | `OLF_GPU_CENSUS_BASE_VIOLATIONS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:300 |
 | `OLF_GPU_CENSUS_BUS_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:309 |
 | `OLF_GPU_CENSUS_CASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:69 |
-| `OLF_GPU_CENSUS_CHUNK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:242 |
 | `OLF_GPU_CENSUS_CONNECTIVITY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:342 |
-| `OLF_GPU_CENSUS_CPU` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:80 |
 | `OLF_GPU_CENSUS_MONITOR_ALL_VL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:253 |
 | `OLF_GPU_CENSUS_MONITOR_BRANCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:257 |
 | `OLF_GPU_CENSUS_MONITOR_VL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:256 |
-| `OLF_GPU_CENSUS_NO_ACTIVE_LIMITS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:108 |
-| `OLF_GPU_CENSUS_NO_DS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:100 |
-| `OLF_GPU_CENSUS_NO_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:97 |
-| `OLF_GPU_CENSUS_NOFREEZE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:137 |
 | `OLF_GPU_CENSUS_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:152 |
-| `OLF_GPU_CENSUS_SVC` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:229 |
-| `OLF_GPU_CENSUS_VIOL_TOL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:122 |
 | `OLF_GPU_CENSUS_VIOLATION_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:354 |
 | `OLF_GPU_DBG_CENSUS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3112 |
 | `OLF_GPU_DBG_REPORT` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuBatchedAcSecurityAnalysisTest.java:3100 +2 |
 | `OLF_GPU_DBG_RL` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:313 +2 |
-| `OLF_GPU_SA_SELF_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<file>`: with a warm run (no `OLF_GPU_SA_COLD_ONLY`), every contingency's status and distributed active power cold and warm; the `POST GPU-vs-GPU` line prints the same comparison summarized |
+| `OLF_GPU_SA_SELF_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<file>`: with the warm run, every contingency's status and distributed active power cold and warm; the `POST GPU-vs-GPU` line prints the same comparison summarized |
 | `OLF_GPU_SA_BUSDIFF` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:348 |
 | `OLF_GPU_SA_BUSDIFF_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<id>[,<id>]`: bus-diff those contingencies INSIDE the full scope (one scoped StateMonitor per id, so the heap holds a handful of results, not 10540 x 13202). The list decides the retained switches on a node-breaker network, so a contingency that differs in the full scope cannot be studied alone (CTG_ONLY) |
 | `OLF_GPU_SA_DEBUG_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:164 |

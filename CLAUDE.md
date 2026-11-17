@@ -180,15 +180,15 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 ## Benchmarks (two tracks — keep both)
 
 - **Fixed-iter throughput vs gpusim2grid**: `tools/run_bench.sh`
-  (`GpuBatchedN1FixedIterTest`, tol=0, K=4, 500 matched ctg) + the
-  `/gpu-bench-compare` skill. Report COLD FIRST. `OLF_GPU_TOL=1e-6` switches the same
-  bench to the production path (per-iteration convergence + retirement) — see the
-  2026-07-17 tol>0 entry in `docs/archive/gpu_benchmark.md` (straggler dominates, 8.4x).
+  (`GpuBatchedN1FixedIterTest`, tol=0, K=4, batch 500, 500 matched ctg) + the
+  `/gpu-bench-compare` skill. Report COLD FIRST. The production path (per-iteration convergence
+  + retirement) was measured on the same bench at tol 1e-6 — see the 2026-07-17 tol>0 entry in
+  `docs/archive/gpu_benchmark.md` (straggler dominates, 8.4x).
 - **Production SA vs CPU OLF**: `GpuVsCpuProductionSaBenchmarkTest` (sa package) —
   real AcSecurityAnalysis both sides, RTE params from `rte-loadflow-default-parameters.json`
   (repo root), same 500 ctg, violations included. SPARSE factory forced (the harness
   dense default makes the 9241 base FAIL after ~200 s). CPU arm multithreaded
-  (`OLF_GPU_SA_CPU_THREADS`, default 4); GPU arm host-single-threaded (threadCount>1 SIGSEGVs — open bug below).
+  (4 threads); GPU arm host-single-threaded (threadCount>1 SIGSEGVs — open bug below).
   2026-07-17 numbers: CPU-4t 13.2 s vs GPU warm 22.2 s (GPU 0.59x — loses today; the
   straggler early-exit + device-norm levers are what flip it).
 - OPEN PRODUCT BUGS (found 2026-07-17): (1) GPU provider + threadCount>1 → concurrent

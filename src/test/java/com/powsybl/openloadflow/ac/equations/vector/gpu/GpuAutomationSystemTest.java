@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.network.AutomationSystemNetworkFactory;
+import com.powsybl.openloadflow.network.GpuAutomationSystemNetworkFactory;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -266,7 +267,7 @@ class GpuAutomationSystemTest {
 
     /** OLF's createMeshed with two systems: l34's opens l34b above 100 A (106 A in the base), l34b's opens l3b4 above 140 A. */
     private static Network meshedWithChainedSystems() {
-        Network network = AutomationSystemNetworkFactory.createMeshed();
+        Network network = GpuAutomationSystemNetworkFactory.createMeshed();
         network.getSubstation("s1").newOverloadManagementSystem()
                 .setId("l34_opens_l34b")
                 .setEnabled(true)

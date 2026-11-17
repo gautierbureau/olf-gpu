@@ -56,7 +56,7 @@ class GpuDriverOuterLoopEngineTest {
     }
 
     /**
-     * OLF initializes every loop once, when the engine creates them (createOuterLoopsAndContexts), before this
+     * OLF initializes every loop once, when the engine creates them (engineOuterLoopsAndContexts), before this
      * engine wraps the ones the device drives. A check the device did not drive (the solve went to OLF's CPU
      * Newton-Raphson) runs OLF's loop as it stands: initializing it a second time there reset its state — and
      * re-froze, in FreezingHvdcACEmulation's case, the AC emulations the run had already unfrozen.
@@ -71,9 +71,8 @@ class GpuDriverOuterLoopEngineTest {
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
             GpuDriverOuterLoopEngine engine = new GpuDriverOuterLoopEngine(context);
             CountingLoop real = new CountingLoop();
-            AcOuterLoopContext loopContext = com.powsybl.openloadflow.ac.AcloadFlowEngine
-                    .createOuterLoopsAndContexts(context, false).getFirst().getRight();
-            real.initialize(loopContext);                    // what createOuterLoopsAndContexts did
+            AcOuterLoopContext loopContext = com.powsybl.openloadflow.ac.AcOuterLoopContexts.create(context);
+            real.initialize(loopContext);                    // what OLF's engine does once, when it creates its loops
             var wrapped = new GpuDriverOuterLoopEngine.DeviceDrivenLoop(engine, real);
 
             wrapped.check(loopContext, ReportNode.NO_OP);    // no solver yet: the device did not drive it

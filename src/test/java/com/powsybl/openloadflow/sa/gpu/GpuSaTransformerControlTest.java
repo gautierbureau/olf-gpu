@@ -736,7 +736,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setReportedFeatures(
                 java.util.Set.of(com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures.NEWTON_RAPHSON_SECURITY_ANALYSIS));
         com.powsybl.commons.report.ReportNode rSa = com.powsybl.commons.report.ReportNode.newRootReportNode()
-                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withResourceBundles(com.powsybl.openloadflow.lf.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
                 .withMessageTemplate("olf.securityAnalysis").build();
         double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, monitors, sap, rSa));
         var postNode = findSubtree(rSa, "olf.postContingencySimulation");

@@ -881,7 +881,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     /** How many times OLF's reactive-limit loop kept the strongest bus PV in a CPU run, read from its report. */
     private int cpuForcedPvElections(Network network, List<Contingency> ctgs, com.powsybl.loadflow.LoadFlowParameters lfp) {
         com.powsybl.commons.report.ReportNode report = com.powsybl.commons.report.ReportNode.newRootReportNode()
-                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withResourceBundles(com.powsybl.openloadflow.lf.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
                 .withMessageTemplate("olf.saReport").build();
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);

@@ -239,7 +239,7 @@ final class GpuBatchPrecomputer {
             GpuViolationScreen violationScreen = null;
             int fullStates = batchSize;
             if (handbackSettings != null && com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable()) {
-                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.sa.LimitScalingManager.create(
+                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.network.LimitScalingManager.create(
                         handbackSettings.limitScalings()));
                 violationScreen = GpuViolationScreen.build(net, limitTable, screenData, screenMapper, es, baseVariableRows);
                 GpuStateView view = new GpuStateView(net, baseVariableRows);

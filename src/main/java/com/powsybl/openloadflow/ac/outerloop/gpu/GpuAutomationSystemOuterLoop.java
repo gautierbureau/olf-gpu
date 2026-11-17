@@ -215,7 +215,7 @@ public final class GpuAutomationSystemOuterLoop {
         connectivity.startTemporaryChanges();
         branchesToOpen.forEach(connectivity::removeEdge);
         branchesToClose.forEach(branch -> connectivity.addEdge(branch.getBus1(), branch.getBus2(), branch));
-        AbstractLfBranchAction.updateBusesAndBranchStatus(connectivity);
+        AbstractLfBranchAction.getNetworkActivations(connectivity).apply();
         connectivity.undoTemporaryChanges();
         branchesToOpen.forEach(connectivity::removeEdge);
         branchesToClose.forEach(branch -> connectivity.addEdge(branch.getBus1(), branch.getBus2(), branch));

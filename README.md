@@ -48,10 +48,10 @@ Regenerate the kernels after an OLF formula change (needs an OLF checkout at OLF
   symbols of `libmathcudss` name that package).
 - `powsybl-math-native`: the cuDSS-enabled fork (the `libmathcudss` JNI) — see the pom
   version property.
-- `powsybl-open-loadflow`: `2.4.1-SNAPSHOT`, built from the fork's `gb/release-2.4.1-gpu-api`
-  branch — the 2.4.0 release plus only the extension points this project needs (each one an
-  upstream PR candidate on the fork), and the base-open shunt reconnection (#93). The
-  equation formulas are 2.4.0's: `codegen/regenerate.sh` against that branch proves the
+- `powsybl-open-loadflow`: `2.5.0-SNAPSHOT-gpu`, built from the fork's `gb/main-olf-gpu-port`
+  branch — OLF `main` plus the extension points this project needs (each one an upstream PR
+  candidate on the fork, merged as is), and the base-open shunt reconnection (#93). The
+  equation formulas are `main`'s: `codegen/regenerate.sh` against that branch proves the
   committed kernels unchanged.
 - `CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's
   test-jar does not export them; the copies must stay signature-compatible with the

@@ -84,7 +84,8 @@ RC resolveHvdcAcEmulation(const HvdcAcEmulationScatter& s, const int* ix) {     
 // the solution dx needs no back-permutation.
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices) {
+                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices,
+                             int nIdentityRows, const int* identityRows) {
     std::vector<int> rowMap(n, -1);
     auto pairRc = [&](int row, int col) {
         if (row < 0 || col < 0) return;
@@ -187,6 +188,12 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
             // the one nothing else names.
             pairRc(zeroPhiRowOf(ix), zeroPhiRowOf(ix));
         }
+    }
+    // Rows that hold an identity and nothing else: the DUMMY_P / DUMMY_Q of a base-open switch to a dead bus, which no
+    // family packs (the switch only couples once an action closes it, never on the device). Their own variable is the
+    // diagonal the row-mode mask writes 1.0 at.
+    for (int i = 0; i < nIdentityRows; i++) {
+        pairRc(identityRows[i], identityRows[i]);
     }
     std::vector<char> colUsed(n, 0);
     for (int r = 0; r < n; r++) {

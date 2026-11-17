@@ -13,20 +13,24 @@ import java.util.Map;
 
 /**
  * The branches the base case leaves open but the packs still hold, so a contingency or an action can close them:
- * the closed-branch family elements, and the zero-impedance family elements with their LfBranch numbers.
+ * the closed-branch family elements, and the zero-impedance family elements with their LfBranch numbers. A base-open
+ * zero-impedance branch with an end bus out of the network is not packed: {@code identityRows} are its DUMMY_P / DUMMY_Q
+ * rows, which only hold OLF's DUMMY_TARGET identities and which the structure pairs with themselves.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record BaseOpenBranches(int[] closedBranchElements, int[] zeroImpedanceElements, int[] zeroImpedanceBranchNums) {
+public record BaseOpenBranches(int[] closedBranchElements, int[] zeroImpedanceElements, int[] zeroImpedanceBranchNums,
+                               int[] identityRows) {
 
     public static BaseOpenBranches empty() {
-        return new BaseOpenBranches(new int[0], new int[0], new int[0]);
+        return new BaseOpenBranches(new int[0], new int[0], new int[0], new int[0]);
     }
 
     /** Same packed elements (the shared device structure depends on them; the branch numbers do not). */
     public boolean sameElementsAs(BaseOpenBranches other) {
         return Arrays.equals(closedBranchElements, other.closedBranchElements)
-                && Arrays.equals(zeroImpedanceElements, other.zeroImpedanceElements);
+                && Arrays.equals(zeroImpedanceElements, other.zeroImpedanceElements)
+                && Arrays.equals(identityRows, other.identityRows);
     }
 
     /** Each base-open zero-impedance branch's element, by LfBranch number. */

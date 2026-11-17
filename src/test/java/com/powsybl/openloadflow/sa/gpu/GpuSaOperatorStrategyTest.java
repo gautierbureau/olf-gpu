@@ -753,6 +753,86 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 
+    @Test
+    void closedCouplerCloseStrategyBatchMatchesCpu() {
+        // SwitchAction CLOSING the coupler C, closed already: OLF retains no switch for it (the action changes no state)
+        // and its LfSwitchAction changes nothing, so the strategy re-solves the contingency's network. The pair was left
+        // to the CPU, and its contingency with it.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeC", "C", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void openCouplerOpenStrategyBatchMatchesCpu() {
+        // SwitchAction OPENING the coupler C, open already at base: no retained switch, nothing changes in OLF
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        network.getSwitch("C").setOpen(true);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openC", "C", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void retainedClosedCouplerCloseStrategyBatchMatchesCpu() {
+        // Two strategies on the closed coupler C: opening it makes OLF retain C, so the one closing it finds a closed
+        // LfBranch, which OLF enables again: nothing changes. Both pairs on the device.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openC", "C", true),
+                new com.powsybl.action.SwitchAction("closeC", "C", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    @Test
+    void switchClosableOntoADeadBusKeepsTheRunOnTheDevice() {
+        // B7 is open at base and leads from BBS1 to BBS4, whose load nothing else feeds: a strategy closing it makes OLF
+        // retain the switch, with its DUMMY_P / DUMMY_Q held at 0 next to a dead bus. No family packs such a switch, and its
+        // two rows left the device structure unbuildable: every contingency and every strategy of the run went to the CPU.
+        // The dead-island close itself stays a CPU pair; the contingency and the other strategy's pair are on the device.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        var vl1 = network.getVoltageLevel("VL1");
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS4").setNode(8).add();
+        vl1.getNodeBreakerView().newBreaker().setId("B7").setNode1(0).setNode2(8).setOpen(true).add();
+        vl1.getNodeBreakerView().newInternalConnection().setNode1(8).setNode2(9).add();
+        vl1.newLoad().setId("LD4").setNode(9).setP0(5).setQ0(1).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeB7", "B7", false),
+                new com.powsybl.action.SwitchAction("openC", "C", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseB7",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeB7")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
     /** OLF's node-breaker network with a third line L3 from BBS1 (breaker B5) to BBS3 (breaker B6): with the coupler C
      *  open, VL1 splits into BBS1 (L1 and L3) and BBS2 (G and L2). */
     private static Network coupledSectionsWithThirdLine() {

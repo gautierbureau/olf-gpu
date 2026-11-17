@@ -117,7 +117,7 @@ public final class GpuAcStructures {
                         data.openBranch().alternateReactiveDestination(),
                         data.zeroImpedanceBranch().alternateReactiveDestination(),
                         data.reactiveRelocation().dependentBaseGroup(), data.reactiveRelocation().baseTargetRow(),
-                        data.reactiveRelocation().dependentGroupOfRow()), n);
+                        data.reactiveRelocation().dependentGroupOfRow(), data.baseOpenBranches().identityRows()), n);
                 CACHE.put(data, structure);
                 BUILDS.incrementAndGet();
                 return structure.handle;

@@ -49,7 +49,8 @@ final class GpuAcFamilyPacker {
                  List<Integer> baseOpenCb, List<Integer> baseOpenZeroImpedanceBranches, List<Integer> baseOpenZeroImpedanceBranchNums,
                  int[] closedBranchElementOf, int[] openBranchElementOf, int[] shuntElementOf, List<Integer> closedBranchPhaseControlSide,
                  List<double[]> loadModelParameters, List<int[]> loadModelIndices,
-                 List<int[]> openBranchAlternateReactiveDestination, List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
+                 List<int[]> openBranchAlternateReactiveDestination, List<int[]> zeroImpedanceBranchAlternateReactiveDestination,
+                 List<Integer> identityRows) {
     }
 
     static Packs pack(LfNetwork network, ExtractionColumns columns,
@@ -197,10 +198,11 @@ final class GpuAcFamilyPacker {
         // per-scenario target override needed.
         List<Integer> baseOpenZeroImpedanceBranches = new ArrayList<>();
         List<Integer> baseOpenZeroImpedanceBranchNums = new ArrayList<>();
+        List<Integer> identityRows = new ArrayList<>();
         packBaseOpenZeroImpedanceBranches(baseOpenZeroImpedanceBranchIdList, network, dummyPCol, dummyQCol, baseOpenZeroImpedanceBranches, zeroImpedanceBranchParameters,
                                           baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, phiCol, qRow, vCol,
                                           zeroImpedanceBranchIndices, alternateQRow,
-                                          zeroImpedanceBranchAlternateReactiveDestination);
+                                          zeroImpedanceBranchAlternateReactiveDestination, identityRows);
 
         List<double[]> shuntParameters = new ArrayList<>();
         List<int[]> shuntIndices = new ArrayList<>();
@@ -259,7 +261,8 @@ final class GpuAcFamilyPacker {
         return new Packs(closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices,
                 shuntParameters, shuntIndices, hvdcAcEmulationParameters, hvdcAcEmulationIndices, zeroImpedanceBranchParameters, zeroImpedanceBranchIndices, zeroImpedanceBranchNums,
                 baseOpenCb, baseOpenZeroImpedanceBranches, baseOpenZeroImpedanceBranchNums, closedBranchElementOf, openBranchElementOf, shuntElementOf, closedBranchPhaseControlSide,
-                loadModelParameters, loadModelIndices, openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination);
+                loadModelParameters, loadModelIndices, openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination,
+                identityRows);
     }
 
     /** BASE-OPEN closable branches (batch SA only), appended after the normal closed branches so every normal element index is unchanged. */
@@ -298,7 +301,11 @@ final class GpuAcFamilyPacker {
         }
     }
 
-    /** BASE-OPEN closable zero-impedance branches (retained-open switches, batch SA only), appended after the base couplers. */
+    /**
+     * BASE-OPEN closable zero-impedance branches (retained-open switches, batch SA only), appended after the base couplers.
+     * One with an end bus out of the network (a switch an action would close onto a dead island) is not packed: its
+     * DUMMY_P / DUMMY_Q rows hold only OLF's DUMMY_TARGET_P / DUMMY_TARGET_Q identities, which go to {@code identityRows}.
+     */
     private static void packBaseOpenZeroImpedanceBranches(final Set<String> baseOpenZeroImpedanceBranchIdList,
                                                           final LfNetwork network, final int[] dummyPCol,
                                                           final int[] dummyQCol, final List<Integer> baseOpenZeroImpedanceBranches,
@@ -307,7 +314,8 @@ final class GpuAcFamilyPacker {
                                                           final List<Integer> zeroImpedanceBranchNums, final int[] phiCol,
                                                           final int[] qRow, final int[] vCol,
                                                           final List<int[]> zeroImpedanceBranchIndices, final int[] alternateQRow,
-                                                          final List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
+                                                          final List<int[]> zeroImpedanceBranchAlternateReactiveDestination,
+                                                          final List<Integer> identityRows) {
         if (!baseOpenZeroImpedanceBranchIdList.isEmpty()) {
             for (LfBranch br : network.getBranches()) {
                 if (!br.isDisabled() || !baseOpenZeroImpedanceBranchIdList.contains(br.getId())
@@ -316,11 +324,18 @@ final class GpuAcFamilyPacker {
                 }
                 LfBus b1 = br.getBus1();
                 LfBus b2 = br.getBus2();
-                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
-                    continue;                                // dead-island reconnection — CPU scope
-                }
                 int dpRow = dummyPCol[br.getNum()];
                 int distrQRow = dummyQCol[br.getNum()];
+                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
+                    // dead-island reconnection - its strategies are CPU scope - but the identity rows are the network's
+                    if (dpRow >= 0) {
+                        identityRows.add(dpRow);
+                    }
+                    if (distrQRow >= 0) {
+                        identityRows.add(distrQRow);
+                    }
+                    continue;
+                }
                 if (dpRow < 0 || distrQRow < 0) {
                     continue;                                // no dummy rows — CPU scope
                 }

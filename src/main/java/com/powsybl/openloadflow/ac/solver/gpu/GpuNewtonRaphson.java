@@ -546,7 +546,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             long t1 = System.nanoTime();
             double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
             installTablesAndLineSearch(target, stateVectorScalingMode);
-            boolean[][] elementMask = hvdcElementMask();
+            boolean[][] elementMask = baseElementMask();
             // the branches an AutomationSystem tripping may close are packed open: disabled until the device closes one
             var elementMapper = new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper(network, extractionBaseOpenBranchIds);
             for (String id : extractionBaseOpenBranchIds) {
@@ -650,8 +650,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // terms for any non-LINEAR status (the injections ride the target vector as VSC station
     // targetP, re-extracted every solve) — mirror it with the hv element's disabled bit,
     // which fillHvdcBatch honors. Without this the fill emitted the LINEAR coupling on top
-    // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition).
-    private boolean[][] hvdcElementMask() {
+    // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition). Shunts on a bus out of the
+    // network start disabled too (GpuAcData.deadShuntElements).
+    private boolean[][] baseElementMask() {
         boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
         List<LfHvdc> packedHvdcs = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
@@ -662,6 +663,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
                 elementMask[0][hvdcAcEmulationOffset + h] = true;
             }
+        }
+        for (int e : cachedData.deadShuntElements()) {
+            elementMask[0][e] = true;                    // shunts on a bus out of the network: OLF evaluates nothing there
         }
         return elementMask;
     }

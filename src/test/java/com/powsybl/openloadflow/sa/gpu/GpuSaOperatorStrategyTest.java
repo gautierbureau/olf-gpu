@@ -808,29 +808,180 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
 
     @Test
     void switchClosableOntoADeadBusKeepsTheRunOnTheDevice() {
-        // B7 is open at base and leads from BBS1 to BBS4, whose load nothing else feeds: a strategy closing it makes OLF
+        // BD is open at base and leads from BBS3 to BBS4, whose load nothing else feeds: a strategy closing it makes OLF
         // retain the switch, with its DUMMY_P / DUMMY_Q held at 0 next to a dead bus. No family packs such a switch, and its
         // two rows left the device structure unbuildable: every contingency and every strategy of the run went to the CPU.
-        // The dead-island close itself stays a CPU pair; the contingency and the other strategy's pair are on the device.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = coupledSectionsWithThirdLine();
-        var vl1 = network.getVoltageLevel("VL1");
-        vl1.getNodeBreakerView().newBusbarSection().setId("BBS4").setNode(8).add();
-        vl1.getNodeBreakerView().newBreaker().setId("B7").setNode1(0).setNode2(8).setOpen(true).add();
-        vl1.getNodeBreakerView().newInternalConnection().setNode1(8).setNode2(9).add();
-        vl1.newLoad().setId("LD4").setNode(9).setP0(5).setQ0(1).add();
+        Network network = withDeadSection(true, false);
         List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
-        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeB7", "B7", false),
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false),
                 new com.powsybl.action.SwitchAction("openC", "C", true));
         List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
-                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseB7",
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD",
                         com.powsybl.contingency.ContingencyContext.all(),
-                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeB7")),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")),
                 new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC",
                         com.powsybl.contingency.ContingencyContext.all(),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")));
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    @Test
+    void deadLoadedSectionCloseStrategyBatchMatchesCpu() {
+        // Closing BD re-energizes BBS4 and its load LD4 through a switch alone: BBS4 is BBS3's electrical node, so the pair
+        // is the contingency with LD4 at BBS3, and BBS4 takes BBS3's voltage (compared with the CPU's, BBS4 included)
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
+    }
+
+    @Test
+    void deadEmptySectionCloseStrategyBatchMatchesCpu() {
+        // the same with nothing at BBS4: the pair is the contingency's network, BBS4 at BBS3's voltage
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadSectionCloseMatchesCpu(withDeadSection(false, false), 2);
+    }
+
+    @Test
+    void deadSectionWithAGeneratorCloseStrategyStaysOnCpu() {
+        // a generator at BBS4 joins the network's controls when BD closes: not composed, the pair and its contingency run on
+        // the CPU (the device still answers nothing else wrong)
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadSectionCloseMatchesCpu(withDeadSection(true, true), 1);
+    }
+
+    private void assertDeadSectionCloseMatchesCpu(Network network, int expectedPrecomputed) {
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
+    @Test
+    void deadSectionCouplingTwoBusesCloseStrategyBatchMatchesCpu() {
+        // With C open, BBS1 and BBS2 are two buses. BBS5 and BBS6, out of the network at base and joined by the breaker BM, reach
+        // BBS1 by BA and BBS2 by BB, both open: a strategy closing both couples BBS1 and BBS2 through them, as closing C would.
+        // The device holds it as one coupler between BBS1 and BBS2 on BA's dummy rows, LD5 at the coupled node
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadCouplingSectionCloseMatchesCpu(withDeadCouplingSection(true), 2);
+    }
+
+    @Test
+    void emptyDeadSectionCouplingTwoBusesCloseStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadCouplingSectionCloseMatchesCpu(withDeadCouplingSection(false), 2);
+    }
+
+    @Test
+    void couplerOpenedByTheContingencyClosedByTheStrategyBatchMatchesCpu() {
+        // the contingency opens the coupler C, splitting VL1 into BBS1 and BBS2; the strategy closes it back: the pair is the
+        // contingency without C's opening
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertCloseOfContingencySwitchMatchesCpu(coupledSectionsWithThirdLine(), "C");
+    }
+
+    @Test
+    void lineBreakerOpenedByTheContingencyClosedByTheStrategyBatchMatchesCpu() {
+        // the contingency opens the breaker B1 between BBS2 and L2, which loses L2's end at VL1; closing B1 brings it back
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertCloseOfContingencySwitchMatchesCpu(coupledSectionsWithThirdLine(), "B1");
+    }
+
+    private void assertCloseOfContingencySwitchMatchesCpu(Network network, String switchId) {
+        List<Contingency> contingencies = List.of(new Contingency(switchId, new com.powsybl.contingency.SwitchContingency(switchId)));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("close", switchId, false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sClose",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
+    @Test
+    void twoDeadSectionsClosedByOneStrategyBatchMatchesCpu() {
+        // one strategy closes BD onto BBS4 (from BBS3, load LD4) and BE onto BBS5 (from BBS2, C open, load LD5): two sections,
+        // each hanging on its own bus, each load at the bus its section joins
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSection(true, false);
+        network.getSwitch("C").setOpen(true);                // BBS2 its own bus, off the slack
+        var vl1 = network.getVoltageLevel("VL1");
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS5").setNode(30).add();
+        vl1.getNodeBreakerView().newBreaker().setId("BE").setNode1(1).setNode2(30).setOpen(true).add();
+        vl1.getNodeBreakerView().newInternalConnection().setNode1(30).setNode2(31).add();
+        vl1.newLoad().setId("LD5").setNode(31).setP0(4).setQ0(2).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false),
+                new com.powsybl.action.SwitchAction("closeBE", "BE", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBoth",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD", "closeBE")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
+    private void assertDeadCouplingSectionCloseMatchesCpu(Network network, int expectedPrecomputed) {
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBA", "BA", false),
+                new com.powsybl.action.SwitchAction("closeBB", "BB", false),
+                new com.powsybl.action.SwitchAction("openBM", "BM", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCouple",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBA", "closeBB")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
+    /** {@link #coupledSectionsWithThirdLine} with C open, and BBS5 - BM - BBS6 in VL1 out of the network at base, reached from
+     *  BBS1 by BA and from BBS2 by BB, both open; a load LD5 at BBS6 at will. The action list opening BM keeps it retained, so
+     *  the dead section has two buses. */
+    private static Network withDeadCouplingSection(boolean load) {
+        Network network = coupledSectionsWithThirdLine();
+        network.getSwitch("C").setOpen(true);
+        var vl1 = network.getVoltageLevel("VL1");
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS5").setNode(30).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS6").setNode(31).add();
+        vl1.getNodeBreakerView().newBreaker().setId("BA").setNode1(0).setNode2(30).setOpen(true).add();
+        vl1.getNodeBreakerView().newBreaker().setId("BM").setNode1(30).setNode2(31).setOpen(false).add();
+        vl1.getNodeBreakerView().newBreaker().setId("BB").setNode1(31).setNode2(1).setOpen(true).add();
+        if (load) {
+            vl1.getNodeBreakerView().newInternalConnection().setNode1(31).setNode2(32).add();
+            vl1.newLoad().setId("LD5").setNode(32).setP0(5).setQ0(1).add();
+        }
+        return network;
+    }
+
+    /** {@link #coupledSectionsWithThirdLine} with BBS4 in VL2, reached from BBS3 by the breaker BD only, open: out of the network
+     *  at base, with a load LD4 and a generator G4 at will. */
+    private static Network withDeadSection(boolean load, boolean generator) {
+        Network network = coupledSectionsWithThirdLine();
+        var vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBusbarSection().setId("BBS4").setNode(20).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BD").setNode1(0).setNode2(20).setOpen(true).add();
+        if (load) {
+            vl2.getNodeBreakerView().newInternalConnection().setNode1(20).setNode2(21).add();
+            vl2.newLoad().setId("LD4").setNode(21).setP0(5).setQ0(1).add();
+        }
+        if (generator) {
+            vl2.getNodeBreakerView().newInternalConnection().setNode1(20).setNode2(22).add();
+            vl2.newGenerator().setId("G4").setNode(22).setMinP(0).setMaxP(50).setTargetP(3).setTargetV(400)
+                    .setVoltageRegulatorOn(true).add();
+        }
+        return network;
     }
 
     /** OLF's node-breaker network with a third line L3 from BBS1 (breaker B5) to BBS3 (breaker B6): with the coupler C

@@ -305,6 +305,8 @@ final class GpuAcFamilyPacker {
      * BASE-OPEN closable zero-impedance branches (retained-open switches, batch SA only), appended after the base couplers.
      * One with an end bus out of the network (a switch an action would close onto a dead island) is not packed: its
      * DUMMY_P / DUMMY_Q rows hold only OLF's DUMMY_TARGET_P / DUMMY_TARGET_Q identities, which go to {@code identityRows}.
+     * The carrier of a coupler through a dead section is packed between the section's two buses of the network
+     * (DeadSectionCouplers).
      */
     private static void packBaseOpenZeroImpedanceBranches(final Set<String> baseOpenZeroImpedanceBranchIdList,
                                                           final LfNetwork network, final int[] dummyPCol,
@@ -317,6 +319,7 @@ final class GpuAcFamilyPacker {
                                                           final List<int[]> zeroImpedanceBranchAlternateReactiveDestination,
                                                           final List<Integer> identityRows) {
         if (!baseOpenZeroImpedanceBranchIdList.isEmpty()) {
+            com.powsybl.openloadflow.network.gpu.DeadSectionCouplers deadSectionCouplers = null;
             for (LfBranch br : network.getBranches()) {
                 if (!br.isDisabled() || !baseOpenZeroImpedanceBranchIdList.contains(br.getId())
                         || !br.isZeroImpedance(LoadFlowModel.AC)) {
@@ -326,6 +329,17 @@ final class GpuAcFamilyPacker {
                 LfBus b2 = br.getBus2();
                 int dpRow = dummyPCol[br.getNum()];
                 int distrQRow = dummyQCol[br.getNum()];
+                if (b1 != null && b2 != null && (b1.isDisabled() || b2.isDisabled())) {
+                    // the carrier of a coupler through a dead section: packed between the two buses of the network
+                    if (deadSectionCouplers == null) {
+                        deadSectionCouplers = com.powsybl.openloadflow.network.gpu.DeadSectionCouplers.of(network);
+                    }
+                    var coupler = deadSectionCouplers.ofCarrier(br);
+                    if (coupler != null) {
+                        b1 = coupler.bus1();
+                        b2 = coupler.bus2();
+                    }
+                }
                 if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
                     // dead-island reconnection - its strategies are CPU scope - but the identity rows are the network's
                     if (dpRow >= 0) {

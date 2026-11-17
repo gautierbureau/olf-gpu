@@ -61,7 +61,8 @@ rte6515 and PEGASE fixtures of the `test2` repository:
 pass on it with unchanged expected values. On rte6515, N-1 on 1,061 lines with default parameters, outer loops on:
 
 - 685 Jacobian matrices were created before, 1 is now, and KLU analyses it once;
-- a contingency takes a third less CPU time: 44 to 50 ms against 72 to 76 ms;
+- a contingency takes a third less CPU time: 44 to 50 ms against 72 to 76 ms. On the PEGASE fixtures the gain is
+  9% and 42%;
 - the results are the same: same statuses, and the 71,483 violations in common agree to 2e-10.
 
 ## 2. Where the six efforts stand
@@ -443,6 +444,19 @@ fixed matrix on none.
 The performance branch gained 5% in this configuration, because a bus that stops holding its voltage still rebuilt
 the structure (section 2). Here it does not, and the gain is a third.
 
+**The three fixtures**, same configuration, one line in 29: about 255 contingencies per network, all converged with
+both codes.
+
+| | rte6515 | pegase9241 | pegase13659 |
+|---|---|---|---|
+| Matrices created, before / fixed | 157 / 2 | 119 / 2 | 67 / 2 |
+| CPU per contingency, before | 72 to 76 ms | 158 ms | 270 ms |
+| CPU per contingency, fixed | 44 to 50 ms | 144 ms | 155 ms |
+| Violations, before / fixed | 17,221 / 17,218 | 31,979 / 31,979 | 23,284 / 23,284 |
+
+The gain is 35 to 39% on rte6515, 42% on pegase13659 and 9% on pegase9241, whose 14,658 shunt terms held as objects
+dominate the fill (6.3). The three violations that differ on rte6515 are the re-reported one above.
+
 **Pivots.** OLF's `JacobianMatrix` analyses again when an equation is switched and chooses new pivots when a term
 is: it reuses pivots only from one Newton iteration to the next. The fixed Jacobian first reuses the pivots of the
 previous factorisation, whatever changed; KLU's pivot growth check, which powsybl-math already applies, asks for new
@@ -538,9 +552,9 @@ Two consequences for the order of work:
 - **Results change in the last digits.** The fixed matrix puts the equations in another order, so the LU differs in
   rounding: 2e-10 on the violations of rte6515 (6.4). Comparisons of security analyses must use the thresholds of
   `docs/increased-violations-thresholds.md`, or they count re-reported violations.
-- **Reused pivots.** Measured under the outer loops on rte6515 only: worst pivot growth 1.1e-2, no failure (6.4).
-  The guard is KLU's growth check, and the fallback a full factorisation. Not measured on the PEGASE fixtures with
-  the outer loops on.
+- **Reused pivots.** Their growth is measured on rte6515 only: 1.1e-2 at worst, no failure (6.4). The guard is
+  KLU's growth check, and the fallback a full factorisation. On the PEGASE fixtures the results are the same as
+  before, but the growth itself was not recorded.
 - **One behaviour means no way back by configuration.** A regression on a kind of network the suite does not cover
   needs a code change. The guards are OLF's 1,690 tests and the fixtures.
 - **Systems without a pairing.** The equations of asymmetrical systems and of AC/DC converters have no entry in
@@ -553,8 +567,7 @@ Two consequences for the order of work:
 
 1. Step 3: equations created at run time keep their slot.
 2. Step 4: the DC Jacobian.
-3. The security analysis of 6.4 on the PEGASE fixtures with the outer loops on, and on all 7,422 lines of rte6515
-   against G. Jamgotchian's `OlfN1Bench` figures.
+3. The security analysis of 6.4 on all 7,422 lines of rte6515, against G. Jamgotchian's `OlfN1Bench` figures.
 4. Share this note with S. Prabakaran and G. Jamgotchian.
 5. In olf-gpu, when a GPU is at hand: the structure dump (a native getter for the pattern, and the same text format).
 

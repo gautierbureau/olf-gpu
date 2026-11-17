@@ -65,6 +65,10 @@ pass on it with unchanged expected values. On rte6515, N-1 on 1,061 lines with d
   9% and 42%;
 - the results are the same: same statuses, and the 71,483 violations in common agree to 2e-10.
 
+**Step 3 is done** (section 6.5, fork PR #152): an equation that OLF removes and creates again keeps its slot. On
+153 busbar-section contingencies of rte6515, which split zero-impedance networks, 177 matrices were created before
+the stack, 35 with step 2 and 4 with step 3, for the same results.
+
 ## 2. Where the six efforts stand
 
 | Effort | What it does | What it leaves open |
@@ -305,7 +309,7 @@ activity of each term; the active lists are to build with the destinations of th
 **Remote voltage control: move the target or the balance?** Section 4.2: the target keeps its variable, the balance
 moves.
 
-## 6. What steps 1 and 2 established
+## 6. What steps 1 to 3 established
 
 ### 6.1 The code
 
@@ -486,6 +490,40 @@ slot.
 the same equation system therefore corrupts the incremental updates of the first. The fixed matrix keeps its own
 destinations, which is why it can live next to the matrix of the index.
 
+### 6.5 Step 3: an equation that is removed and created again keeps its slot
+
+Fork PR #152, stacked on #151. When a zero-impedance network splits or merges, OLF removes the distribution
+equations of the voltage controls it holds and creates them again, with other terms. With step 2 alone, each time,
+the arrays were compiled again and the matrix analysed again. A busbar-section or coupler contingency does this in
+a node-breaker security analysis.
+
+A single equation now keeps its number in the structure, by type and element. Removed, it holds nothing. Created
+again, it takes its number back and its slot with it, and the rows of its new terms are added to those it had. The
+pattern stands when its columns already hold these rows, which is the case after a split: the terms of the equations
+of a part are among those of the whole. 110 lines in the two classes of step 1.
+
+It is the device's answer to the same case (section 7): the base groups once, subgroups per lane, nothing
+re-created.
+
+- On OLF's zero-impedance test network, 60 random steps compile the arrays once, against 8 times, and the pattern
+  never changes.
+- A security analysis on it, with two contingencies that split the zero-impedance network, creates 1 matrix against
+  3 with step 2.
+- OLF's suite passes: 1,691 tests.
+
+On rte6515, 153 of its 6,876 busbar sections, default parameters, one run each:
+
+| | Before the stack | Step 2 | Step 3 |
+|---|---|---|---|
+| Matrices created (one of them for the DC initialisation) | 177 | 35 | 4 |
+| Time per contingency, wall | 121 ms | 106 ms | 92 ms |
+| Statuses | 149 converged, 2 at the iteration limit | same | same |
+| Violations | 13,533 | 13,533 | 13,533 |
+
+The violations have the same values with the three codes, to 1.4e-9. The two matrices beyond the first that step 3
+still creates are not broken down yet: a reactive balance that takes a slot it had not taken, or an equation the
+structure has not seen, such as the angle reference of a bus that becomes the reference.
+
 ## 7. The plan
 
 OLF's CPU side first. Each step is its own pull request on the OLF fork, stacked on the previous one. Step 1 adds
@@ -495,7 +533,7 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 |---|---|---|
 | 1, done | The fixed view of an equation system: slots, placement, pattern, fill, tests | Sections 6.1 to 6.3, fork #150 |
 | 2, done | The AC Jacobian solves on it: one sparse matrix on the pattern, filled in place, analysed once, refactored on the previous pivots with a full factorisation as fallback. No solver type and no option; OLF's engine, outer loops, security analysis and sensitivity analysis call it as before | Section 6.4, fork #151 |
-| 3 | Equations created at run time keep their slot. OLF removes and re-creates distribution equations when a zero-impedance network splits or merges; a re-created equation is bound to its slot again by type and element | No compilation and no new analysis during a node-breaker security analysis |
+| 3, done | Equations created at run time keep their slot. OLF removes and re-creates distribution equations when a zero-impedance network splits or merges; a re-created equation takes its number and its slot back, by type and element | Section 6.5, fork #152 |
 | 4 | The DC Jacobian on a fixed matrix: a `DcPlacement`, and the same `FixedJacobian` | One behaviour for AC and DC. OLF's DC load flow, security analysis and sensitivity tests pass on it |
 | 5 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the journal; the first iteration from the delta; destinations and active lists for the object terms | No index rebuild during a security analysis. Restore in a time proportional to the delta |
 | 6 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
@@ -507,7 +545,7 @@ cases against OLF's results, so its answer is the reference, as in 6.4.
 On step 3: the device never re-creates anything. It builds the distribution equations of the base groups once, gives
 each lane the subgroups a split produces, and replays OLF's election and spanning tree on the host
 (`VoltageControlReMerge`, `ZeroImpedanceTreeReplay`). On the CPU OLF does the election itself; the fixed system only
-has to recognise a re-created equation as the one that held the slot.
+recognises a re-created equation as the one that held the slot.
 
 **What the upstream efforts become.** They improve OLF's own solver, independently: the pairing in the index
 (`minimize_zeros…`, the performance branch), `klu_refactor` first (fork #101), the scatter fills (#1521, #1564).
@@ -543,8 +581,8 @@ Two consequences for the order of work:
 - **Steps 1 and 2 lean on OLF's index and objects.** The live variables come from the index, the activity from the
   objects, the unknowns from OLF's state vector. The Jacobian of step 2 therefore still pays OLF's index update when
   buses are lost. Step 5 removes it.
-- **Equations created at run time.** Until step 3, a zero-impedance network that splits or merges under a voltage
-  control costs a compilation and a new analysis.
+- **Equations created at run time.** A re-created equation keeps its slot (6.5). One the structure has not seen
+  still costs a compilation and a new analysis.
 - **Pattern growth.** With transformer and shunt voltage control the pattern grows once or twice, when a reactive
   balance takes a tap or shunt slot for the first time. Each growth is one more analysis.
 - **Object terms are slow.** Their entries are searched at each fill. Visible on the PEGASE fixtures, which have
@@ -565,8 +603,8 @@ Two consequences for the order of work:
 
 ## 10. Next steps
 
-1. Step 3: equations created at run time keep their slot.
-2. Step 4: the DC Jacobian.
+1. Step 4: the DC Jacobian.
+2. Break down the matrices still created on busbar-section contingencies (6.5).
 3. The security analysis of 6.4 on all 7,422 lines of rte6515, against G. Jamgotchian's `OlfN1Bench` figures.
 4. Share this note with S. Prabakaran and G. Jamgotchian.
 5. In olf-gpu, when a GPU is at hand: the structure dump (a native getter for the pattern, and the same text format).

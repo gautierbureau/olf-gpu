@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # GPU batched N-1 throughput regression harness: fixed-Newton-iteration + UBATCH on
-# case9241pegase, 500 non-islanding contingencies, K=4 by default.
+# case9241pegase, 500 non-islanding contingencies, K=4 and batch 500 (both fixed in the test).
 # MUST be run (and stay at the recorded baseline) after every change touching the batched GPU path.
 #
 # Usage:
 #   tools/run_bench.sh                 # K=4 regression check (builds vs the pinned cuDSS first)
 #   tools/run_bench.sh --no-build      # skip the native rebuild (lib already vs the pinned cuDSS)
-#   OLF_GPU_FIXED_ITERS="4,6,10" tools/run_bench.sh   # K-sweep instead of just K=4
 #   tools/run_bench.sh --no-build -Dpowsybl.config.dirs=<dir>   # further arguments go to mvn (here: the
 #                                            # GPU solver parameters of <dir>/config.yml, see sweep_ordering.sh)
 #
@@ -21,10 +20,8 @@ cd "$REPO"
 export CUDA_HOME="${CUDA_HOME:-$HOME/Projects/Software/cuda-toolkit}"
 export CUDSS_ROOT="${CUDSS_ROOT:-$HOME/Projects/powsybl/cuda/cudss}"   # 0.8.0 = the pinned cuDSS version (UBATCH scales with batch size there)
 export OLF_GPU_CONT_FILE="${OLF_GPU_CONT_FILE:-$HOME/Projects/powsybl/cuda/matched_contingencies/matched_test6_ids.txt}"
-export OLF_GPU_MAXBATCH="${OLF_GPU_MAXBATCH:-500}"    # 0.8.0 UBATCH amortizes per-launch cost with batch size
 export OLF_GPU_E2E="${OLF_GPU_E2E:-1}"               # also print cold end-to-end (CPU base LF + cold GPU SA)
 export OLF_GPU_E2E_K="${OLF_GPU_E2E_K:-4}"
-export OLF_GPU_FIXED_ITERS="${OLF_GPU_FIXED_ITERS:-4}"
 
 BUILD=1
 if [[ "${1:-}" == "--no-build" ]]; then
@@ -37,7 +34,7 @@ if (( BUILD )); then
 fi
 
 LOG="$(mktemp)"
-echo ">> running GpuBatchedN1FixedIterTest#pegase9241FixedIterations (UBATCH, K=$OLF_GPU_FIXED_ITERS, 500 matched ctg)"
+echo ">> running GpuBatchedN1FixedIterTest#pegase9241FixedIterations (UBATCH, K=4, batch 500, 500 matched ctg)"
 MVN_STATUS=0
 mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dcheckstyle.skip -Dtest='GpuBatchedN1FixedIterTest#pegase9241FixedIterations' -DfailIfNoTests=false "$@" >"$LOG" 2>&1 || MVN_STATUS=$?
 

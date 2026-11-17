@@ -48,9 +48,6 @@ class GpuCpuOuterLoopTrajectoryProbe {
         br.getTerminal2().disconnect();
 
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(Path.of("rte-loadflow-default-parameters.json"));
-        if ("1".equals(System.getenv("OLF_GPU_NO_DIST_SLACK"))) {
-            lfp.setDistributedSlack(false);   // slack absorbs the entire raw imbalance -> reveals the true contingency mismatch
-        }
         OpenLoadFlowParameters olfp = OpenLoadFlowParameters.get(lfp);
         System.out.printf("%n=== CPU LF %s | maxOuterLoopIterations=%d slackBusPMaxMismatch=%.4f MW distSlack=%b%n",
                 branchId, olfp.getMaxOuterLoopIterations(), olfp.getSlackBusPMaxMismatch(),

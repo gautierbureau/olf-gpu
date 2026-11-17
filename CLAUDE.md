@@ -188,8 +188,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   real AcSecurityAnalysis both sides, RTE params from `rte-loadflow-default-parameters.json`
   (repo root), same 500 ctg, violations included. SPARSE factory forced (the harness
   dense default makes the 9241 base FAIL after ~200 s). CPU arm multithreaded
-  (`OLF_GPU_SA_CPU_THREADS`, default 4; `OLF_GPU_SA_CPU_SINGLE=1` adds the 1-thread
-  reference); GPU arm host-single-threaded (threadCount>1 SIGSEGVs — open bug below).
+  (`OLF_GPU_SA_CPU_THREADS`, default 4); GPU arm host-single-threaded (threadCount>1 SIGSEGVs — open bug below).
   2026-07-17 numbers: CPU-4t 13.2 s vs GPU warm 22.2 s (GPU 0.59x — loses today; the
   straggler early-exit + device-norm levers are what flip it).
 - OPEN PRODUCT BUGS (found 2026-07-17): (1) GPU provider + threadCount>1 → concurrent

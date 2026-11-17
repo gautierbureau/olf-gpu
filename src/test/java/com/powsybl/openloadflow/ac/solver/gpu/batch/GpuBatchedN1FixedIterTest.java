@@ -22,7 +22,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
-import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -31,6 +30,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -72,40 +72,30 @@ class GpuBatchedN1FixedIterTest {
     // Typical fixed-iteration counts: 4 (default), 10. With the AC hot-start (converge the base case first,
     // start every contingency from it — as OLF CPU SA does) we converge to
     // 1e-12 at K=4. The sweep still climbs K to show margin.
-    // The K-sweep. Default is just K=4 — the regression harness for the fixed-iteration throughput path
-    // (run after every batched-path change). Override with OLF_GPU_FIXED_ITERS="4,6,10" to see the margin.
-    private static final int[] FIXED_ITERS = parseFixedIters(System.getenv("OLF_GPU_FIXED_ITERS"), new int[] {4});
+    // K=4 — the regression harness for the fixed-iteration throughput path (run after every batched-path change).
+    private static final int[] FIXED_ITERS = {4};
     private static final double ACCURACY_TOL = 1e-6;            // the reference mismatch tolerance
     // OLF_GPU_TOL > 0 switches every solve in this bench to the PRODUCTION path: per-iteration
     // convergence check + retirement (host sync + full-mismatch D->H copy each iteration) instead
-    // of device fixed-iteration mode. Use with a generous OLF_GPU_FIXED_ITERS (e.g. 15) so the
-    // iteration cap never bites; K then only bounds maxIterations. Default 0 = bench as before.
+    // of device fixed-iteration mode. K then only bounds maxIterations. Default 0 = bench as before.
     private static final double TOL = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_TOL", "0"));
 
-    private static int[] parseFixedIters(String env, int[] fallback) {
-        if (env == null || env.isBlank()) {
-            return fallback;
-        }
-        String[] parts = env.split(",");
-        int[] ks = new int[parts.length];
-        for (int i = 0; i < parts.length; i++) {
-            ks[i] = Integer.parseInt(parts[i].trim());
-        }
-        return ks;
-    }
-
     private static final int MAX_CONTINGENCIES = 1000;
+
+    private static final int BENCH_BATCH = 500;
 
     @BeforeEach
     void check() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        // Env-to-property plumbing (env is inherited by the surefire fork, unlike -D). Only override
-        // when the env var IS set: a bare run measures the PRODUCTION defaults (memory auto-sized chunk).
-        if (System.getenv("OLF_GPU_MAXBATCH") != null) {
-            GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
-        }
+        // Batch 500: the like-for-like comparison with gpusim2grid (same 500 matched contingencies, same batch).
+        GpuBatchContextCache.forceChunkSizeForTests(BENCH_BATCH);
+    }
+
+    @AfterEach
+    void resetChunkSize() {
+        GpuBatchContextCache.forceChunkSizeForTests(null);
     }
 
     private record Problem(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -128,13 +118,6 @@ class GpuBatchedN1FixedIterTest {
         OpenLoadFlowParameters olfp = OpenLoadFlowParameters.create(lfp)
                 .setVoltageRemoteControl(false)
                 .setLowImpedanceBranchMode(OpenLoadFlowParameters.LowImpedanceBranchMode.REPLACE_BY_MIN_IMPEDANCE_LINE);
-        // OLF_GPU_BASE_ON_GPU: run the base/warm-up load flow on the GPU (the driver, a batch of one) instead
-        // of the CPU. This is the base-case warm-up strategy — it both runs faster (~0.4 vs ~1.5 s) and
-        // ABSORBS the one-time CUDA init into the base phase (same .so), so the cold contingency pass is then
-        // warm. Moves CUDA init out of the SA phase, closing the cold-E2E gap.
-        if (System.getenv("OLF_GPU_BASE_ON_GPU") != null) {
-            olfp.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
-        }
         AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(iidm, lfp, olfp,
                 new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
         acp.getNetworkParameters().setMaxSlackBusCount(1);
@@ -194,9 +177,8 @@ class GpuBatchedN1FixedIterTest {
                         .withTol(TOL));
         long gpuMs = (System.nanoTime() - g0) / 1_000_000;
         long batchedCount = cold.stream().filter(b -> !b.needsCpuFallback()).count();
-        String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
-        System.out.printf("  [%s K=%d] base %s loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
-                label, kE2E, baseWhere, baseLfMs, gpuMs,
+        System.out.printf("  [%s K=%d] base CPU loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
+                label, kE2E, baseLfMs, gpuMs,
                 baseLfMs + gpuMs, batchedCount, (baseLfMs + gpuMs) / (double) Math.max(1, batchedCount));
     }
 
@@ -250,8 +232,7 @@ class GpuBatchedN1FixedIterTest {
         // perturbation of the base case, so from this start it converges to 1e-12 in K=4. (DC-init
         // would need K=6+ — that gap is the START POINT, not the formulation.) Run a real AC load
         // flow on the base case THROUGH THE SAME CONTEXT the batch then uses (the production SA
-        // shape) — with OLF_GPU_BASE_ON_GPU the batch reuses the base's extraction and device
-        // structure instead of rebuilding them.
+        // shape).
         long baseLfT0 = System.nanoTime();
         context.getParameters().getSolverFactory().createLoadFlowEngine(context).run();
         long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
@@ -282,9 +263,8 @@ class GpuBatchedN1FixedIterTest {
                             .withTol(TOL));
             long gpuMs = (System.nanoTime() - g0) / 1_000_000;
             long batchedCount = cold.stream().filter(b -> !b.needsCpuFallback()).count();
-            String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
-            System.out.printf("  [E2E K=%d] base %s loadflow %d ms + %s GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
-                    kE2E, baseWhere, baseLfMs, "GPU".equals(baseWhere) ? "warm" : "cold", gpuMs,
+            System.out.printf("  [E2E K=%d] base CPU loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
+                    kE2E, baseLfMs, gpuMs,
                     baseLfMs + gpuMs, batchedCount, (baseLfMs + gpuMs) / (double) Math.max(1, batchedCount));
         }
 

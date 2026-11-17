@@ -95,7 +95,8 @@ final class PackedNewtonRaphson {
                 noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], reactiveRelocationGroupStart,
                 reactiveRelocationCandidateRows, openBranchAlternateReactiveDestination,
                 zeroImpedanceBranchAlternateReactiveDestination,
-                noDependentBaseGroups(reactiveRelocationGroupStart), noDependentBaseGroups(reactiveRelocationGroupStart), noDependentGroupOfRows(x0.length));
+                noDependentBaseGroups(reactiveRelocationGroupStart), noDependentBaseGroups(reactiveRelocationGroupStart), noDependentGroupOfRows(x0.length),
+                new int[0]);
         try {
             return solveOnStructure(structure, x0, target, rowMode, maxIter, tol, 0, 0.0, 0.0, new int[x0.length]);
         } finally {
@@ -161,7 +162,8 @@ final class PackedNewtonRaphson {
                 distrRhoRow, distrRhoColumn, distrRhoCoefficient, distrShuntBRow, distrShuntBColumn,
                 distrShuntBCoefficient,
                 noPcSide(closedBranchIndices.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
-                noAlternateQRows(openBranchIndices.length / 6), noAlternateQRows(zeroImpedanceBranchIndices.length / 11), new int[0], new int[0], noDependentGroupOfRows(n));
+                noAlternateQRows(openBranchIndices.length / 6), noAlternateQRows(zeroImpedanceBranchIndices.length / 11), new int[0], new int[0], noDependentGroupOfRows(n),
+                new int[0]);
         try {
             long handle = BatchSolveNative.createBatchContext(structure, nScenarios, mode,
                     reactiveLimitVoltageRow, reactiveLimitMinQ, reactiveLimitMaxQ, reactiveLimitLoadQ, reactiveLimitTargetV, new byte[reactiveLimitVoltageRow.length], new double[x0Base.length],

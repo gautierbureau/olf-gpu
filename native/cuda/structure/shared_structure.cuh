@@ -158,7 +158,8 @@ SharedStructure* buildStructure(int n,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRowsIn,
                                 const int* openBranchAlternateReactiveDestinationIn, const int* zeroImpedanceBranchAlternateReactiveDestinationIn,
-                                const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn);
+                                const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn,
+                                int nIdentityRows, const int* identityRows);
 
 // The device bytes one scenario's LU factors take, from a cuDSS probe analysis (cached on the structure).
 double luBytesPerScenario(SharedStructure& structure);

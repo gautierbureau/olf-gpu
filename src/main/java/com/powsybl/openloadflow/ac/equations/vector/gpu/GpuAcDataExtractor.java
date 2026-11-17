@@ -153,7 +153,8 @@ public final class GpuAcDataExtractor {
                 distributedSlackParticipants,
                 new BaseOpenBranches(family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                         family.baseOpenZeroImpedanceBranches().stream().mapToInt(Integer::intValue).toArray(),
-                        family.baseOpenZeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray()),
+                        family.baseOpenZeroImpedanceBranchNums().stream().mapToInt(Integer::intValue).toArray(),
+                        family.identityRows().stream().mapToInt(Integer::intValue).toArray()),
                 new ElementPack(GpuAcArrays.flatD(family.loadModelParameters(), 3), GpuAcArrays.flatI(family.loadModelIndices(), 2)),
                 new ReactiveRelocationCandidates(columns.reactiveRelocationGroupStart(), columns.reactiveRelocationCandidateRows(), columns.reactiveRelocationDependentBaseGroup(),
                         columns.reactiveRelocationBaseTargetRow(), columns.reactiveRelocationDependentGroupOfRow()));

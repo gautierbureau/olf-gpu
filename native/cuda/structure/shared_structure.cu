@@ -56,7 +56,8 @@ SharedStructure* buildStructure(int n,
                                 int nLoadModelTerms, const double* loadModelParameters, const int* loadModelIndices,
                                 int nReactiveRelocationGroups, const int* reactiveRelocationGroupStart, const int* reactiveRelocationCandidateRowsIn,
                                 const int* openBranchAlternateReactiveDestinationIn, const int* zeroImpedanceBranchAlternateReactiveDestinationIn,
-                                const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn) {
+                                const int* reactiveRelocationDependentBaseGroupIn, const int* reactiveRelocationBaseTargetRowIn, const int* reactiveRelocationDependentGroupOfRowIn,
+                                int nIdentityRows, const int* identityRows) {
     auto structure = std::make_unique<SharedStructure>();
     structure->n = n;
     structure->nElements = nClosedBranch + nOpenBranch + nShunt + nHvdcAcEmulation;
@@ -66,7 +67,8 @@ SharedStructure* buildStructure(int n,
     structure->hvdcAcEmulationOffset = nClosedBranch + nOpenBranch + nShunt;
 
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
-    structure->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, nDistrQ, distrQRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices);
+    structure->rowMap = buildRowMap(n, nClosedBranch, closedBranchIndices, nOpenBranch, openBranchIndices, nShunt, shuntIndices, nHvdcAcEmulation, hvdcAcEmulationIndices, nDistrQ, distrQRow, nZeroImpedanceBranch, zeroImpedanceBranchIndices,
+                                   nIdentityRows, identityRows);
     const std::vector<int>& rowMap = structure->rowMap;
     bool anyRelocatedChild = false;
     std::vector<int> relocatedChildOwnRows = buildRelocatedChildOwnRows(structure.get(), n, nZeroImpedanceBranch, zeroImpedanceBranchIndices, rowMap, anyRelocatedChild);

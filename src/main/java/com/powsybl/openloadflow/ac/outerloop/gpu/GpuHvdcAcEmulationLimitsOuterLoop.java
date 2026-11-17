@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.openloadflow.ac.equations.AbstractHvdcAcEmulationFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
@@ -203,10 +202,10 @@ public final class GpuHvdcAcEmulationLimitsOuterLoop {
      *  flowing from the controller station (generator-convention deltas over the linear base). */
     static double[] saturationDeltas(Controller c, boolean from1to2) {
         if (from1to2) {
-            double pAbs = AbstractHvdcAcEmulationFlowEquationTerm.getAbsActivePowerWithLosses(c.pMax12(), c.loss1(), c.loss2(), c.r());
+            double pAbs = LfHvdc.getAbsActivePowerWithLosses(c.pMax12(), c.loss1(), c.loss2(), c.r());
             return new double[] {-c.pMax12(), pAbs};
         }
-        double pAbs = AbstractHvdcAcEmulationFlowEquationTerm.getAbsActivePowerWithLosses(c.pMax21(), c.loss2(), c.loss1(), c.r());
+        double pAbs = LfHvdc.getAbsActivePowerWithLosses(c.pMax21(), c.loss2(), c.loss1(), c.r());
         return new double[] {pAbs, -c.pMax21()};
     }
 

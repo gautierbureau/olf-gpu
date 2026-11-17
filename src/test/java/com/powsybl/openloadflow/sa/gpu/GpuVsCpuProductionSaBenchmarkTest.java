@@ -16,7 +16,6 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
-import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
@@ -71,13 +70,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         assumeTrue(System.getenv("OLF_GPU_CONT_FILE") != null, "OLF_GPU_CONT_FILE not set");
-        // Env-to-property plumbing (env is inherited by the surefire fork). Only override when the
-        // env var IS set: a bare run must measure the PRODUCTION defaults (UBATCH, memory
-        // auto-sized chunk) — the old hardcoded 0/32 fallbacks made it read ~2x slower than what
-        // any real provider user gets.
-        if (System.getenv("OLF_GPU_MAXBATCH") != null) {
-            GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
-        }
+        // The PRODUCTION defaults (UBATCH, memory auto-sized chunk): what a real provider user gets.
         // SPARSE on both arms — the harness default (commonTestConfig.matrixFactory()) can be DENSE,
         // which at 9241 buses makes the base LF thrash for ~200 s and FAIL (measured), while the same
         // case + parameters converge in ~2 s / 10 iterations with a sparse factory.
@@ -179,75 +172,10 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
         assumeTrue(Files.exists(paramsFile), "rte-loadflow-default-parameters.json not found in module dir");
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
-        // OLF_GPU_SA_CONV_EPS: override newtonRaphsonConvEpsPerEq on BOTH arms (root-cause experiments).
-        String convEpsEnv = System.getenv("OLF_GPU_SA_CONV_EPS");
-        if (convEpsEnv != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
-        }
-        // OLF_GPU_SA_SLACK_TOL / OLF_GPU_SA_RL_TOL: override the outer-loop tolerances on BOTH arms (pu →
-        // MW/MVar, SB=100) with the inner eps left at the file value — isolates outer-loop trigger from
-        // inner-Newton stop as the source of the batch's production-tolerance gap.
-        String slackTolEnv = System.getenv("OLF_GPU_SA_SLACK_TOL");
-        if (slackTolEnv != null) {
-            lfp.setDistributedSlack(true);
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setSlackBusPMaxMismatch(Double.parseDouble(slackTolEnv) * 100.0);
-        }
-        String maxReactivePowerMismatchEnv = System.getenv("OLF_GPU_SA_RL_TOL");
-        if (maxReactivePowerMismatchEnv != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setMaxReactivePowerMismatch(Double.parseDouble(maxReactivePowerMismatchEnv) * 100.0);
-        }
-        // OLF_GPU_SA_MAX_OUTER: cap the outer-loop iterations on BOTH arms (trajectory tracing — stop
-        // after N outer passes and compare CPU vs GPU state to see where they first diverge). The GPU
-        // batch driver caps MAX_OUTER_LOOP_ITERATIONS by the same maxOuterLoopIterations.
-        String maxOuterEnv = System.getenv("OLF_GPU_SA_MAX_OUTER");
-        if (maxOuterEnv != null) {
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
-                    .setMaxOuterLoopIterations(Integer.parseInt(maxOuterEnv));
-        }
-        // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms (stage isolation —
-        // inner-Newton-only vs +DS vs +DS+RL — to see which stage first introduces the CPU/GPU divergence).
-        if ("1".equals(System.getenv("OLF_GPU_SA_NO_RL"))) {
-            lfp.setUseReactiveLimits(false);
-        }
-        if ("1".equals(System.getenv("OLF_GPU_SA_NO_DS"))) {
-            lfp.setDistributedSlack(false);
-        }
-        // OLF_GPU_SA_GPU_CONV_EPS: override the GPU arm's eps ONLY, leaving the CPU arm at its value.
-        // This is the honest production framing: CPU runs the file's production criterion (1e-4) while
-        // the GPU runs its fast operating point (1e-7, tighter → an at-least-as-converged answer). Same
-        // run, same warmup, so the comparison has no cross-run machine-state drift. copy() is a full
-        // JSON round-trip → an independent LoadFlowParameters preserving every file setting (30-iter
-        // outer budget, MAX_VOLTAGE_CHANGE scaling, …), so only the eps differs between the arms.
-        // GPU-arm-only outer-loop tolerance knobs (root-cause: inner-Newton stop vs outer-loop trigger).
-        // OLF_GPU_SA_GPU_SLACK_TOL: distributed-slack tolerance in pu (→ slackBusPMaxMismatch MW, SB=100).
-        // OLF_GPU_SA_GPU_RL_TOL: reactive-limits tolerance in pu (→ maxReactivePowerMismatch MVar, SB=100).
-        LoadFlowParameters lfpGpu = lfp;
-        String gpuConvEpsEnv = System.getenv("OLF_GPU_SA_GPU_CONV_EPS");
-        String gpuSlackTolEnv = System.getenv("OLF_GPU_SA_GPU_SLACK_TOL");
-        String gpuMaxReactivePowerMismatchEnv = System.getenv("OLF_GPU_SA_GPU_RL_TOL");
-        if (gpuConvEpsEnv != null || gpuSlackTolEnv != null || gpuMaxReactivePowerMismatchEnv != null) {
-            lfpGpu = lfp.copy();
-            com.powsybl.openloadflow.OpenLoadFlowParameters gpuOlf =
-                    com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu);
-            if (gpuConvEpsEnv != null) {
-                gpuOlf.setNewtonRaphsonConvEpsPerEq(Double.parseDouble(gpuConvEpsEnv));
-            }
-            if (gpuSlackTolEnv != null) {
-                lfpGpu.setDistributedSlack(true);
-                gpuOlf.setSlackBusPMaxMismatch(Double.parseDouble(gpuSlackTolEnv) * 100.0);
-            }
-            if (gpuMaxReactivePowerMismatchEnv != null) {
-                gpuOlf.setMaxReactivePowerMismatch(Double.parseDouble(gpuMaxReactivePowerMismatchEnv) * 100.0);
-            }
-        }
-
         // The FAIR production CPU arm is multithreaded — OLF SA parallelizes contingencies across
-        // threads in production. The single-thread arm is an optional reference (OLF_GPU_SA_CPU_SINGLE=1).
-        // Default 4 threads (this machine's realistic budget); override with OLF_GPU_SA_CPU_THREADS.
-        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", "4"));
+        // threads in production.
+        // 4 threads: this machine's realistic budget.
+        int threads = 4;
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // Non-zero increased-violations thresholds (0.5 kV / 0.1 %): with powsybl's ZERO defaults, a
@@ -258,12 +186,6 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 0.5, 0.001, 0.5, 0.001, 0.001));
         sap.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(threads));
 
-        long cpu1Ms = -1;
-        if ("1".equals(System.getenv("OLF_GPU_SA_CPU_SINGLE"))) {
-            long c1 = System.nanoTime();
-            runSecurityAnalysis(network, contingencies, lfp);
-            cpu1Ms = (System.nanoTime() - c1) / 1_000_000;
-        }
         long cpuT0 = System.nanoTime();
         // Diagnostic monitor on the dominant violation-diff bus (VL-3632): report its per-contingency
         // voltage on both sides so control-state divergences are visible directly, not only via violations.
@@ -286,7 +208,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             // cuLaunchKernel (measured — hs_err in precomputeBatch). The GPU's parallelism IS the
             // batch; provider-side serialization is the product fix to make threadCount safe.
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
-            sapGpu.setLoadFlowParameters(lfpGpu);
+            sapGpu.setLoadFlowParameters(lfp);
             sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
             long g0 = System.nanoTime();
             gpuCold = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
@@ -301,13 +223,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
 
         int n = contingencies.size();
         System.out.printf("PROD-SA case9241pegase | %d ctg | RTE production parameters (rte-loadflow-default-parameters.json), full outer loops%n", n);
-        System.out.printf("  conv eps: CPU=%.1e  GPU=%.1e%s%n",
-                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).getNewtonRaphsonConvEpsPerEq(),
-                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu).getNewtonRaphsonConvEpsPerEq(),
-                lfpGpu == lfp ? " (shared)" : " (per-arm split: CPU production criterion, GPU fast point)");
-        if (cpu1Ms >= 0) {
-            System.out.printf("  CPU  AcSecurityAnalysis (1 thread)   : %6d ms | %.2f ms/ctg%n", cpu1Ms, cpu1Ms / (double) n);
-        }
+        System.out.printf("  conv eps: %.1e (both arms)%n",
+                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).getNewtonRaphsonConvEpsPerEq());
         System.out.printf("  CPU  AcSecurityAnalysis (%2d threads) : %6d ms | %.2f ms/ctg%n", threads, cpuMs, cpuMs / (double) n);
         System.out.printf("  GPU  batched SA (COLD, run 1)        : %6d ms | %.2f ms/ctg | vs CPU-MT x%.2f%n", gpuColdMs, gpuColdMs / (double) n, cpuMs / (double) gpuColdMs);
         System.out.printf("  GPU  batched SA (warm, run 2)        : %6d ms | %.2f ms/ctg | vs CPU-MT x%.2f%n", gpuWarmMs, gpuWarmMs / (double) n, cpuMs / (double) gpuWarmMs);
@@ -437,7 +354,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
     /** @return true when the violation is a border flip (relative margin under 1e-3). */
     private static boolean tally(com.powsybl.contingency.violations.LimitViolation v, String ctg,
                                  Map<String, Integer> ctgHisto, List<String> worst, String sideTag) {
-        double margin = Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()) / Math.max(1e-9, Math.abs(v.getLimit()));
+        double margin = Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()) / Math.max(1e-9, Math.abs(v.getLimit()));
         ctgHisto.merge(ctg, 1, Integer::sum);
         worst.add(String.format("%.6f rel | %s | %s %s %s | value=%.4f limit=%.4f | ctg=%s",
                 margin, sideTag, v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(), v.getLimit(), ctg));

@@ -27,6 +27,8 @@ MODULE = {
         "src/main/java/com/powsybl/openloadflow/ac/equations/AbstractHvdcAcEmulationFlowEquationTerm.java",
         "src/main/java/com/powsybl/openloadflow/ac/equations/HvdcAcEmulationSide1ActiveFlowEquationTerm.java",
         "src/main/java/com/powsybl/openloadflow/ac/equations/HvdcAcEmulationSide2ActiveFlowEquationTerm.java",
+        # getAbsActivePowerWithLosses: in the abstract term up to OLF 2.4, in the LfHvdc interface since
+        "src/main/java/com/powsybl/openloadflow/network/LfHvdc.java",
     ],
 
     "residuals": [("p1", None), ("p2", None)],

@@ -174,7 +174,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis securityAnalysis = new GpuBatchedAcSecurityAnalysis(
                 network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
         return securityAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
-                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions())
+                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitScalings())
                 .whenComplete((r, t) -> restoreThreadCount(runParameters.getSecurityAnalysisParameters(), requestedThreads));
     }
 }

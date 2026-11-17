@@ -111,7 +111,7 @@ final class GpuBatchPrecomputer {
      * table), which scenarios the host may answer from their state rows alone ({@code sparse}), whether the comparison
      * also reads every full state, and the realistic-voltage band the screen reports buses outside of.
      */
-    record HandbackSettings(List<com.powsybl.security.limitreduction.LimitReduction> limitReductions,
+    record HandbackSettings(List<com.powsybl.security.limitscaling.LimitScaling> limitScalings,
                             java.util.function.Predicate<String> sparse, boolean compare, double minRealisticV,
                             double maxRealisticV) {
     }
@@ -239,8 +239,8 @@ final class GpuBatchPrecomputer {
             GpuViolationScreen violationScreen = null;
             int fullStates = batchSize;
             if (handbackSettings != null && com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable()) {
-                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.sa.LimitReductionManager.create(
-                        handbackSettings.limitReductions()));
+                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.network.LimitScalingManager.create(
+                        handbackSettings.limitScalings()));
                 violationScreen = GpuViolationScreen.build(net, limitTable, screenData, screenMapper, es, baseVariableRows);
                 GpuStateView view = new GpuStateView(net, baseVariableRows);
                 java.util.function.Predicate<String> sparse = view.usable() ? handbackSettings.sparse() : id -> false;

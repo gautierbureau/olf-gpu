@@ -29,7 +29,6 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.ac.solver.gpu.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.BatchContingency;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -84,22 +83,16 @@ class GpuBatchedPegaseFullLoadflowTest {
     // initReactiveLimitQLimitTypeBatch; was the ~1e-3 TWT-14-2925 outlier); (2) the loose 1-MW default DS tolerance left a
     // ~1e-4 uniform-angle band, removed by matching a TIGHT DS tolerance on both sides. With all criteria tight
     // and matched the 40-sample agrees to worst ~1.5e-7 / median ~2e-8 — machine precision for this scale.
-    // Overridable to inspect outliers.
-    private static final double AGREE_TOL = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_AGREE_TOL", "1e-6"));
+    private static final double AGREE_TOL = 1e-6;
     // Distributed-slack tolerance (pu), MATCHED on both sides: device slackDistTol + CPU slackBusPMaxMismatch
     // (= SLACK_TOL_PU * SB). Tight so DS agrees to inner-Newton precision, not the loose 1-MW default band.
-    private static final double SLACK_TOL_PU = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SLACK_TOL", "1e-8"));
+    private static final double SLACK_TOL_PU = 1e-8;
 
     @BeforeEach
     void check() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        // Only override when the env var IS set — a bare run measures the production defaults
-        // (UBATCH, memory auto-sized chunk).
-        if (System.getenv("OLF_GPU_MAXBATCH") != null) {
-            GpuBatchContextCache.forceChunkSizeForTests(Integer.valueOf(System.getenv("OLF_GPU_MAXBATCH")));
-        }
     }
 
     /** The GPU-scope OLF parameters — identical to the extractor's scope and reused for the CPU reference. */

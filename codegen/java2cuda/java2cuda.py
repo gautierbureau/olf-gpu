@@ -90,9 +90,13 @@ def parse_pool(mod):
     Spec-declared extern methods (powsybl-iidm's HvdcUtils closed form) are appended
     as a synthetic globally-visible file."""
     files = []
+    # a call qualified by one of the family's own source classes (LfHvdc.getAbsActivePowerWithLosses, since OLF
+    # moved it from the HVDC term to the LfHvdc interface) resolves like an unqualified sibling call
+    own_class = re.compile(r"\b(?:" + "|".join(re.escape(os.path.basename(p)[:-len(".java")])
+                                              for p in mod["java_sources"]) + r")\.(\w+\s*\()")
     for path in mod["java_sources"]:
         with open(os.path.join(OLF_SRC, path)) as f:
-            text = f.read()
+            text = own_class.sub(r"\1", f.read())
         files.append({(m["name"], len(m["params"])): (m["params"], m["body"], m["mod"])
                       for m in eg.extract(text)})
     extern = {(m["name"], len(m["params"])): (m["params"], m["body"], "public")

@@ -106,6 +106,11 @@ public final class GpuAcDataCache {
             clear();
         }
 
+        @Override
+        public void onEquationTermConstantsChanged() {
+            clear();
+        }
+
         // --- LfNetworkListener: every event clears (exhaustive on purpose — a new event type
         //     added upstream breaks this compile, which is the safe failure mode) ---
 
@@ -170,7 +175,7 @@ public final class GpuAcDataCache {
         }
 
         @Override
-        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
+        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
             clear();
         }
 

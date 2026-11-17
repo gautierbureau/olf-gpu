@@ -287,7 +287,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         }
         adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                 .setLoadTapChangingCapabilities(true)
-                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
                 .setRegulating(true).add();
         List<Contingency> ctgs = List.of(
@@ -467,7 +467,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
             }
             adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
                     .setLoadTapChangingCapabilities(true)
-                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
                     .setRegulating(true).add();
         }
@@ -736,7 +736,7 @@ class GpuSaTransformerControlTest extends AbstractGpuSaTest {
         com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setReportedFeatures(
                 java.util.Set.of(com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures.NEWTON_RAPHSON_SECURITY_ANALYSIS));
         com.powsybl.commons.report.ReportNode rSa = com.powsybl.commons.report.ReportNode.newRootReportNode()
-                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withResourceBundles(com.powsybl.openloadflow.lf.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
                 .withMessageTemplate("olf.securityAnalysis").build();
         double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, monitors, sap, rSa));
         var postNode = findSubtree(rSa, "olf.postContingencySimulation");

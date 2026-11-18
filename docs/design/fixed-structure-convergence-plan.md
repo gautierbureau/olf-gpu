@@ -88,6 +88,10 @@ busbar-section contingencies of rte6515 the diagonal had 62 zeros on average and
 its factors. It now has none, and KLU refuses one, for a reason of physics. This is the placement the device had to
 do on its own.
 
+**The first part of step 8 is done** (section 6.11, fork PR #158): the terms that are a coefficient times one
+variable, nearly all of those still held as objects, are evaluated from one table of the structure. With every
+switch of rte6515 retained a fill goes from 12 to 4.2 ms, for results identical to the last bit.
+
 **What is left follows one rule: the device does nothing of its own** (section 7.1). It reads the pattern, the
 placement, the parameters of the terms and the changes of each contingency from the CPU structure. So whatever the
 device needs and the CPU does not hold yet is built on the CPU: every term family as arrays (step 8), and a
@@ -350,7 +354,7 @@ activity of each term; the active lists are to build with the destinations of th
 **Remote voltage control: move the target or the balance?** Section 4.2: the target keeps its variable, the balance
 moves.
 
-## 6. What steps 1 to 7 established
+## 6. What steps 1 to 8 established
 
 ### 6.1 The code
 
@@ -839,6 +843,37 @@ Two cautions. The outer loops also modify the network during the post-contingenc
 be complete: elements marked as written at the setters, not a list of listener events. And what the recording
 itself costs is not measured yet.
 
+### 6.11 Step 8, first part: the linear terms
+
+Fork PR #158, stacked on #157. The inventory of section 7 shows what is still an object in a vectorized system:
+nearly all of it is a coefficient times one variable. The voltage of a voltage target, a tap, a susceptance; and
+around each zero-impedance branch its two equations, its flows in the balances of its buses and their targets.
+
+The structure holds these terms in one table: for each equation whose object terms are all of this kind, the slot
+of the variable of each term, its coefficient, its destination and whether it is active. A fill evaluates them in
+one loop over these arrays.
+
+- `MultiplyByScalarEquationTerm` says whether its scalar was given as a value or as a supplier. A coefficient given
+  as a supplier is still asked of the term at each evaluation: the weights of `DISTR_RHO` and `DISTR_SHUNT_B`.
+- The activity is read again with each placement, which every activation of a term already calls for.
+- An equation that also holds a term of another kind, like the balance of a bus of an HVDC line in AC emulation,
+  keeps its object terms evaluated one by one, in their order: the sums are the same ones as before.
+
+| One fill of the matrix | Step 7 | Step 8, first part |
+|---|---|---|
+| rte6515, every switch retained (106,288 slots), three rounds | 21.2, 14.3, 12.3 ms | 4.16, 4.22, 4.12 ms |
+| rte6515 | 0.57 ms | 0.5 ms |
+| pegase9241 | 1.71 ms | 1.53 ms |
+
+The results of the three security analyses compared are identical to the last bit to step 7.
+
+These terms have no formula, so the table is all a device needs of them. What is left of step 8: the scaled terms
+of the distribution equations, HVDC in AC emulation, open branches, load models. And the table is built again when
+an equation is compiled again, which a zero-impedance network that splits does; it could be patched in place.
+
+One correction came with it. The "HVDC in AC emulation" case of the tests of 6.2 never was in AC emulation: the
+network of OLF's test factory needs the droop extension. It has it now, and passes with the real terms.
+
 ## 7. The plan
 
 OLF's CPU side first. Each step is its own pull request on the OLF fork, stacked on the previous one. Step 1 adds
@@ -853,7 +888,7 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 | 5, done | Shunt terms as term arrays in the vectorized system | Section 6.7, fork #154 |
 | 6, done | Destinations for the terms held as objects; placements checked once | Section 6.8, fork #156 |
 | 7, done | No zero on the diagonal: the equations around zero-impedance branches, and the balance of a bus held by a control that is not next to it, exchange their slots by moves found once in the structure | Section 6.9, fork #157 |
-| 8 | Every term family as arrays, with its parameters in vectors. In the order the inventory below gives: the linear terms (a coefficient times one variable), the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Same results |
+| 8, first part done | Every term family as arrays, with its parameters in vectors. In the order the inventory below gives: the linear terms (a coefficient times one variable), done in section 6.11, fork #158; then the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Same results |
 | 9 | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops write are marked; the restore rewrites those only; the same record is the data of a lane | Restore in a time proportional to what changed: 6 to 7% of a contingency today. On the fixtures, the record of each contingency is what the device's planners derive |
 | 10 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the first iteration from the delta | No index rebuild during a security analysis |
 | 11 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
@@ -912,7 +947,7 @@ hold it yet, it is built on the CPU first.
 | Native pattern construction: `csr_pattern.cu`, `relocation_pattern.cu`, `phase_control_pattern.cu` | part of 3,200 | The pattern of the structure, taken as it is | In the structure. Since step 7 it also holds the moves the device made for itself |
 | Device-only placement: `CouplerTreeRelocation`, `CouplerTreeReHoming`, `CrossIdentity`, the zero-diagonal repair | 620 and native | The placement of step 7 (6.9) | In the structure. To confirm on a GPU: that the batched factorisation solves every lane on it |
 | Validation of the equation system: `GpuAcValidation` | 180 | A term the structure compiles is known. One check is left: the device has a kernel for the family | In the structure |
-| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | The vectors of the term arrays. Closed branches and shunts have them; open branches, HVDC, load models, zero-impedance branches and the distribution equations are objects on the CPU | Step 8 |
+| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | The vectors of the term arrays, and the table of the linear terms. Closed branches, shunts and the terms around zero-impedance branches have them; open branches, HVDC, load models and the distribution equations are objects on the CPU | Step 8: first part done (6.11) |
 | Planners: `batch/plan` | 4,700 | The recorded delta of each contingency (6.10) | Step 9 |
 | Distribution and outer-loop packs: `DistrQPacker`, `ReactiveLimitsPacker`, `DistributedSlackPacker` and others | about 1,400 | The inputs of the outer loops, as arrays | Step 11 |
 
@@ -1005,8 +1040,8 @@ Two consequences for the order of work:
 
 ## 10. Next steps
 
-1. Step 8: the term families that are still objects, as arrays. The linear terms first: they are nearly all of
-   them (7).
+1. The rest of step 8: the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load
+   models.
 2. Step 9: the recorded delta, starting with the restore of the CPU security analysis, where it is 6 to 7% of a
    contingency.
 3. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC

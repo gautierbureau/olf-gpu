@@ -1,7 +1,7 @@
 # One fixed structure for KLU and cuDSS: a convergence plan
 
-*olf-gpu design note, November 2026. Second version: the fixed structure is now built as new code in OLF, and its
-first step is done.*
+*olf-gpu design note, November 2026. Third version: the fixed structure is built as new code in OLF, seven steps are
+done, and what is left follows one rule: the device does nothing of its own.*
 
 This note extends the design note `fixed-structure-equation-system.tex` (same directory). That note compared OLF's
 alternative equations, the GPU superset matrix and upstream draft #1521, and proposed a plan. Three upstream efforts
@@ -80,6 +80,20 @@ rte6515, which has 121. The results are identical to the last bit.
 **Step 6 is done** (section 6.8, fork PR #156): the terms held as objects have destinations too, and a placement
 no longer goes through a set for every equation. With it, every term of the structure has its slots and its
 destinations in arrays.
+
+**Step 7 is done** (section 6.9, fork PR #157): no slot holds an equation that does not depend on its variable.
+Around zero-impedance branches, and for a control that holds the voltage of a bus it is not next to, the equations
+exchange their slots, by moves found once in the structure and held by the pattern from the start. On 153
+busbar-section contingencies of rte6515 the diagonal had 62 zeros on average and KLU refused 32 of 609 updates of
+its factors. It now has none, and KLU refuses one, for a reason of physics. This is the placement the device had to
+do on its own.
+
+**What is left follows one rule: the device does nothing of its own** (section 7.1). It reads the pattern, the
+placement, the parameters of the terms and the changes of each contingency from the CPU structure. So whatever the
+device needs and the CPU does not hold yet is built on the CPU: every term family as arrays (step 8), and a
+contingency as a recorded list of changes (step 9). The second is also what lets the CPU restore in proportion to
+what changed: applying a contingency through OLF is 0.2 to 0.4% of its cost, restoring the network 6 to 7%
+(section 6.10).
 
 ## 2. Where the six efforts stand
 
@@ -183,22 +197,29 @@ other on which variable.
 | `BRANCH_ALPHA1` of phase shifter t | `BRANCH_TARGET_ALPHA1` · `BRANCH_TARGET_P1/P2` of the controlled branch |
 | `DUMMY_P`, `DUMMY_Q` of a zero-impedance branch | `DUMMY_TARGET_P`, `DUMMY_TARGET_Q` · `ZERO_PHI`, `ZERO_V` |
 
-**Placement, as built.** One table and one rule, with no case named:
+**Placement, as built.** One table and three rules, with no case named:
 
-1. Each equation type names the type of the variable it is paired with, on its own element (`AcPlacement`, 25
-   lines of code). The equations OLF toggles in pairs name the same variable.
+1. Each equation type names the type of the variable it is paired with, on its own element (`AcPlacement`). The
+   equations OLF toggles in pairs name the same variable.
 2. When two active equations are paired with one variable, the one that fixes the variable (`x = target`) keeps the
-   slot.
-3. The other takes a free slot: the one it had before, else the slot of a variable it depends on, else any.
+   slot. It never moves.
+3. An equation takes its own slot when it depends on its variable. The others take a slot whose variable they
+   depend on, among their **candidates**; an equation in the way moves the same way. This is the search of an
+   augmenting path.
+
+The candidates are found once and are in the pattern from the start. They are the slots the controls can free
+(step 4, 6.6): the voltage of a controller bus, a tap, a susceptance. And they are the moves that keep zeros off
+the diagonal (step 7, 6.9): around a zero-impedance branch, and towards a control that is not next to the bus it
+holds.
 
 A slot is *live* when an active term depends on its variable. A free slot is a live slot that holds no equation.
 A slot that is not live holds `x = x`.
 
 Rule 3 gives the GPU's relocations without naming them. A voltage control that holds a bus's voltage frees exactly
-one variable: the voltage of a controller, a tap or a susceptance. The displaced reactive balance depends on it when
-the two are neighbours, and takes its slot. Any other choice would be correct too: it only puts the equations in
-another order. A choice with a nonzero diagonal is the better one for the factorisation, and the batched
-factorisation needs it.
+one variable: the voltage of a controller, a tap or a susceptance. The displaced reactive balance takes its slot
+when the two are neighbours; when they are not, it takes the voltage of a neighbour, whose balance moves on. Any
+placement is correct: it only puts the equations in another order. One without a zero on the diagonal is what a
+factorisation that does not pivot needs, and what lets KLU keep its pivots.
 
 The alternative-equations branch makes the other choice: it keeps the pilot's balance in place and writes the
 voltage target in the controller's column. It also attaches the alternatives to an equation object and duplicates
@@ -249,7 +270,7 @@ Today their entries are found by a search at each fill. This is the slow path of
 | `target[slot]` | the target of the equation the slot holds | OLF's target vector, by OLF's columns |
 | outer-loop vectors | limits, participation factors, groups | not started (section 8) |
 
-Step 1 follows OLF's objects and index. Owning these arrays is step 8. It is what lanes and the array form of the
+Step 1 follows OLF's objects and index. Owning these arrays is step 10. It is what lanes and the array form of the
 outer loops need.
 
 ### 4.6 One fill algorithm
@@ -286,6 +307,10 @@ listener that keeps the fixed system up to date receives every activation; logge
 the undo and the delta. A recorded delta is exact by construction: OLF computed it. That removes the class of bugs
 the GPU's planner mirrors have (4,708 lines re-implementing `LfContingency` and the voltage-control re-merge).
 
+Recording is cheap as well: applying a contingency through OLF's code is 0.2 to 0.4% of a contingency on the CPU.
+What OLF's way costs is the restore, 6 to 7%, because it rewrites the whole network (6.10). The delta is what makes
+the restore proportional to what changed.
+
 Where recording is too slow, an **analytic delta** is computed without applying: a branch outage that islands
 nothing is one element turned off. Analytic deltas are tested against recorded ones.
 
@@ -303,10 +328,14 @@ structure.
 
 | | CPU (KLU) | GPU (cuDSS) |
 |---|---|---|
-| Factorisation | one analysis per structure; `klu_refactor` per iteration; `klu_factor` as fallback | uniform batch, no pivoting; row repair, cross identity, coupler relocation, adaptive refinement |
-| Fill | one thread per lane; each output written where its equation is now | one thread per element; `atomicAdd`; fill, then apply the row modes |
-| Physics | OLF's term arrays and terms | kernels generated by `java2cuda` from the same term classes |
+| Structure: slots, pattern, candidates, placement, destinations | built once, in OLF | read from the CPU structure, as it is |
+| Factorisation | one analysis per structure; `klu_refactor` per iteration; `klu_factor` as fallback | uniform batch, no pivoting; a lane whose solve fails is solved again alone, with matching and pivoting; adaptive refinement |
+| Fill | one thread per lane; each output written where its equation is now | one thread per element; `atomicAdd` |
+| Physics | OLF's term arrays and terms | kernels generated by `java2cuda` from the same term classes, on the vectors of the term arrays |
 | Scope | `ALL` or `ACTIVE` | whole scope up front |
+
+Until step 7 the device column also held a placement of its own: the relocation of the couplers, a row repair and a
+cross identity. The structure does that work now (6.9), for KLU as well.
 
 ## 5. Three points where the efforts disagree
 
@@ -321,7 +350,7 @@ activity of each term; the active lists are to build with the destinations of th
 **Remote voltage control: move the target or the balance?** Section 4.2: the target keeps its variable, the balance
 moves.
 
-## 6. What steps 1 to 6 established
+## 6. What steps 1 to 7 established
 
 ### 6.1 The code
 
@@ -659,6 +688,143 @@ One caution: inside the fill, the recorder attributed 4% to the entry search of 
 shows 25 displaced terms per fill, a few microseconds. Line-level attribution in that loop is not reliable; the
 share of the fill as a whole is.
 
+### 6.9 Step 7: no zero on the diagonal
+
+Fork PR #157, stacked on #156.
+
+An equation on a slot whose variable it does not depend on leaves a zero on the diagonal. KLU pivots around it, so
+the results were right. Two things made it a step of its own:
+
+- KLU refuses to update its factors in place when a pivot it chose has become zero in another state, and a new
+  numerical factorisation follows: 32 of 609 updates on the busbar sections of rte6515;
+- the batched factorisation of the device does not pivot. olf-gpu keeps those zeros away with a placement of its
+  own, on the device and per lane (`docs/gpu-vs-olf.md`, 2.3 and 2.4).
+
+Two kinds of equations leave such a zero:
+
+- the two equations that tie the buses of a zero-impedance branch together (`ZERO_PHI`, `ZERO_V`), paired with the
+  flows of the branch (`DUMMY_P`, `DUMMY_Q`), and the balances of a bus that only such branches connect;
+- an equation that a control sends to a variable it does not depend on: the reactive balance of a bus whose voltage
+  is held by a shunt, or a generator, of a bus that is not next to it.
+
+**The moves.** Such an equation takes the slot of a variable it depends on, and the equation paired with that slot
+takes the slot the first one leaves. On OLF's zero-impedance test network (buses 1, 2 and 3 tied by lines 1 and 3;
+bus 1 holds its voltage and the angle reference):
+
+| Slot | OLF's pairing | The structure | Once line 1 is lost |
+|---|---|---|---|
+| `BUS_PHI:2` | `BUS_TARGET_P:2`, a zero | `ZERO_PHI:1` | `ZERO_PHI:3` |
+| `DUMMY_P:1` | `ZERO_PHI:1`, a zero | `BUS_TARGET_P:2` | `DUMMY_TARGET_P:1` |
+| `BUS_PHI:3` | `BUS_TARGET_P:3` | `ZERO_PHI:3` | `BUS_TARGET_P:3` |
+| `DUMMY_P:3` | `ZERO_PHI:3`, a zero | `BUS_TARGET_P:3` | `BUS_TARGET_P:2` |
+
+The same on the voltage side. With a shunt of bus 1 that holds the voltage of bus 3, the reactive balance of bus 3
+goes to the voltage of bus 1, and the reactive balance of bus 1 to the susceptance.
+
+**How.**
+
+- The structure finds the moves once: a breadth-first search from each such equation, through the equations paired
+  with the variables it depends on, until one depends on the variable of the slot to fill. Most often the first one
+  does, and the chain is an exchange. All the shortest chains are kept, as candidates: the pattern holds them from
+  the start.
+- An equation only moves to a variable of the kind of its own, which the placement policy gives. For AC: angles,
+  phase shifts and active flows on one side; voltages, ratios, susceptances and reactive flows on the other. A
+  reactive balance on an angle would be a non-zero entry in structure, and exactly zero on a flat start without
+  losses.
+- In each state an equation takes its own slot when it depends on its variable. The others are placed by the
+  search of an augmenting path through the candidates, on slots whose variables they depend on. For the equations
+  of these moves the dependence is asked of the active terms: around zero-impedance branches it changes with the
+  state.
+
+**Against the mechanisms of the device.** Each of them is one case of the search:
+
+| On the device | What it does | In the structure |
+|---|---|---|
+| `CouplerTreeRelocation` | For a coupler of the base spanning tree, the balances of its child bus go on the flows of the coupler, and the equations of the coupler on the voltage and the angle of the child. Decided once, from the base tree | The exchange. On the test network above it gives what the device's rule gives, with the bus that holds the voltage as the root |
+| `CouplerTreeReHoming` | In a lane whose contingency opens the coupler, the balances of the child come back | The search runs in each state: the balances come back, and the bus that is left with nothing but a coupler exchanges in its turn |
+| Stock placement and row repair | The couplers off the tree keep their zeros. A neighbour row is added to the row, in the matrix and in the right-hand side | No zero is left to repair. A chain of moves does with a permutation what the repair does with a row addition |
+| Row repair, for a control that is not next to its bus | The same row addition | The chain through the neighbour |
+| `CrossIdentity` | When the own row of a fixed variable is taken, `x = target` is written on another row | Not needed: an equation that fixes its variable never leaves its slot; the others move around it |
+| Robust retry | A lane whose solve fails is solved again alone, with matching and pivoting | Stays: it is a mode of the solver |
+
+**Measured.** Security analysis, default parameters, one thread.
+
+| | Step 6 | Step 7 |
+|---|---|---|
+| rte6515, 153 busbar sections: zeros on the diagonal, average per factorisation | 62 | 0 |
+| rte6515, 153 busbar sections: updates refused by KLU | 32 of 609 | 1 of 609 |
+| rte6515, 256 lines: updates refused | 0 | 0 |
+| pegase9241, 259 lines, taps and susceptances as variables: updates refused | 0 | 0 |
+| Pattern, rte6515 with busbar sections | 91,520 values | 91,993 (+0.5%) |
+| Pattern, rte6515 | 91,028 | 91,094 (+0.07%) |
+| Pattern, pegase9241 with taps and susceptances | 156,256 | 156,354 (+0.06%) |
+
+- The update that is still refused is not a matter of structure. One bus of rte6515 has a branch of negative
+  reactance that cancels the others: its own `dP/dφ` is 0.084 against 118.7 off the diagonal. KLU pivots off the
+  diagonal there from the base case on, whatever the pairing, and one contingency next to it makes that pivot zero.
+- Results: same statuses and same violations, values within 1.6e-10. One more report of a low voltage that is
+  already violated before the contingency and sits on the reporting threshold.
+- Time: unchanged. 67.8 ms of CPU per contingency before and after on the busbar sections, over three alternating
+  rounds. The placement itself goes from 385 to 453 µs on rte6515, about twice per contingency.
+- Tests: in every state of the random walks of 6.2, no slot holds an equation that does not depend on its variable
+  wherever a placement can avoid it. The test establishes that with a matching of its own, among all the variables
+  of each equation. Of about 3,000 states, 24 have no such placement: islands of zero-impedance branches whose
+  voltage no bus holds, which OLF cannot solve either.
+
+**Limits.**
+
+- The chains are found in the structure, not in each state. When a contingency takes away every neighbour through
+  which a control reaches its bus, the balance falls back on the slot the control gives it, with a zero on the
+  diagonal, as before.
+- The weak diagonals that the physics gives stay, like the one above.
+- What is established is structural: no zero on the diagonal. Whether the batched factorisation then solves every
+  lane on this placement is to be measured on a machine with a GPU.
+
+### 6.10 What applying and restoring a contingency cost
+
+olf-gpu's `batch/plan` (4,700 lines) exists because the device needs the changes of each contingency as plain data,
+and OLF can only say what a contingency changes by applying it. There are two ways out. The CPU can record the
+changes while it applies a contingency. Or the CPU can do as the plan does, and work out the changes without
+touching the network. Which one is cheaper was measured.
+
+Shares of the Java time of the contingency loop, with Java Flight Recorder: rte6515, default parameters, one thread,
+on step 7. The recorder does not see the time inside KLU.
+
+| | 255 lines | 153 busbar sections |
+|---|---|---|
+| Working out what the contingency disconnects (`PropagatedContingency.toLfContingency`) | 0.4% | 0.8% |
+| Applying it through OLF (`LfContingency.apply`) | 0.2% | 0.4% |
+| Redistributing the lost power | 0.8% | 1.6% |
+| **Restoring the base state (`NetworkState.restore`)** | **7.3%** | **5.9%** |
+| The post-contingency load flow | 61.9% | 78.6% |
+| Violation detection | 25.7% | 9.5% |
+
+olf-gpu's own notes say the same of its host side (`docs/tasks.md`, a run of 24,379 contingencies): OLF's apply
+0.6 s in total; the plan about 4 s, and 33 s in a run where one of its replays extracted the whole network again
+for each generator contingency; the restore 3.6 to 14.9 s.
+
+What the device does is two things, and only one is the efficient one:
+
+- **how it derives a contingency**: the plan re-implements OLF's rules without touching the network. It is not
+  cheaper than applying, which is the cheapest part of all, and it is where the mirror bugs are;
+- **how it holds a contingency**: a small delta on fixed base arrays, with nothing to restore. That is what the CPU
+  lacks. It pays 6 to 7% of each contingency to rewrite every bus, generator and branch, whatever the contingency
+  touched. olf-gpu already avoids most of it with the partial restore of fork #119, which the CPU security analysis
+  does not use.
+
+So the CPU takes the device's way of holding a contingency, not its way of deriving one. This is step 9: OLF's own
+apply produces one recorded delta per contingency, and it has three readers.
+
+- **The CPU's undo.** Only what was written is restored.
+- **The lanes of the device.** The delta is the data of a lane. This is what replaces `batch/plan`.
+- **CPU threads as lanes**, later. Threads would share the structure and the base state and own value arrays only.
+  Today each thread loads its own network and runs its own base case. It needs the solver to hold its own state
+  first (step 10).
+
+Two cautions. The outer loops also modify the network during the post-contingency load flow, so the record has to
+be complete: elements marked as written at the setters, not a list of listener events. And what the recording
+itself costs is not measured yet.
+
 ## 7. The plan
 
 OLF's CPU side first. Each step is its own pull request on the OLF fork, stacked on the previous one. Step 1 adds
@@ -672,13 +838,17 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 | 4, done | The pattern holds from the start the slots the controls can free: candidates read from the controls of the network, as the GPU's relocation tables. The pattern is kept across a compilation when the new arrays fit in it | Section 6.6, fork #153 |
 | 5, done | Shunt terms as term arrays in the vectorized system | Section 6.7, fork #154 |
 | 6, done | Destinations for the terms held as objects; placements checked once | Section 6.8, fork #156 |
-| 7 | The DC Jacobian on a fixed matrix: a `DcPlacement`, and the same `FixedJacobian` | One behaviour for AC and DC. OLF's DC load flow, security analysis and sensitivity tests pass on it |
-| 8 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the journal; the first iteration from the delta; destinations and active lists for the object terms | No index rebuild during a security analysis. Restore in a time proportional to the delta |
-| 9 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
-| 10 | The GPU repository, reworked on what has landed. First a dump of its structure in the text format of `FixedEquationSystem.write`, compared with the CPU's. Then its extraction and pattern construction are deleted, then its planners | olf-gpu's suite passes without its extraction |
+| 7, done | No zero on the diagonal: the equations around zero-impedance branches, and the balance of a bus held by a control that is not next to it, exchange their slots by moves found once in the structure | Section 6.9, fork #157 |
+| 8 | Every term family as arrays, with its parameters in vectors: open branches, HVDC in AC emulation, load models, the terms of zero-impedance branches, the distribution equations, the `x = target` terms. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Results identical to the last bit |
+| 9 | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops write are marked; the restore rewrites those only; the same record is the data of a lane | Restore in a time proportional to what changed: 6 to 7% of a contingency today. On the fixtures, the record of each contingency is what the device's planners derive |
+| 10 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the first iteration from the delta | No index rebuild during a security analysis |
+| 11 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
+| 12 | The GPU repository reads the CPU structure (7.1): the pattern as it is, the placement, the vectors of the term arrays, the deltas. First a dump of its structure in the text format of `FixedEquationSystem.write`, compared with the CPU's. Then its extraction, its pattern construction, its placement and its planners are deleted | olf-gpu's suite passes with no structure code of its own |
+| DC | The DC Jacobian on a fixed matrix: a `DcPlacement`, and the same `FixedJacobian`. After the AC side | One behaviour for AC and DC. OLF's DC load flow, security analysis and sensitivity tests pass on it |
 
-The AC side comes before the DC Jacobian: the order of the steps that are not done follows the profile of 6.8,
-not their number.
+Steps 8 and 9 exist because of the rule of 7.1: they build on the CPU what the device would otherwise build for
+itself. Both also pay on the CPU: step 8 removes the object path of the fill, step 9 most of the restore. The other
+gains on the AC side follow the profile of 6.8, not a step number.
 
 **A rule for every step:** when a case is unclear, look first at what the GPU does for it. It already runs these
 cases against OLF's results, so its answer is the reference, as in 6.4.
@@ -691,38 +861,48 @@ recognises a re-created equation as the one that held the slot.
 **What the upstream efforts become.** They improve OLF's own solver, independently: the pairing in the index
 (`minimize_zeros…`, the performance branch), `klu_refactor` first (fork #101), the scatter fills (#1521, #1564).
 The fixed Jacobian does not depend on them, and for the AC system it replaces what they speed up. What the
-performance branch does outside the solver (restore, violation pre-filter, bus voltages in arrays) feeds steps 8
-and 8.
+performance branch does outside the solver (restore, violation pre-filter, bus voltages in arrays) feeds steps 9
+to 11.
 
-### 7.1 What olf-gpu can take from the CPU structure now
+### 7.1 The device does nothing of its own
 
-After step 6 the CPU structure holds, in arrays: the slots, the pattern, the slot of every equation and its
-candidates, and the destinations of every term. olf-gpu builds its device structure from per-element row and
-column indices that its own extraction computes. So the question is which part of that extraction these arrays
-replace.
+The rule for everything that is left: the device reads the CPU structure and adds nothing to it. It does not add
+entries to the pattern, it does not place equations, it does not pack the parameters of the elements, and it does
+not work out what a contingency changes. What it keeps is the solver: the kernels, generated from OLF's term
+classes, and the batched factorisation.
 
-| Part of olf-gpu | Lines | Can go now? |
-|---|---|---|
-| Row indexing and reactive relocation: `StableRowIndexing`, `ReactiveRelocation`, `ReactiveRelocationTables`, `ReactiveRelocationCandidates`, `ExtractionColumns` | about 850 | Yes. Same rule, same source as the CPU placement and its candidates. Used from 17 files |
-| Validation of the equation system: `GpuAcValidation` | 180 | Mostly. A term the structure compiles is known; what is left is "the device has a kernel for it" |
-| Row modes of the base state: half of `GpuAcActivationExtractor` | about 230 | Yes: the equation each slot holds |
-| Native pattern construction: `csr_pattern.cu`, `relocation_pattern.cu`, `phase_control_pattern.cu` | part of 3,200 | Later: the device can take the CPU pattern and add its own entries |
-| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | Not yet. The structure holds positions, not parameters. Closed branches and shunts can read OLF's vectors; open branches, HVDC, load models and zero-impedance branches are objects on the CPU |
-| Distribution and outer-loop packs: `DistrQPacker`, `ReactiveLimitsPacker`, `DistributedSlackPacker` and others | about 1,400 | No: inputs of the outer loops (step 9) |
-| Device-only placement: `CouplerTreeRelocation`, `CouplerTreeReHoming`, `CrossIdentity`, the zero-diagonal repair | 620 and native | No: it exists because the batched factorisation does not pivot. KLU pivots, so the CPU has none of it |
-| Planners: `batch/plan` | 4,700 | No: they predict, per lane, what OLF would activate. They need the deltas of step 8 |
+So each part of olf-gpu that builds structure is replaced by something the CPU holds, and where the CPU does not
+hold it yet, it is built on the CPU first.
 
-So: the matrix structure, yes; most of the extraction, not yet. About 1,300 lines of the 6,000 of the extraction
-and `fixedmatrix` packages can go now, and none of the 4,700 of the planners.
+| Part of olf-gpu | Lines | What replaces it | State |
+|---|---|---|---|
+| Row indexing and reactive relocation: `StableRowIndexing`, `ReactiveRelocation`, `ReactiveRelocationTables`, `ReactiveRelocationCandidates`, `ExtractionColumns` | about 850 | The slots, the equation of each slot and its candidates | In the structure since step 4 |
+| Row modes of the base state: half of `GpuAcActivationExtractor` | about 230 | The equation each slot holds | In the structure since step 1 |
+| Native pattern construction: `csr_pattern.cu`, `relocation_pattern.cu`, `phase_control_pattern.cu` | part of 3,200 | The pattern of the structure, taken as it is | In the structure. Since step 7 it also holds the moves the device made for itself |
+| Device-only placement: `CouplerTreeRelocation`, `CouplerTreeReHoming`, `CrossIdentity`, the zero-diagonal repair | 620 and native | The placement of step 7 (6.9) | In the structure. To confirm on a GPU: that the batched factorisation solves every lane on it |
+| Validation of the equation system: `GpuAcValidation` | 180 | A term the structure compiles is known. One check is left: the device has a kernel for the family | In the structure |
+| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | The vectors of the term arrays. Closed branches and shunts have them; open branches, HVDC, load models, zero-impedance branches and the distribution equations are objects on the CPU | Step 8 |
+| Planners: `batch/plan` | 4,700 | The recorded delta of each contingency (6.10) | Step 9 |
+| Distribution and outer-loop packs: `DistrQPacker`, `ReactiveLimitsPacker`, `DistributedSlackPacker` and others | about 1,400 | The inputs of the outer loops, as arrays | Step 11 |
 
-The order that keeps it safe:
+**Why the plan is there, and why it goes.** `batch/plan` holds, for each contingency, what changes: the rows of the
+islanded buses, the generator outages and their targets, the lost power, the weights of the reactive distribution
+when a controller is lost, the voltage controls that merge again after a busbar loss, the slack when it moves. It
+derives all of it by replaying OLF's rules (`LfContingency.processLostGenerators`, the spanning tree of
+`LfZeroImpedanceNetwork`, the election of the controlled bus), because the batch must know the changes of every
+lane before it solves, and OLF only says what a contingency changes by applying it. Once the CPU records the
+changes while OLF applies the contingency, the device reads the record, and there is nothing left to replay. The
+cost of applying is not an obstacle: 0.2 to 0.4% of a contingency (6.10).
+
+The order that keeps it safe, on a machine with a GPU:
 
 1. the structure dump: olf-gpu writes its structure in the text format of `FixedEquationSystem.write`, and the two
-   texts are compared network by network. It needs a native getter for the pattern and a machine with a GPU;
-2. `ExtractionColumns` reads the CPU structure, and the row indexing and relocation classes are deleted. The native
-   code does not change: it receives other integers;
-3. the planners, checked against deltas recorded on the CPU: apply a contingency on the CPU network, read the
-   equation of each slot, restore. This can start before step 8, as a test of the planners.
+   texts are compared network by network. It needs a native getter for the pattern;
+2. the device takes the pattern, the slots and the placement from the CPU structure. The row indexing, the
+   relocation classes, the native pattern construction and the device-only placement are deleted. Each lane is
+   then solved on a matrix without a zero on the diagonal, and the robust retry is the measure of what is left;
+3. the planners are checked against deltas recorded on the CPU, contingency by contingency, before they are
+   removed.
 
 76 of the 99 test classes of olf-gpu need a GPU, so none of this can be validated on a machine without one.
 
@@ -735,16 +915,16 @@ limits). The fixed system is built to be what they read and write.
 | The loops need | The fixed system gives | State |
 |---|---|---|
 | The reactive balance of every bus that holds its voltage; the active balance of the slack | `balance[]`, filled at each fill for every bus, whatever its slots hold | built and tested |
-| The unknowns by variable | `x` by slot; a slot never moves | step 8 (today OLF's state vector) |
-| To switch a bus between holding its voltage and its reactive balance, a tap between fixed and controlling | a write of "which equation this slot holds", among the alternatives of the slot | step 8: today the switch goes through the `LfNetwork` setters and OLF's events |
-| To change a target | a write of `target[slot]` | step 8 |
+| The unknowns by variable | `x` by slot; a slot never moves | step 10 (today OLF's state vector) |
+| To switch a bus between holding its voltage and its reactive balance, a tap between fixed and controlling | a write of "which equation this slot holds", among the alternatives of the slot | step 10: today the switch goes through the `LfNetwork` setters and OLF's events |
+| To change a target | a write of `target[slot]` | step 10 |
 | That a decision never changes the matrix shape | every alternative a loop can activate is in the pattern under `ALL` | built: measured on the fixtures |
 | Vectors indexed by something stable (limits, participation, groups) | the slot of a variable | built |
-| The same decisions per lane on the device | the per-lane overrides of the vectors are deltas on the same arrays | steps 9 and 10 |
+| The same decisions per lane on the device | the per-lane overrides of the vectors are deltas on the same arrays | steps 11 and 12 |
 
 Two consequences for the order of work:
 
-- the fixed system must own its state (step 8) before a loop can write to it directly. Until then the loops stay
+- the fixed system must own its state (step 10) before a loop can write to it directly. Until then the loops stay
   OLF's, and reach it through OLF's events;
 - a loop in array form writes to the journal like a contingency does. Its decisions are then part of the delta of a
   lane, and undone with it.
@@ -753,16 +933,30 @@ Two consequences for the order of work:
 
 - **Steps 1 and 2 lean on OLF's index and objects.** The live variables come from the index, the activity from the
   objects, the unknowns from OLF's state vector. The Jacobian of step 2 therefore still pays OLF's index update when
-  buses are lost. Step 8 removes it.
+  buses are lost. Step 10 removes it.
 - **Equations created at run time.** A re-created equation keeps its slot (6.5). One the structure has not seen
   costs a compilation; the pattern and the analysis are kept when its entries are already there (6.6).
 - **Pattern growth.** None on the fixtures since step 4. Left: an action that merges two groups of controls that
   were apart when the arrays were compiled, and an equation created on a variable that has no slot.
-- **Object terms.** Their entries are still searched at each fill. Since step 5 the shunts are no longer among
-  them, and on the fixtures they are not what the fill spends its time on.
+- **Zeros on the diagonal.** None on the fixtures since step 7. The moves are found in the structure, not in each
+  state: a contingency that takes away every neighbour through which a control reaches its bus leaves one (6.9).
+  KLU then pivots; on the device the lane goes to the robust retry. How often is to be counted on a machine with a
+  GPU.
+- **The device on the CPU placement.** Step 7 establishes that the diagonal has no zero, not that the batched
+  factorisation solves every lane on it. Weak diagonals that the physics gives remain, like the bus of rte6515 of
+  6.9, and they are in olf-gpu's own placement today as well.
+- **Object terms.** They have destinations since step 6. They are still objects: what the device needs of them,
+  their parameters in vectors, is step 8.
+- **A recorded delta must be complete.** A change of the network that goes through no marked setter would not be
+  restored. The guard is a comparison with the full restore, state by state, in the tests of step 9.
 - **Measurements on a shared machine.** Its speed varies by 20 to 30% from one minute to the next. One figure of
   this note was wrong for that reason and is corrected in 6.4. Only rounds that alternate between two codes
   compare them.
+- **An instrumented build is not comparable to the last digit.** Runs of one build are identical to the last bit.
+  A build that registers a shutdown hook to print counters is not the same run: the hook takes one identity hash,
+  the order of iteration of some of OLF's hash sets changes with it, and so does the rounding. On the busbar
+  sections of rte6515 that re-reported one threshold-edge violation 149 times. Counters go in an instrumented
+  build; results are compared between plain builds.
 - **Results change in the last digits.** The fixed matrix puts the equations in another order, so the LU differs in
   rounding: 2e-10 on the violations of rte6515 (6.4). Comparisons of security analyses must use the thresholds of
   `docs/increased-violations-thresholds.md`, or they count re-reported violations.
@@ -774,37 +968,40 @@ Two consequences for the order of work:
 - **Systems without a pairing.** The equations of asymmetrical systems and of AC/DC converters have no entry in
   `AcPlacement`: they take free slots by the general rule, and their tests pass. Whether their pattern stays fixed
   under switches is not studied.
-- **Still on the matrix of the index:** the DC Jacobian until step 7, the fast decoupled solver, the voltage
+- **Still on the matrix of the index:** the DC Jacobian until its own step, the fast decoupled solver, the voltage
   magnitude initializer, and Kinsol in Newton-Krylov.
 
 ## 10. Next steps
 
-1. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC
+1. Step 8: the term families that are still objects, as arrays. Open branches first: they are the family a
+   contingency activates.
+2. Step 9: the recorded delta, starting with the restore of the CPU security analysis, where it is 6 to 7% of a
+   contingency.
+3. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC
    loop and the target vector, which a Newton iteration does not need; the mismatch from the fill.
-2. olf-gpu, on a machine with a GPU: the structure dump, then the row indexing from the CPU structure (7.1), and
-   the two shunt evaluators of step 5.
-3. The security analysis of 6.4 on all 7,422 lines of rte6515, against G. Jamgotchian's `OlfN1Bench` figures.
-4. Step 7, the DC Jacobian, after the AC side.
-4. Share this note with S. Prabakaran and G. Jamgotchian.
-5. In olf-gpu, when a GPU is at hand: the structure dump (a native getter for the pattern, and the same text format).
+4. olf-gpu, on a machine with a GPU (7.1): the structure dump, then the pattern and the placement from the CPU
+   structure, and the two shunt evaluators of step 5.
+5. The security analysis of 6.4 on all 7,422 lines of rte6515, against G. Jamgotchian's `OlfN1Bench` figures.
+6. The DC Jacobian, after the AC side.
+7. Share this note with S. Prabakaran and G. Jamgotchian.
 
 ## Appendix: what happens to the existing PRs and branches
 
 | Item | Fate |
 |---|---|
 | Upstream #1521, #1564, `minimize_zeros_in_diagonal_matrix` | independent: they improve OLF's own solver |
-| Performance branch | its solver parts are independent; its restore, violation and array parts feed steps 8 and 9; its bench is the yardstick for the security analysis |
-| Fork #101 (`klu_refactor` first) | built into the fixed Jacobian for AC; still of use for DC until step 7 |
-| Fork #105 (reactive limits on arrays) | pilot of step 9 |
-| Fork #108 (monitored branch index) | step 9 |
-| Fork #119, #135 (partial restores, restore hooks) | interim for olf-gpu; replaced by the journal of step 8 |
+| Performance branch | its solver parts are independent; its restore, violation and array parts feed steps 9 to 11; its bench is the yardstick for the security analysis |
+| Fork #101 (`klu_refactor` first) | built into the fixed Jacobian for AC; still of use for DC until the DC step |
+| Fork #105 (reactive limits on arrays) | pilot of step 11 |
+| Fork #108 (monitored branch index) | step 11 |
+| Fork #119, #135 (partial restores, restore hooks) | the partial restore is what step 9 gives the CPU itself, driven by the record instead of the caller; the hooks stay interim for olf-gpu |
 | Fork #120 (`getSortedVariablesToFindOnly`) | interim for olf-gpu; not needed once slots are the rows |
 | Fork #127 (`resultWithoutNetwork`) | kept: it is the lane result hook |
-| Fork #130, #131 (values-only updates) | interim; replaced by steps 8 and 9 |
-| Fork #146 to #149 and the 2.4.1 stack (extension points) | unchanged; several accessors become unnecessary after step 10 |
-| Fork branch `claude/acnetworkvector-variable-index` | used by step 8 |
+| Fork #130, #131 (values-only updates) | interim; replaced by steps 10 and 11 |
+| Fork #146 to #149 and the 2.4.1 stack (extension points) | unchanged; several accessors become unnecessary after step 12 |
+| Fork branch `claude/acnetworkvector-variable-index` | used by step 10 |
 | Fork alternative-equations branches | replaced by the fixed system; their reproducers become cases of its test |
-| olf-gpu #50 (outer loops in array form) | step 9 |
-| olf-gpu #52 (duplication cleanup) | the packages that do not touch structure code now; the rest is deleted by step 10 |
-| olf-gpu `StableRowIndexing`, `ReactiveRelocation*`, `GpuRowMode` | the reference the CPU placement is compared with in step 10; then deleted, except the device numerics |
-| olf-gpu `batch/plan` | tested against recorded deltas in step 10, then removed family by family |
+| olf-gpu #50 (outer loops in array form) | step 11 |
+| olf-gpu #52 (duplication cleanup) | the packages that do not touch structure code now; the rest is deleted by step 12 |
+| olf-gpu `StableRowIndexing`, `ReactiveRelocation*`, `GpuRowMode`, `CouplerTree*`, `CrossIdentity`, the row repair | the reference the CPU placement is compared with in step 12; then deleted. The robust retry stays |
+| olf-gpu `batch/plan` | replaced by the recorded deltas of step 9: checked against them contingency by contingency in step 12, then removed |

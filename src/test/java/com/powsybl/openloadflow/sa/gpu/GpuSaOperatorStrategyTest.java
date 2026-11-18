@@ -701,6 +701,75 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     }
 
     @Test
+    void baseOpenCouplerClosedOntoWhatTheContingencyCutsOffMatchesCpu() {
+        // VL1: BBS1 - C12 - BBS2 and BBS3 - C34 - BBS4, C23 open at base between them. Losing L1 cuts BBS1 and BBS2 (G1, LD2)
+        // off; closing C23 brings BBS2 back (OLF adds C23 to the post-contingency connectivity, from which the contingency
+        // also removed C12: BBS1 stays out). The islanding analysis never added the strategy's closes back and reused the
+        // contingency's verdict, the cut being the same: the pair passed for one bringing nothing back, and the device
+        // solved it with BBS2 still out. Seen now, the pair goes to the CPU (PAIR:RECLOSE_INTO_ISLAND)
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        var cpu = assertTwoCouplerTreesStrategyMatchesCpu("L1", List.of("closeC23"), 1);
+        assertEquals(3, cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults().stream()
+                .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "the strategy brings BBS2 back, not BBS1");
+    }
+
+    private SecurityAnalysisResult assertTwoCouplerTreesStrategyMatchesCpu(String contingencyId, List<String> actionIds, int expectedPrecomputed) {
+        Network network = twoCouplerTrees();
+        List<Contingency> contingencies = List.of(new Contingency(contingencyId, new BranchContingency(contingencyId)));
+        // the actions opening C12 and C34 also make OLF retain them: BBS1 to BBS4 are four buses
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeC23", "C23", false),
+                new com.powsybl.action.SwitchAction("openC12", "C12", true), new com.powsybl.action.SwitchAction("openC34", "C34", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("s", com.powsybl.contingency.ContingencyContext.specificContingency(contingencyId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), actionIds));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, expectedPrecomputed);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+        return cpu;
+    }
+
+    /** VL1 (400 kV, node-breaker): BBS1..BBS4 on nodes 0..3, couplers C12 and C34 closed, C23 open; G1 on BBS1, LD2 on BBS2,
+     *  LD3 on BBS3, G4 on BBS4; lines L1 (BBS1), L3 (BBS3) and L4 (BBS4) to VL2, which has G2 and LDV2. */
+    private static Network twoCouplerTrees() {
+        Network network = Network.create("twoCouplerTrees", "test");
+        var vl1 = network.newSubstation().setId("S1").add().newVoltageLevel().setId("VL1").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        var v1 = vl1.getNodeBreakerView();
+        for (int i = 0; i < 4; i++) {
+            v1.newBusbarSection().setId("BBS" + (i + 1)).setNode(i).add();
+        }
+        v1.newBreaker().setId("C12").setNode1(0).setNode2(1).setOpen(false).add();
+        v1.newBreaker().setId("C23").setNode1(1).setNode2(2).setOpen(true).add();
+        v1.newBreaker().setId("C34").setNode1(2).setNode2(3).setOpen(false).add();
+        int[][] feeders = {{0, 10}, {1, 11}, {2, 12}, {3, 13}, {0, 20}, {2, 21}, {3, 22}};
+        for (int[] f : feeders) {
+            v1.newBreaker().setId("B" + f[1]).setNode1(f[0]).setNode2(f[1]).setOpen(false).add();
+        }
+        vl1.newGenerator().setId("G1").setNode(10).setMinP(0).setMaxP(300).setTargetP(100).setTargetV(400)
+                .setVoltageRegulatorOn(true).add();
+        vl1.newLoad().setId("LD2").setNode(11).setP0(80).setQ0(20).add();
+        vl1.newLoad().setId("LD3").setNode(12).setP0(60).setQ0(15).add();
+        vl1.newGenerator().setId("G4").setNode(13).setMinP(0).setMaxP(200).setTargetP(50).setTargetV(400)
+                .setVoltageRegulatorOn(true).add();
+        var vl2 = network.newSubstation().setId("S2").add().newVoltageLevel().setId("VL2").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        var v2 = vl2.getNodeBreakerView();
+        v2.newBusbarSection().setId("BBSV2").setNode(0).add();
+        for (int node = 1; node <= 5; node++) {
+            v2.newBreaker().setId("BV" + node).setNode1(0).setNode2(node).setOpen(false).add();
+        }
+        vl2.newGenerator().setId("G2").setNode(1).setMinP(0).setMaxP(600).setTargetP(200).setTargetV(400)
+                .setVoltageRegulatorOn(true).add();
+        vl2.newLoad().setId("LDV2").setNode(2).setP0(250).setQ0(50).add();
+        String[][] lines = {{"L1", "20", "3"}, {"L3", "21", "4"}, {"L4", "22", "5"}};
+        for (String[] l : lines) {
+            network.newLine().setId(l[0]).setVoltageLevel1("VL1").setNode1(Integer.parseInt(l[1]))
+                    .setVoltageLevel2("VL2").setNode2(Integer.parseInt(l[2])).setR(1).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        return network;
+    }
+
+    @Test
     void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
         // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained
         // switch's dummy variables already have rows (identities held at 0 while open), so the close

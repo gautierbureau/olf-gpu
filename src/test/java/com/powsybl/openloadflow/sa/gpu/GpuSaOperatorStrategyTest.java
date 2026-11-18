@@ -992,6 +992,34 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(network, 1);
     }
 
+    /** A section out of the network at base (BBS4, which a strategy on L1 may bring back) has no voltage row: the
+     *  contingency without a strategy (L3) is still answered from its state on the device, the comparison deciding each
+     *  answer from the written-back network too. OLF disables the branches of such a bus with it, so nothing reads its
+     *  rows; a state view that wanted rows for every bus answered no contingency of the run from its state. */
+    @Test
+    void sectionOutOfTheNetworkKeepsTheAnswersFromTheState() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSection(true, false);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L3", new BranchContingency("L3")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")));
+        long mismatches = GpuStateViewCheck.DECISION_MISMATCHES.sum();
+        GpuStateViewCheck.compareInTests(true);
+        try {
+            assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+        } finally {
+            GpuStateViewCheck.compareInTests(false);
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_STATE_COUNT.get() > 0,
+                "the contingency without a strategy must be answered from its state");
+        assertEquals(mismatches, GpuStateViewCheck.DECISION_MISMATCHES.sum());
+    }
+
     private void assertDeadSectionCloseMatchesCpu(Network network, int expectedPrecomputed) {
         List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
         List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));

@@ -88,9 +88,13 @@ busbar-section contingencies of rte6515 the diagonal had 62 zeros on average and
 its factors. It now has none, and KLU refuses one, for a reason of physics. This is the placement the device had to
 do on its own.
 
-**The first part of step 8 is done** (section 6.11, fork PR #158): the terms that are a coefficient times one
-variable, nearly all of those still held as objects, are evaluated from one table of the structure. With every
-switch of rte6515 retained a fill goes from 12 to 4.2 ms, for results identical to the last bit.
+**Step 8 is done** (sections 6.11 and 6.13, fork PRs #158 and #161 to #164): no formula is computed by a term
+object any more in the default vectorized system. The terms that are a coefficient times one variable, nearly all
+of those that were still objects, are evaluated from one table of the structure: with every switch of rte6515
+retained a fill goes from 12 to 4.2 ms. HVDC lines in AC emulation, branches open at one side and loads that follow
+a model are term arrays. The equations that sum flows of the bus balances, like the reactive distribution, refer to
+the elements of these arrays. On the fixtures no equation is evaluated term by term, for results identical to the
+last bit at each of the five pull requests.
 
 **The first part of step 9 is done** (section 6.12, fork PR #160): the security analysis restores only the buses
 and the branches a contingency changed, which a listener collects. The restore goes from 7.3% to 1.4% of the time
@@ -99,8 +103,8 @@ differences between two runs was found in OLF and fixed (fork PR #159).
 
 **What is left follows one rule: the device does nothing of its own** (section 7.1). It reads the pattern, the
 placement, the parameters of the terms and the changes of each contingency from the CPU structure. So whatever the
-device needs and the CPU does not hold yet is built on the CPU: every term family as arrays (step 8), and a
-contingency as a recorded list of changes (step 9). The second is also what lets the CPU restore in proportion to
+device needs and the CPU does not hold yet is built on the CPU: every term family as arrays (step 8, done), and a
+contingency as a recorded list of changes (step 9, half done). The second is also what lets the CPU restore in proportion to
 what changed: applying a contingency through OLF is 0.2 to 0.4% of its cost, restoring the network 6 to 7%
 (section 6.10).
 
@@ -872,9 +876,10 @@ one loop over these arrays.
 
 The results of the three security analyses compared are identical to the last bit to step 7.
 
-These terms have no formula, so the table is all a device needs of them. What is left of step 8: the scaled terms
-of the distribution equations, HVDC in AC emulation, open branches, load models. And the table is built again when
-an equation is compiled again, which a zero-impedance network that splits does; it could be patched in place.
+These terms have no formula, so the table is all a device needs of them. What was left of step 8 is in 6.13: the
+scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. And the table is
+built again when an equation is compiled again, which a zero-impedance network that splits does; it could be
+patched in place.
 
 One correction came with it. The "HVDC in AC emulation" case of the tests of 6.2 never was in AC emulation: the
 network of OLF's test factory needs the droop extension. It has it now, and passes with the real terms.
@@ -924,6 +929,79 @@ and the low voltage on its reporting threshold is no longer reported by one run 
 What is left of step 9 is the device's half: the same record as the data of a lane. It needs the structure to
 hold its own state (step 10). `WoodburyDcSecurityAnalysis` has its own loop and still restores the whole network.
 
+### 6.13 Step 8, the rest: every formula in an array
+
+Fork PRs #161 to #164, stacked on #160. After the linear terms, four kinds of terms still computed a formula in
+an object. Each is now read from arrays.
+
+| Fork PR | What was an object | What it is now |
+|---|---|---|
+| #161 | The active power of an HVDC line in AC emulation, at each end | Two term arrays over `AcHvdcVector` |
+| #162 | The flow left at the connected side of a branch open at the other one | Four term arrays over `AcBranchVector` |
+| #163 | The flows other equations take from the balances: the reactive distribution (`DISTR_Q`), the flow a phase shifter or a generator controls, the voltage target of a bus with a slope | A term that refers to an element of a term array, and a table of these terms in the structure |
+| #164 | The power of a load that follows the voltage (ZIP, exponential) | Two term arrays over `AcLoadVector`, one element for each bus |
+
+The three families that became term arrays follow the recipe of the shunts (6.7). A vector holds the values and the
+derivatives by element number. `AcNetworkVector` computes them at each state update with the static formulas of
+the term classes, so no formula is written twice. An evaluator gives the arrays to a term array. The creator
+creates the terms through hooks that the vectorized creator overrides.
+
+**Open branches are not rare.** OLF creates these terms for a branch connected at one end only in the network, and
+for every branch of which a contingency can disconnect a terminal. In a security analysis this is every branch the
+contingencies disconnect: 256 branches at each side for 255 line contingencies of rte6515, 213 and 221 for 150
+busbar sections. In the busbar analysis 1,224 of the 1,276 state updates have at least one branch open at one
+side, up to 10 at once. The arrays are computed for a closed branch too, with its terms off, so that opening it
+only switches them on.
+
+**A term that refers to an element.** For each flow of a distribution equation OLF created a second object, which
+computed the flow again. `EquationTermArrayElementReference` has the value and the derivatives of an element of a
+term array, read in the array, and an activity of its own, switched through the same lists as the object it
+replaces. The structure holds these terms in a second table next to the linear one: for each term its term array,
+its element, its coefficient and where its derivatives go. This is what a device needs of a distribution equation:
+no kernel, only the outputs of a family it already computes, scattered once more with a coefficient.
+
+**The values are the same to the last bit.** The arrays use jafama's combined sine and cosine where the objects
+call them one by one: they return the same bits on 20 million arguments. Each of the four pull requests gives
+results identical byte for byte to the one before, on the four security analyses of 6.12. The tests compare each
+array element with OLF's object term in a system that is not vectorized, with exact equality: values, derivatives
+and activity, through losses and openings of each branch.
+
+Two things differ from the objects, and both are the arrays being right:
+
+- A term for an open branch, and a second term of a distribution equation, kept the admittances their branch had
+  when they were created: OLF refreshes the terms of the balances on a tap change, not these. The arrays follow
+  the tap.
+- OLF's distribution equation holds, for a shunt that can hold a voltage, a term that does not take the
+  susceptance as a variable, while the balance does. The two are not the same term, so the equation keeps its own
+  object there. It looks like an inconsistency in OLF; it is left as it is.
+
+The fast decoupled solver had three places that looked at the class of a term: its dedicated derivatives are now
+built from the evaluators too.
+
+How the structure evaluates the terms held as objects, after step 8:
+
+| Network | Coefficient times a variable | Coefficient times an array element | Equations evaluated term by term |
+|---|---|---|---|
+| rte6515 | 6,521 | 43 | 0 |
+| rte6515, every switch retained | 264,498 | 0 | 0 |
+| pegase9241, taps and susceptances as variables | 9,887 | 141 | 0 |
+| pegase13659 | 13,667 | 957 | 0 |
+
+None of the fixtures has a load that follows a model. With every connected load of pegase13659 replaced by a ZIP
+load (5,544 loads), a load flow converges in 14 iterations and 5 outer loop iterations with the terms as objects
+and as arrays, to 7e-14 pu and 1.5e-13 rad of each other, and the structure goes from 11,088 equations evaluated
+term by term to none.
+
+What is still an object, and why:
+
+- the coefficient of a distribution equation, when it is a supplier: the share of a generator, or one over the
+  number of taps or susceptances that hold a voltage. The fill asks the term for it. It becomes an array with the
+  outer loops (step 11);
+- the current magnitudes, which belong to no equation;
+- the balance of several slack buses, created before the branches; the distribution equation of a generator that
+  controls a reactive flow, until it is created again; the shunt of the paragraph above;
+- the terms of DC subnetworks and the asymmetrical system, which the vectorized creator does not cover.
+
 ## 7. The plan
 
 OLF's CPU side first. Each step is its own pull request on the OLF fork, stacked on the previous one. Step 1 adds
@@ -938,7 +1016,7 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 | 5, done | Shunt terms as term arrays in the vectorized system | Section 6.7, fork #154 |
 | 6, done | Destinations for the terms held as objects; placements checked once | Section 6.8, fork #156 |
 | 7, done | No zero on the diagonal: the equations around zero-impedance branches, and the balance of a bus held by a control that is not next to it, exchange their slots by moves found once in the structure | Section 6.9, fork #157 |
-| 8, first part done | Every term family as arrays, with its parameters in vectors. In the order the inventory below gives: the linear terms (a coefficient times one variable), done in section 6.11, fork #158; then the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Same results |
+| 8, done | Every term family as arrays, with its parameters in vectors: the linear terms (a coefficient times one variable), section 6.11, fork #158; then HVDC in AC emulation, open branches, the flows other equations take from the balances, load models, section 6.13, forks #161 to #164. What the device reads has to exist on the CPU | No formula computed by a term object in the default AC system, and no equation evaluated term by term in the fill, on the fixtures. Same results to the last bit |
 | 9, first part done | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops change are collected, and the restore rewrites those only: done, section 6.12, fork #160. Then the same record as the data of a lane | Restore in a time proportional to what changed: 7.3% to 1.4% of a contingency. On the fixtures, the record of each contingency is what the device's planners derive |
 | 10 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the first iteration from the delta | No index rebuild during a security analysis |
 | 11 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
@@ -949,8 +1027,9 @@ Steps 8 and 9 exist because of the rule of 7.1: they build on the CPU what the d
 itself. Both also pay on the CPU: step 8 removes the object path of the fill, step 9 most of the restore. The other
 gains on the AC side follow the profile of 6.8, not a step number.
 
-**What is still an object** in the default vectorized system, counted on the fixtures. Closed branches and shunts
-are arrays (steps 1 and 5).
+**What was still an object before step 8** in the default vectorized system, counted on the fixtures. Closed
+branches and shunts were arrays already (steps 1 and 5). Step 8 took this table row by row; what each row became
+is in 6.11 and 6.13.
 
 | Terms held as objects | rte6515 | rte6515, every switch retained | pegase9241, taps and susceptances as variables |
 |---|---|---|---|
@@ -963,8 +1042,9 @@ are arrays (steps 1 and 5).
 - Nearly all of them are **linear**: a coefficient times one variable, the coefficient a constant for all but the
   distribution equations. With every switch retained they are 264,000 terms and three quarters of the fill. They
   need no formula on the device, only their slot, coefficient and destination.
-- There is **no open-branch term** unless a branch can open at one end: OLF creates them for those branches only.
-  They come after the linear terms, not first.
+- There is **no open-branch term** in this count, which is of a network loaded for a load flow. OLF creates them
+  for the branches that can open at one end, and in a security analysis these are all the branches the
+  contingencies disconnect (6.13).
 
 **A rule for every step:** when a case is unclear, look first at what the GPU does for it. It already runs these
 cases against OLF's results, so its answer is the reference, as in 6.4.
@@ -997,7 +1077,7 @@ hold it yet, it is built on the CPU first.
 | Native pattern construction: `csr_pattern.cu`, `relocation_pattern.cu`, `phase_control_pattern.cu` | part of 3,200 | The pattern of the structure, taken as it is | In the structure. Since step 7 it also holds the moves the device made for itself |
 | Device-only placement: `CouplerTreeRelocation`, `CouplerTreeReHoming`, `CrossIdentity`, the zero-diagonal repair | 620 and native | The placement of step 7 (6.9) | In the structure. To confirm on a GPU: that the batched factorisation solves every lane on it |
 | Validation of the equation system: `GpuAcValidation` | 180 | A term the structure compiles is known. One check is left: the device has a kernel for the family | In the structure |
-| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | The vectors of the term arrays, and the table of the linear terms. Closed branches, shunts and the terms around zero-impedance branches have them; open branches, HVDC, load models and the distribution equations are objects on the CPU | Step 8: first part done (6.11) |
+| Element parameters and family packs: `GpuAcFamilyPacker` and the packs | about 700 | The vectors of the term arrays (`AcBranchVector`, `AcShuntVector`, `AcHvdcVector`, `AcLoadVector`), the table of the linear terms and the table of the terms that refer to an array element | On the CPU since step 8 (6.11, 6.13). The device has no kernel for the load models |
 | Planners: `batch/plan` | 4,700 | The recorded delta of each contingency (6.10) | Step 9 |
 | Distribution and outer-loop packs: `DistrQPacker`, `ReactiveLimitsPacker`, `DistributedSlackPacker` and others | about 1,400 | The inputs of the outer loops, as arrays | Step 11 |
 
@@ -1061,8 +1141,13 @@ Two consequences for the order of work:
 - **The device on the CPU placement.** Step 7 establishes that the diagonal has no zero, not that the batched
   factorisation solves every lane on it. Weak diagonals that the physics gives remain, like the bus of rte6515 of
   6.9, and they are in olf-gpu's own placement today as well.
-- **Object terms.** They have destinations since step 6. They are still objects: what the device needs of them,
-  their parameters in vectors, is step 8.
+- **Object terms.** Since step 8 none computes a formula on the fixtures. A coefficient given as a supplier is
+  still asked of its term at each fill, and a few cases keep an object (6.13): an equation that holds one is
+  evaluated term by term, as before.
+- **Arrays are computed at a state update.** A term held as an object computes when it is asked; an element of an
+  array has the value of the last state update. OLF sets the state at the start of each solver run, so the two
+  agree wherever OLF evaluates. A flow read after a change of the network and before the next run is the one of
+  the last state, as it already was for the closed branches.
 - **A recorded delta must be complete.** A change of the network that goes through no marked setter would not be
   restored. The guard is a comparison with the full restore, state by state, in the tests of step 9.
 - **Measurements on a shared machine.** Its speed varies by 20 to 30% from one minute to the next. One figure of
@@ -1089,14 +1174,14 @@ Two consequences for the order of work:
 
 ## 10. Next steps
 
-1. The rest of step 8: the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load
-   models.
-2. Upstream: fork #159, the sum of the lost power in the order of the buses. It is three lines, and every
+1. Upstream: fork #159, the sum of the lost power in the order of the buses. It is three lines, and every
    comparison of two runs depends on it.
-3. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC
+2. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC
    loop and the target vector, which a Newton iteration does not need; the mismatch from the fill.
+3. The device's half of step 9, which needs the structure to hold its own state (step 10).
 4. olf-gpu, on a machine with a GPU (7.1): the structure dump, then the pattern and the placement from the CPU
-   structure, and the two shunt evaluators of step 5.
+   structure, and the evaluators of steps 5 and 8 (shunts, HVDC, open branches, the table of the terms that refer
+   to an array element).
 5. The security analysis of 6.4 on all 7,422 lines of rte6515, against G. Jamgotchian's `OlfN1Bench` figures.
 6. The DC Jacobian, after the AC side.
 7. Share this note with S. Prabakaran and G. Jamgotchian.

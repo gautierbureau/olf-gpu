@@ -727,6 +727,27 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "BBS2 stays in the network");
     }
 
+    @Test
+    void couplerClosedParallelToOneTheStrategyOpensMatchesCpu() {
+        // CP12, open at base, runs beside C12 between BBS1 and BBS2: closing it alone closes a loop, nothing to compose. The
+        // strategy also opens C12, so CP12 is what keeps BBS2 (LD2) on BBS1: the close joins two parts again. Taken for a
+        // loop at base, it was left out and the device solved BBS2 cut off
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = twoCouplerTrees();
+        network.getVoltageLevel("VL1").getNodeBreakerView().newBreaker().setId("CP12").setNode1(0).setNode2(1).setOpen(true).add();
+        List<Contingency> contingencies = List.of(new Contingency("L4", new BranchContingency("L4")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeCP12", "CP12", false),
+                new com.powsybl.action.SwitchAction("openC12", "C12", true), new com.powsybl.action.SwitchAction("openC34", "C34", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("s", com.powsybl.contingency.ContingencyContext.specificContingency("L4"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC12", "closeCP12")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+        assertEquals(4, cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults().stream()
+                .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "BBS2 stays in the network through CP12");
+    }
+
     private SecurityAnalysisResult assertTwoCouplerTreesStrategyMatchesCpu(String contingencyId, List<String> actionIds, int expectedPrecomputed) {
         Network network = twoCouplerTrees();
         List<Contingency> contingencies = List.of(new Contingency(contingencyId, new BranchContingency(contingencyId)));

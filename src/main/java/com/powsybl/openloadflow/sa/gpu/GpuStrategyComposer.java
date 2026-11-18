@@ -131,6 +131,7 @@ final class GpuStrategyComposer {
         List<LfBranch> reenabled = new java.util.ArrayList<>();      // contingency outages a close puts back
         List<LfBranch> opened = new java.util.ArrayList<>();         // branches an open takes out
         List<LfBranch> deadIslandCloses = new java.util.ArrayList<>(); // switches closing onto a bus out of the network
+        List<LfBranch> loopCloses = new java.util.ArrayList<>();       // switches closing within one zero-impedance network
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
         Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
         List<com.powsybl.openloadflow.network.LfHvdc> acEmulationOff = new java.util.ArrayList<>();
@@ -200,7 +201,7 @@ final class GpuStrategyComposer {
                 }
             } else if (a instanceof com.powsybl.action.SwitchAction switchAction) {
                 String switchRefusal = composeSwitchAction(net, switchAction, ctgSideOpens, branches, zeroImpedanceOutages, opened, reclosed,
-                        reenabled, deadIslandCloses);
+                        reenabled, deadIslandCloses, loopCloses);
                 if (switchRefusal != null) {
                     return refused(switchRefusal);
                 }
@@ -326,6 +327,7 @@ final class GpuStrategyComposer {
         List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
         ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
         ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));
+        composeLoopCloses(loopCloses, zeroImpedanceOutages, reclosed);
         if (!deadIslandCloses.isEmpty()) {
             String islandRefusal = composeReenergizedIsland(net, ctgCut, deadIslandCloses, reenabled, opened, loads, reclosed);
             if (islandRefusal != null) {
@@ -349,6 +351,46 @@ final class GpuStrategyComposer {
                 // three-winding transformer outage)
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, zeroImpedanceOutages, ctgHvdcs, ctgSideOpens,
                 contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff);
+    }
+
+    /** The closes of switches within one zero-impedance network at base: a loop at base, but the contingency's and the
+     *  actions' openings may have split its network, and OLF's close then joins the two parts again, a merge composed like
+     *  any other (left out, the device kept them apart). A loop still: nothing to compose (a non-tree edge in OLF). */
+    private static void composeLoopCloses(List<LfBranch> loopCloses, List<LfBranch> zeroImpedanceOutages, List<LfBranch> reclosed) {
+        for (LfBranch b : loopCloses) {
+            if (!zeroImpedanceConnected(b.getBus1(), b.getBus2(), zeroImpedanceOutages, reclosed)) {
+                reclosed.add(b);
+            }
+        }
+    }
+
+    /** Whether {@code from} reaches {@code to} through zero-impedance branches closed at base and not {@code out}, or through
+     *  {@code closes}: the zero-impedance connectivity after the contingency and the actions. */
+    private static boolean zeroImpedanceConnected(LfBus from, LfBus to, List<LfBranch> out, List<LfBranch> closes) {
+        java.util.Set<LfBranch> removed = new java.util.HashSet<>(out);
+        java.util.Set<LfBranch> added = new java.util.HashSet<>(closes);
+        java.util.Set<LfBus> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<LfBus> queue = new java.util.ArrayDeque<>();
+        seen.add(from);
+        queue.add(from);
+        while (!queue.isEmpty()) {
+            LfBus bus = queue.poll();
+            if (bus == to) {
+                return true;
+            }
+            for (LfBranch br : bus.getBranches()) {
+                boolean edge = added.contains(br) || !br.isDisabled() && br.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                        && !removed.contains(br);
+                if (!edge || br.getBus1() == null || br.getBus2() == null) {
+                    continue;
+                }
+                LfBus other = br.getBus1() == bus ? br.getBus2() : br.getBus1();
+                if (seen.add(other)) {
+                    queue.add(other);
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -467,7 +509,7 @@ final class GpuStrategyComposer {
     private static String composeSwitchAction(LfNetwork net, com.powsybl.action.SwitchAction switchAction,
                                                List<BatchContingency.SideOpen> ctgSideOpens, List<LfBranch> branches,
                                                List<LfBranch> zeroImpedanceOutages, List<LfBranch> opened, List<LfBranch> reclosed,
-                                               List<LfBranch> reenabled, List<LfBranch> deadIslandCloses) {
+                                               List<LfBranch> reenabled, List<LfBranch> deadIslandCloses, List<LfBranch> loopCloses) {
         LfBranch b = net.getBranchById(switchAction.getSwitchId());
         if (b != null && ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
             return "SWITCH_SIDE_OPENED_BY_CONTINGENCY";     // the contingency opened ONE side of it: CPU
@@ -522,8 +564,10 @@ final class GpuStrategyComposer {
         var zn2 = bus2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
         if (zn1 == null || zn2 == null || zn1 != zn2) {
             reclosed.add(b);                                 // tree merge — batched
+            return null;
         }
-        return null;                                         // same zero-impedance network: loop close, no-op
+        loopCloses.add(b);                                   // same zero-impedance network at base: decided once every action is known
+        return null;
     }
 
     /**

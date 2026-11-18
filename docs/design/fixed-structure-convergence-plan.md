@@ -92,6 +92,11 @@ do on its own.
 variable, nearly all of those still held as objects, are evaluated from one table of the structure. With every
 switch of rte6515 retained a fill goes from 12 to 4.2 ms, for results identical to the last bit.
 
+**The first part of step 9 is done** (section 6.12, fork PR #160): the security analysis restores only the buses
+and the branches a contingency changed, which a listener collects. The restore goes from 7.3% to 1.4% of the time
+sampled in a contingency, for results identical to the last bit. On the way, the cause of the last-digit
+differences between two runs was found in OLF and fixed (fork PR #159).
+
 **What is left follows one rule: the device does nothing of its own** (section 7.1). It reads the pattern, the
 placement, the parameters of the terms and the changes of each contingency from the CPU structure. So whatever the
 device needs and the CPU does not hold yet is built on the CPU: every term family as arrays (step 8), and a
@@ -354,7 +359,7 @@ activity of each term; the active lists are to build with the destinations of th
 **Remote voltage control: move the target or the balance?** Section 4.2: the target keeps its variable, the balance
 moves.
 
-## 6. What steps 1 to 8 established
+## 6. What steps 1 to 9 established
 
 ### 6.1 The code
 
@@ -874,6 +879,51 @@ an equation is compiled again, which a zero-impedance network that splits does; 
 One correction came with it. The "HVDC in AC emulation" case of the tests of 6.2 never was in AC emulation: the
 network of OLF's test factory needs the droop extension. It has it now, and passes with the real terms.
 
+### 6.12 Step 9, first part: the restore, and why two runs differed
+
+Fork PR #160, stacked on #158. It is the CPU half of step 9: what a contingency changed, collected while OLF
+applies it, and the restore limited to that. It brings to the current code an experiment of the fork
+(`experiment/ac-sa-incremental-restore`, July), on the restore API of fork #119.
+
+- `ModifiedElementsCollector` listens to the network while a contingency, the actions of an operator strategy and
+  their simulations run, and collects the buses and the branches that change.
+- Three kinds of changes come with no notification. The voltages, written from the state vector: the partial
+  restore writes them for every bus. The ratio and the phase shift of a transformer whose tap is a variable,
+  written the same way: the branches that can control a voltage or a flow are always collected. And what a
+  contingency changes on the buses of the generators, loads and shunts it takes out: these buses are added from
+  the contingency.
+- An assertion follows each restore: `NetworkState.findDifference()` compares every bus and every branch with its
+  saved state. Assertions are on in the tests, so each of the tests that runs a security analysis checks that no
+  change was missed. With the restore broken on purpose, 61 of the 178 tests of `OpenSecurityAnalysisTest` fail on
+  it; with the real one, none of the 1,706 tests does.
+
+| rte6515, default parameters, one thread | Full restore | Partial restore |
+|---|---|---|
+| Restore, share of the time sampled in the contingency loop (256 lines) | 7.3% | 1.4% |
+| The collector itself | | 0.1% |
+| CPU per contingency, six alternating rounds, best repeat of each: median | 40.6 ms | 40.1 ms |
+| The same: mean | 41.7 ms | 40.7 ms |
+
+The partial restore is faster in 5 of the 6 rounds, by 2 to 3% on average: less than the profile promised, on a
+machine that varies by 10% from one round to the next. The results are the same to the last bit as with the full
+restore in the same build, on four analyses.
+
+**Why two runs differed in their last digits.** That comparison first failed on the busbar sections: each build
+was reproducible, two builds were not, although a full restore run right after each partial one changed nothing.
+The cause is in OLF. `LfContingency` adds up the load and the generation of the buses a contingency takes out by
+iterating over a hash set of buses, whose order is the order of identity hash codes. It changes from one run to
+the next, and with anything that changes which objects are hashed first. The sums then differ in their last digit
+(1.271 against 1.2710000000000001 on three buses of IEEE 14), and with them every result of the contingency.
+Contingencies that take out no bus, like the loss of a line, were never affected, which is why the line analyses
+always compared to the last bit.
+
+Fork PR #159 takes the buses in the order of their numbers, on upstream `main`. With it, five runs of OLF's own
+code on the busbar sections give the same results byte for byte, two builds of the stack compare to the last bit,
+and the low voltage on its reporting threshold is no longer reported by one run and not by another.
+
+What is left of step 9 is the device's half: the same record as the data of a lane. It needs the structure to
+hold its own state (step 10). `WoodburyDcSecurityAnalysis` has its own loop and still restores the whole network.
+
 ## 7. The plan
 
 OLF's CPU side first. Each step is its own pull request on the OLF fork, stacked on the previous one. Step 1 adds
@@ -889,7 +939,7 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 | 6, done | Destinations for the terms held as objects; placements checked once | Section 6.8, fork #156 |
 | 7, done | No zero on the diagonal: the equations around zero-impedance branches, and the balance of a bus held by a control that is not next to it, exchange their slots by moves found once in the structure | Section 6.9, fork #157 |
 | 8, first part done | Every term family as arrays, with its parameters in vectors. In the order the inventory below gives: the linear terms (a coefficient times one variable), done in section 6.11, fork #158; then the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Same results |
-| 9 | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops write are marked; the restore rewrites those only; the same record is the data of a lane | Restore in a time proportional to what changed: 6 to 7% of a contingency today. On the fixtures, the record of each contingency is what the device's planners derive |
+| 9, first part done | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops change are collected, and the restore rewrites those only: done, section 6.12, fork #160. Then the same record as the data of a lane | Restore in a time proportional to what changed: 7.3% to 1.4% of a contingency. On the fixtures, the record of each contingency is what the device's planners derive |
 | 10 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the first iteration from the delta | No index rebuild during a security analysis |
 | 11 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
 | 12 | The GPU repository reads the CPU structure (7.1): the pattern as it is, the placement, the vectors of the term arrays, the deltas. First a dump of its structure in the text format of `FixedEquationSystem.write`, compared with the CPU's. Then its extraction, its pattern construction, its placement and its planners are deleted | olf-gpu's suite passes with no structure code of its own |
@@ -1018,12 +1068,11 @@ Two consequences for the order of work:
 - **Measurements on a shared machine.** Its speed varies by 20 to 30% from one minute to the next. One figure of
   this note was wrong for that reason and is corrected in 6.4. Only rounds that alternate between two codes
   compare them.
-- **Results are not reproducible to the last digit from one run to the next.** This is OLF's own: on the code
-  before the stack, two runs of one build of the busbar-section analysis of rte6515 differ in 813 of 13,530
-  violation values, by up to 3.8e-10. A violation that sits on its reporting threshold is then reported or not: one
-  build re-reported the same low voltage 149 times. The structure added a cause of its own until the second commit
-  of step 7: it numbered the equations in the order of a hash map (6.9). So two runs, or a build with counters and
-  a plain one, are compared with thresholds, never to the last bit.
+- **Two runs differed in their last digits, for two reasons that are both removed.** In OLF, a sum over a hash
+  set of buses (6.12, fork #159): two runs of one build of the busbar-section analysis of rte6515 differed in 813 of
+  13,530 violation values, by up to 3.8e-10. In the structure, equations numbered in the order of a hash map,
+  until the second commit of step 7 (6.9). With both fixes two builds compare to the last bit on every analysis of
+  this note. Without #159, which is not upstream, busbar-section contingencies still need thresholds.
 - **Results change in the last digits.** The fixed matrix puts the equations in another order, so the LU differs in
   rounding: 2e-10 on the violations of rte6515 (6.4). Comparisons of security analyses must use the thresholds of
   `docs/increased-violations-thresholds.md`, or they count re-reported violations.
@@ -1042,8 +1091,8 @@ Two consequences for the order of work:
 
 1. The rest of step 8: the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load
    models.
-2. Step 9: the recorded delta, starting with the restore of the CPU security analysis, where it is 6 to 7% of a
-   contingency.
+2. Upstream: fork #159, the sum of the lost power in the order of the buses. It is three lines, and every
+   comparison of two runs depends on it.
 3. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC
    loop and the target vector, which a Newton iteration does not need; the mismatch from the fill.
 4. olf-gpu, on a machine with a GPU (7.1): the structure dump, then the pattern and the placement from the CPU
@@ -1061,7 +1110,7 @@ Two consequences for the order of work:
 | Fork #101 (`klu_refactor` first) | built into the fixed Jacobian for AC; still of use for DC until the DC step |
 | Fork #105 (reactive limits on arrays) | pilot of step 11 |
 | Fork #108 (monitored branch index) | step 11 |
-| Fork #119, #135 (partial restores, restore hooks) | the partial restore is what step 9 gives the CPU itself, driven by the record instead of the caller; the hooks stay interim for olf-gpu |
+| Fork #119, #135 (partial restores, restore hooks) | #119 is what fork #160 builds on: the CPU security analysis calls it with the elements a listener collected (6.12); the hooks stay interim for olf-gpu |
 | Fork #120 (`getSortedVariablesToFindOnly`) | interim for olf-gpu; not needed once slots are the rows |
 | Fork #127 (`resultWithoutNetwork`) | kept: it is the lane result hook |
 | Fork #130, #131 (values-only updates) | interim; replaced by steps 10 and 11 |

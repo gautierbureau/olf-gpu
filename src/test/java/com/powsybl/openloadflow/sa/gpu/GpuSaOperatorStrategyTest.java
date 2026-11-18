@@ -714,6 +714,19 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "the strategy brings BBS2 back, not BBS1");
     }
 
+    @Test
+    void baseOpenCouplerClosedKeepingWhatAnOpenCutsOffMatchesCpu() {
+        // the same network after losing L4: the strategy opens C12 and closes C23, so BBS2 (LD2) stays in the network through
+        // C23 alone. The islanding analysis left C23 out and took BBS2 for an island: the device dropped LD2. And BBS2 is a
+        // child of the C12 tree (BBS1, with G1, roots it), its P balance relocated onto C12's DUMMY_P row: C23, packed open
+        // at base, put its flow into BBS2's PHI row, C12's ZERO_PHI - the device did not converge on the pair
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        var cpu = assertTwoCouplerTreesStrategyMatchesCpu("L4", List.of("closeC23", "openC12"), 2);
+        assertEquals(4, cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults().stream()
+                .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "BBS2 stays in the network");
+    }
+
     private SecurityAnalysisResult assertTwoCouplerTreesStrategyMatchesCpu(String contingencyId, List<String> actionIds, int expectedPrecomputed) {
         Network network = twoCouplerTrees();
         List<Contingency> contingencies = List.of(new Contingency(contingencyId, new BranchContingency(contingencyId)));

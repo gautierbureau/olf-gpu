@@ -200,7 +200,7 @@ final class GpuAcFamilyPacker {
         List<Integer> baseOpenZeroImpedanceBranchNums = new ArrayList<>();
         List<Integer> identityRows = new ArrayList<>();
         packBaseOpenZeroImpedanceBranches(baseOpenZeroImpedanceBranchIdList, network, dummyPCol, dummyQCol, baseOpenZeroImpedanceBranches, zeroImpedanceBranchParameters,
-                                          baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, phiCol, qRow, vCol,
+                                          baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, phiCol, pRow, qRow, vCol,
                                           zeroImpedanceBranchIndices, alternateQRow,
                                           zeroImpedanceBranchAlternateReactiveDestination, identityRows);
 
@@ -314,7 +314,7 @@ final class GpuAcFamilyPacker {
                                                           final List<double[]> zeroImpedanceBranchParameters,
                                                           final List<Integer> baseOpenZeroImpedanceBranchNums,
                                                           final List<Integer> zeroImpedanceBranchNums, final int[] phiCol,
-                                                          final int[] qRow, final int[] vCol,
+                                                          final int[] pRow, final int[] qRow, final int[] vCol,
                                                           final List<int[]> zeroImpedanceBranchIndices, final int[] alternateQRow,
                                                           final List<int[]> zeroImpedanceBranchAlternateReactiveDestination,
                                                           final List<Integer> identityRows) {
@@ -359,7 +359,11 @@ final class GpuAcFamilyPacker {
                 baseOpenZeroImpedanceBranchNums.add(br.getNum());
                 zeroImpedanceBranchNums.add(br.getNum());
                 zeroImpedanceBranchParameters.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
-                zeroImpedanceBranchIndices.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, distrQRow,
+                // each side's P balance where it lives (pRow): a bus the coupler-tree relocation made a child has it on its
+                // parent coupler's DUMMY_P row, and its own row holds that coupler's ZERO_PHI. The PHI column put the
+                // closed switch's flow into the angle equation: the coupled node lost its balance (network.xiidm, a
+                // switch closing between two retained-switch trees: up to 147 MW distributed that OLF does not)
+                zeroImpedanceBranchIndices.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, distrQRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
                 zeroImpedanceBranchAlternateReactiveDestination.add(new int[] {alternateQRow[b1n], alternateQRow[b2n]});
             }

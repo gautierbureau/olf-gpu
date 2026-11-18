@@ -180,6 +180,7 @@ final class GpuBatchPrecomputer {
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be held out of it there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
+            Map<String, List<OperatorStrategy>> strategiesByContingency = GpuStrategyComposer.byContingency(strategies, contingencies);
             // the pairs whose application the contingency's violations decide, by id (GpuStrategyComposer.mayApply)
             Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations = new HashMap<>();
             for (PropagatedContingency propagatedContingency : contingencies) {
@@ -192,7 +193,7 @@ final class GpuBatchPrecomputer {
                 int g = groupIndex.getOrDefault(contingencyId, runGroupIndex);
                 SolveGroup group = groups.get(g);
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
-                        group.withoutStrategies().contains(contingencyId) ? List.of() : strategies,
+                        group.withoutStrategies().contains(contingencyId) ? List.of() : strategiesByContingency.get(contingencyId),
                         group.settings().config(), actions, pairsOnViolations);
             }
             int batchSize = batches.stream().mapToInt(List::size).sum();
@@ -421,7 +422,8 @@ final class GpuBatchPrecomputer {
                 .toList();
         // The tree OLF SOLVES this contingency on: the one it reached it with, re-elected by this
         // contingency's own disabled couplers (opened, or sitting on a lost bus).
-        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(propagatedContingency);
+        java.util.Optional<com.powsybl.openloadflow.network.LfContingency> lfContingency = ziTree.lfContingency(propagatedContingency);
+        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(lfContingency, List.of(), List.of());
         if (GpuTrace.ZITREE_TRACE.isOn() && nonSpanningTreeBranches.size() > 40) {
             System.err.println("ZITREE_REPLAY_WIDE ctg=" + propagatedContingency.getContingency().getId() + " nonTree=" + nonSpanningTreeBranches.size());
         }
@@ -562,7 +564,7 @@ final class GpuBatchPrecomputer {
                         pair = null;
                     }
                     if (pair != null) {
-                        pair = withPairTree(pair, propagatedContingency, branches, zeroImpedanceBranchOutages, ziTree);
+                        pair = withPairTree(pair, lfContingency, branches, zeroImpedanceBranchOutages, ziTree);
                         batch.add(pair);
                         if (GpuStrategyComposer.candidateActionLists(strategy, 0) != null) {
                             pairsOnViolations.put(pair.contingencyId(), new GpuStrategyComposer.StrategyPair(strategy, actionIds));
@@ -720,7 +722,9 @@ final class GpuBatchPrecomputer {
 
     /** A pair whose actions open or close couplers is solved on the tree OLF elects after those actions, not on its
      *  contingency's: a coupler the strategy recloses (open at base, or opened by the contingency) goes back in it. */
-    private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency propagatedContingency, List<LfBranch> ctgBranches,
+    private static BatchContingency withPairTree(BatchContingency pair,
+                                                 java.util.Optional<com.powsybl.openloadflow.network.LfContingency> lfContingency,
+                                                 List<LfBranch> ctgBranches,
                                                  List<LfBranch> contingencyZeroImpedanceBranchOutages, ZeroImpedanceTreeReplay ziTree) {
         java.util.Set<LfBranch> ctgOut = new java.util.HashSet<>(ctgBranches);
         ctgOut.addAll(contingencyZeroImpedanceBranchOutages);
@@ -737,7 +741,7 @@ final class GpuBatchPrecomputer {
         }
         return new BatchContingency(pair.contingencyId(), pair.outagedBranches(), pair.lostGenerators(), pair.lostLoads(),
                 pair.shuntShifts(), pair.tapOverrides(), pair.outagedShunts(), pair.reclosedBranches(), pair.outagedZeroImpedanceBranches(),
-                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(propagatedContingency, opened, closed), pair.generatorActions(),
+                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(lfContingency, opened, closed), pair.generatorActions(),
                 pair.acEmulationOffHvdcs());
     }
 

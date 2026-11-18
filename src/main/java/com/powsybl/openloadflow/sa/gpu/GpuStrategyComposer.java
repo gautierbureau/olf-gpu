@@ -43,20 +43,50 @@ final class GpuStrategyComposer {
     /** Stage-1 applicability: single-stage strategy with a TrueCondition whose contingency context
      *  covers this contingency. Anything else stays on the CPU per-strategy path. */
     static boolean strategyApplies(OperatorStrategy strategy, String contingencyId) {
-        if (candidateActionLists(strategy).isEmpty()) {
-            return false;                                    // too many conditional stages to speculate on
-        }
         // ANY single-stage condition qualifies — including the violation/threshold conditions: the
         // ENGINE evaluates the condition (AbstractSecurityAnalysis.checkCondition, on the CPU-detected
         // post-contingency violations) BEFORE our runActionSimulation override is invoked, so the pair
         // state is precomputed SPECULATIVELY and simply goes unused when the condition does not pass.
         // Condition semantics therefore stay 100% stock — the batch only accelerates the solve.
+        if (!targets(strategy, contingencyId)) {
+            return false;
+        }
+        return !candidateActionLists(strategy).isEmpty();    // else too many conditional stages to speculate on
+    }
+
+    /** Whether the strategy's contingency context names {@code contingencyId}. */
+    private static boolean targets(OperatorStrategy strategy, String contingencyId) {
         var contingencyContext = strategy.getContingencyContext();
         return switch (contingencyContext.getContextType()) {
             case ALL, ONLY_CONTINGENCIES -> true;
             case SPECIFIC -> contingencyId.equals(contingencyContext.getContingencyId());
             case NONE -> false;
         };
+    }
+
+    /** The strategies each contingency targets, in the order of {@code strategies}: one pass over them, instead of every
+     *  strategy tested against every contingency. */
+    static java.util.Map<String, List<OperatorStrategy>> byContingency(List<OperatorStrategy> strategies,
+                                                                       List<com.powsybl.openloadflow.network.impl.PropagatedContingency> contingencies) {
+        List<String> contingencyIds = contingencies.stream().map(c -> c.getContingency().getId()).toList();
+        java.util.Map<String, List<OperatorStrategy>> byId = new java.util.HashMap<>();
+        for (String id : contingencyIds) {
+            byId.put(id, new java.util.ArrayList<>());
+        }
+        for (OperatorStrategy strategy : strategies) {
+            var context = strategy.getContingencyContext();
+            switch (context.getContextType()) {
+                case ALL, ONLY_CONTINGENCIES -> byId.values().forEach(list -> list.add(strategy));
+                case SPECIFIC -> {
+                    List<OperatorStrategy> list = byId.get(context.getContingencyId());
+                    if (list != null) {
+                        list.add(strategy);
+                    }
+                }
+                case NONE -> { }
+            }
+        }
+        return byId;
     }
 
     /** Conditional stages a strategy may carry and still be precomputed: every combination is one pair. */

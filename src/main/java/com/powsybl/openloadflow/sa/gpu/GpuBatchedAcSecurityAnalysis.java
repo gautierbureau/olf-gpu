@@ -200,7 +200,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     ? run.precomputed.preDistributedActivePower().get(contingency.getId())
                     : null;
             if (replayed == null || loadFlowParametersOverride != null
-                    || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())) {
+                    || !run.strategiesOf(contingency.getId()).isEmpty()) {
                 return delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
                         loadFlowParametersOverride, reportNode);
             }
@@ -397,7 +397,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private int[] flowReadSet(GpuSaRunState run, LfNetwork network, String contingencyId) {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
-                || targetedByOperatorStrategy(run.operatorStrategies, contingencyId)
+                || !run.strategiesOf(contingencyId).isEmpty()
                 || GpuTrace.SA_RESID.isOn()
                 || GpuTrace.VIOL_CROSSCHECK.isOn()
                 || GpuTrace.STATE_VIEW_CHECK.isOn()) {
@@ -620,7 +620,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private boolean answeredFromState(GpuSaRunState run, Contingency contingency, LfNetwork network,
                                       PrecomputedBatch precomputed) {
         if (GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()
-                || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                || !run.strategiesOf(contingency.getId()).isEmpty()
                 || flowsMonitored()
                 || contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) != null) {
             return false;
@@ -664,8 +664,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * the refresh.
      */
     private static boolean anotherStrategyReadsFlows(GpuSaRunState run, String contingencyId, OperatorStrategy strategy) {
-        for (OperatorStrategy other : run.operatorStrategies) {
-            if (other.getId().equals(strategy.getId()) || !targets(other, contingencyId)) {
+        for (OperatorStrategy other : run.strategiesOf(contingencyId)) {
+            if (other.getId().equals(strategy.getId())) {
                 continue;
             }
             for (ConditionalActions stage : other.getConditionalActions()) {
@@ -695,12 +695,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     private static boolean strategyConditionOfType(GpuSaRunState run, String contingencyId,
                                                    Class<? extends com.powsybl.contingency.strategy.condition.Condition> type) {
-        for (OperatorStrategy strategy : run.operatorStrategies) {
-            if (targets(strategy, contingencyId)) {
-                for (ConditionalActions stage : strategy.getConditionalActions()) {
-                    if (type.isInstance(stage.getCondition())) {
-                        return true;
-                    }
+        for (OperatorStrategy strategy : run.strategiesOf(contingencyId)) {
+            for (ConditionalActions stage : strategy.getConditionalActions()) {
+                if (type.isInstance(stage.getCondition())) {
+                    return true;
                 }
             }
         }
@@ -725,24 +723,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 generator.setTargetP(targets.targetP()[g]);
             }
         }
-    }
-
-    private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
-        for (OperatorStrategy strategy : strategies) {
-            if (targets(strategy, contingencyId)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean targets(OperatorStrategy strategy, String contingencyId) {
-        var contingencyContext = strategy.getContingencyContext();
-        return switch (contingencyContext.getContextType()) {
-            case ALL, ONLY_CONTINGENCIES -> true;
-            case SPECIFIC -> contingencyId.equals(contingencyContext.getContingencyId());
-            case NONE -> false;
-        };
     }
 
     /**
@@ -773,10 +753,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private static boolean everyStrategyAnsweredOnDevice(GpuSaRunState run, String contingencyId,
                                                          SecurityAnalysisParameters securityAnalysisParameters) {
-        for (OperatorStrategy strategy : run.operatorStrategies) {
-            if (!targets(strategy, contingencyId)) {
-                continue;
-            }
+        for (OperatorStrategy strategy : run.strategiesOf(contingencyId)) {
             // whichever of its action lists OLF ends up applying (the stages' conditions are evaluated later, on the
             // post-contingency violations), the device must hold it; of those the contingency's violations may select only,
             // where the device knows the types it may report: the others were not solved
@@ -944,6 +921,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         run.lfNetwork = lfNetwork;
         run.contingencies = propagatedContingencies;
         run.operatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
+        run.strategiesByContingency = GpuStrategyComposer.byContingency(run.operatorStrategies, propagatedContingencies);
         run.actions = actions != null ? actions : List.of();
         run.precomputed = PrecomputedBatch.empty();
         run.batchDistributedSlack = scope.distributedSlack();
@@ -1205,7 +1183,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return contingency != null
                 && !GpuTrace.SA_RESID.isOn() && !GpuTrace.VIOL_CROSSCHECK.isOn()
                 && !GpuTrace.SA_VAR_DUMP.isOn() && !GpuTrace.EQ_DUMP_CTG.isOn()
-                && !targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                && !!run.strategiesOf(contingency.getId()).isEmpty()
                 && !flowsMonitored() && !busesMonitored()
                 && contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) == null;
     }

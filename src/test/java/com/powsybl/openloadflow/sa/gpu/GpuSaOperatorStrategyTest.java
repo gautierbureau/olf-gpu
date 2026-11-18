@@ -748,6 +748,25 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "BBS2 stays in the network through CP12");
     }
 
+    @Test
+    void switchClosedThenOpenedByOneStrategyMatchesCpu() {
+        // OLF applies a strategy's actions in their order: closing C23 then opening it leaves it open, as at base. The
+        // composer took the close and skipped the open (C23 is open at base): the device solved the pair with C23 closed. G4
+        // holds no voltage, so BBS3 and BBS4 tied to BBS2 would show it in their voltage
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = twoCouplerTrees();
+        network.getGenerator("G4").setTargetQ(0).setVoltageRegulatorOn(false);
+        List<Contingency> contingencies = List.of(new Contingency("L4", new BranchContingency("L4")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeC23", "C23", false),
+                new com.powsybl.action.SwitchAction("openC23", "C23", true), new com.powsybl.action.SwitchAction("openC34", "C34", true));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("s", com.powsybl.contingency.ContingencyContext.specificContingency("L4"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC23", "openC23")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
     private SecurityAnalysisResult assertTwoCouplerTreesStrategyMatchesCpu(String contingencyId, List<String> actionIds, int expectedPrecomputed) {
         Network network = twoCouplerTrees();
         List<Contingency> contingencies = List.of(new Contingency(contingencyId, new BranchContingency(contingencyId)));

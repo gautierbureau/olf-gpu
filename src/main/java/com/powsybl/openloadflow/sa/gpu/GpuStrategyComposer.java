@@ -517,7 +517,15 @@ final class GpuStrategyComposer {
         if (b != null && switchAction.isOpen()) {
             // OPEN: OLF's LfSwitchAction takes the switch out of the connectivity and disables what that islands. A switch
             // open at base or opened by the contingency stays as it is; otherwise it joins the pair's zero-impedance
-            // outages, as the switches a contingency's propagation opens do
+            // outages, as the switches a contingency's propagation opens do. OLF applies the actions in their order: opening a
+            // switch an earlier action of the strategy closed undoes that close
+            if (reclosed.remove(b) | loopCloses.remove(b) | deadIslandCloses.remove(b)) {
+                return null;                                 // open at base, open again
+            }
+            if (reenabled.remove(b)) {
+                zeroImpedanceOutages.add(b);                 // the contingency opened it: opened again
+                return null;
+            }
             if (!b.isDisabled() && !zeroImpedanceOutages.contains(b) && !branches.contains(b)) {
                 if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                     zeroImpedanceOutages.add(b);

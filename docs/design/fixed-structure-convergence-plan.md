@@ -771,6 +771,20 @@ goes to the voltage of bus 1, and the reactive balance of bus 1 to the susceptan
   of each equation. Of about 3,000 states, 24 have no such placement: islands of zero-impedance branches whose
   voltage no bus holds, which OLF cannot solve either.
 
+**Two things the new placement showed**, in the second commit of #157.
+
+- *Destinations follow the placement.* The destinations of the terms were for the own slot of their equation, and
+  the entries of an equation on another slot were searched at each fill. That was rare; around every
+  zero-impedance branch it no longer is. With every switch of rte6515 retained (106,288 slots) the fill went from
+  12 to 17 ms. The destinations are now for the slot the equation holds. The structure computes them again for the
+  equations a placement moves, once, and the fill has one path. The fill is back at 12 to 13 ms there, and goes
+  from 2.3 to 1.7 ms on pegase9241, whose remote controls also move balances.
+- *Equations numbered by type and element.* The structure numbered the single equations in the order of the hash
+  map OLF holds them in, which changes from one run to the next. Where several placements are possible the search
+  follows the numbers, so two runs could factorise the same system in two arrangements. With the fix, three runs
+  under different machine load give the same placement and the same matrix values at each of the 611
+  factorisations of the busbar-section analysis, and the same results to the last bit.
+
 **Limits.**
 
 - The chains are found in the structure, not in each state. When a contingency takes away every neighbour through
@@ -839,7 +853,7 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 | 5, done | Shunt terms as term arrays in the vectorized system | Section 6.7, fork #154 |
 | 6, done | Destinations for the terms held as objects; placements checked once | Section 6.8, fork #156 |
 | 7, done | No zero on the diagonal: the equations around zero-impedance branches, and the balance of a bus held by a control that is not next to it, exchange their slots by moves found once in the structure | Section 6.9, fork #157 |
-| 8 | Every term family as arrays, with its parameters in vectors: open branches, HVDC in AC emulation, load models, the terms of zero-impedance branches, the distribution equations, the `x = target` terms. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Results identical to the last bit |
+| 8 | Every term family as arrays, with its parameters in vectors. In the order the inventory below gives: the linear terms (a coefficient times one variable), the scaled terms of the distribution equations, HVDC in AC emulation, open branches, load models. What the device reads has to exist on the CPU | No term held as an object in the default AC system, and no object path in the fill. Same results |
 | 9 | A contingency as a recorded delta (6.10). The elements that a contingency and the outer loops write are marked; the restore rewrites those only; the same record is the data of a lane | Restore in a time proportional to what changed: 6 to 7% of a contingency today. On the fixtures, the record of each contingency is what the device's planners derive |
 | 10 | Its own state. The slots hold the unknowns, the targets and the activities; `AcNetworkVector` computes on them (fork branch `claude/acnetworkvector-variable-index` decouples it from the index); the first iteration from the delta | No index rebuild during a security analysis |
 | 11 | Outer loops and results on arrays (section 8); lanes | Decisions bit-identical to the reference vectors. Four-thread slowdown per thread close to lightsim2grid's 1.2 |
@@ -849,6 +863,23 @@ code only. From step 2 on there is one behaviour: the fixed matrix replaces the 
 Steps 8 and 9 exist because of the rule of 7.1: they build on the CPU what the device would otherwise build for
 itself. Both also pay on the CPU: step 8 removes the object path of the fill, step 9 most of the restore. The other
 gains on the AC side follow the profile of 6.8, not a step number.
+
+**What is still an object** in the default vectorized system, counted on the fixtures. Closed branches and shunts
+are arrays (steps 1 and 5).
+
+| Terms held as objects | rte6515 | rte6515, every switch retained | pegase9241, taps and susceptances as variables |
+|---|---|---|---|
+| The variable of a target: `v` of each `BUS_TARGET_V`, a tap, a susceptance, the reference angle | 6,521 | 29,833 | 9,568 |
+| Around zero-impedance branches: 10 per branch (its two equations, its flows in four balances, their targets) | 0 | 233,120 | 0 |
+| The scaled terms of the distribution equations (`DISTR_Q`, `DISTR_RHO`, `DISTR_SHUNT_B`) | 43 | 1,545 | 460 |
+| HVDC in AC emulation | 10 | 10 | 14 |
+| Open branches, load models | 0 | 0 | 0 |
+
+- Nearly all of them are **linear**: a coefficient times one variable, the coefficient a constant for all but the
+  distribution equations. With every switch retained they are 264,000 terms and three quarters of the fill. They
+  need no formula on the device, only their slot, coefficient and destination.
+- There is **no open-branch term** unless a branch can open at one end: OLF creates them for those branches only.
+  They come after the linear terms, not first.
 
 **A rule for every step:** when a case is unclear, look first at what the GPU does for it. It already runs these
 cases against OLF's results, so its answer is the reference, as in 6.4.
@@ -952,11 +983,12 @@ Two consequences for the order of work:
 - **Measurements on a shared machine.** Its speed varies by 20 to 30% from one minute to the next. One figure of
   this note was wrong for that reason and is corrected in 6.4. Only rounds that alternate between two codes
   compare them.
-- **An instrumented build is not comparable to the last digit.** Runs of one build are identical to the last bit.
-  A build that registers a shutdown hook to print counters is not the same run: the hook takes one identity hash,
-  the order of iteration of some of OLF's hash sets changes with it, and so does the rounding. On the busbar
-  sections of rte6515 that re-reported one threshold-edge violation 149 times. Counters go in an instrumented
-  build; results are compared between plain builds.
+- **Results are not reproducible to the last digit from one run to the next.** This is OLF's own: on the code
+  before the stack, two runs of one build of the busbar-section analysis of rte6515 differ in 813 of 13,530
+  violation values, by up to 3.8e-10. A violation that sits on its reporting threshold is then reported or not: one
+  build re-reported the same low voltage 149 times. The structure added a cause of its own until the second commit
+  of step 7: it numbered the equations in the order of a hash map (6.9). So two runs, or a build with counters and
+  a plain one, are compared with thresholds, never to the last bit.
 - **Results change in the last digits.** The fixed matrix puts the equations in another order, so the LU differs in
   rounding: 2e-10 on the violations of rte6515 (6.4). Comparisons of security analyses must use the thresholds of
   `docs/increased-violations-thresholds.md`, or they count re-reported violations.
@@ -973,8 +1005,8 @@ Two consequences for the order of work:
 
 ## 10. Next steps
 
-1. Step 8: the term families that are still objects, as arrays. Open branches first: they are the family a
-   contingency activates.
+1. Step 8: the term families that are still objects, as arrays. The linear terms first: they are nearly all of
+   them (7).
 2. Step 9: the recorded delta, starting with the restore of the CPU security analysis, where it is 6 to 7% of a
    contingency.
 3. On the AC side, by share of a contingency (6.8): the detection of violations; the currents, the map of the HVDC

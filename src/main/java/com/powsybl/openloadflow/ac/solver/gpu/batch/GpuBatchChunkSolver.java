@@ -122,7 +122,7 @@ final class GpuBatchChunkSolver {
                 // only re-solves what is still missing), so a shrink costs one chunk, not the batch.
                 List<Integer> stillMissing = new ArrayList<>();
                 for (Integer idx : remaining) {
-                    if (resultsByIndex[idx] == null) {
+                    if (resultsByIndex[idx] == null && !in.sinks().notAppliedByIndex()[idx]) {
                         stillMissing.add(idx);
                     }
                 }
@@ -381,6 +381,9 @@ final class GpuBatchChunkSolver {
                 refillAtTest = refillAtForTests;
                 refillAt = refillAtTest != null ? refillAtTest : Math.max(1, bankSize / REFILL_SHARE);
                 for (List<Integer> phaseGroup : List.of(ctgIdxList, pairIdxList)) {
+                    if (phaseGroup == pairIdxList) {
+                        dropPairsThatCannotApply();
+                    }
                     group = phaseGroup;
                     solvePhase();
                 }
@@ -515,6 +518,24 @@ final class GpuBatchChunkSolver {
                     nDistributedSlackGenerators, nReactiveLimitEntries, slackOnlyDistribution, reactiveLimitsOuterLoop, baseReactiveLimitsState,
                     indexById, captures, frozenRowsByIndex, islandedDistributedSlackByIndex, islandedHvdcsByIndex, hvdcControllers, hvdcElemIndex,
                     resultsByIndex, preDistributedByIndex);
+        }
+
+        // The pairs OLF never applies, known once their contingencies were handed back (StateHandback#pairMayApply): a
+        // contingency without a violation selects no action a violation conditions. They are not solved, and the results
+        // leave them out.
+        private void dropPairsThatCannotApply() {
+            StateHandback handback = config.stateHandback();
+            if (handback == null) {
+                return;
+            }
+            boolean[] notApplied = in.sinks().notAppliedByIndex();
+            pairIdxList.removeIf(idx -> {
+                if (handback.pairMayApply(contingencies.get(idx).contingencyId())) {
+                    return false;
+                }
+                notApplied[idx] = true;
+                return true;
+            });
         }
 
         // One phase: its scenarios queue for the bank's slots, each install a chunk.

@@ -28,4 +28,11 @@ public interface StateHandback {
     /** The full states ({@code n} doubles each) of the last call's handed-back scenarios {@code which}, indices in its
      *  result rows. */
     double[][] fullStates(long batchHandle, int[] which, int n);
+
+    /**
+     * Whether OLF may apply the actions of strategy pair {@code pairId}, decided once its contingency was handed back:
+     * false when the contingency certainly has no limit violation and the pair holds actions only a violation selects
+     * (OLF evaluates the strategy's conditions on the contingency's violations). Such a pair is not solved.
+     */
+    boolean pairMayApply(String pairId);
 }

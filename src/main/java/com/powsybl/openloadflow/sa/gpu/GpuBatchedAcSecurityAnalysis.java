@@ -778,10 +778,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 continue;
             }
             // whichever of its action lists OLF ends up applying (the stages' conditions are evaluated later, on the
-            // post-contingency violations), the device must hold it
+            // post-contingency violations), the device must hold it; of those the contingency's violations may select only,
+            // where the device knows the types it may report: the others were not solved
             List<List<String>> candidates = GpuStrategyComposer.candidateActionLists(strategy);
             if (candidates.isEmpty()) {
                 return false;
+            }
+            Integer possibleTypes = run.precomputed.possibleViolationTypes().get(contingencyId);
+            List<List<String>> selectable = possibleTypes != null
+                    ? GpuStrategyComposer.candidateActionLists(strategy, possibleTypes) : null;
+            if (selectable != null) {
+                candidates = selectable;
             }
             for (List<String> actionIds : candidates) {
                 if (pairDistributedOnDevice(run, contingencyId, GpuStrategyComposer.pairId(contingencyId, strategy, actionIds),
@@ -1184,7 +1191,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         Map<String, Contingency> byId = new java.util.HashMap<>();
         run.contingencies.forEach(propagated -> byId.put(propagated.getContingency().getId(), propagated.getContingency()));
         return new GpuBatchPrecomputer.HandbackSettings(run.limitReductions, id -> answerableFromRows(run, byId.get(id)),
-                GpuStateViewCheck.comparesDecisions(), parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage());
+                GpuStateViewCheck.comparesDecisions(), parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage(),
+                run.securityAnalysisParameters.getIncreasedViolationsParameters());
     }
 
     /**

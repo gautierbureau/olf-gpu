@@ -253,6 +253,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // Solve the qualified scenarios on the GPU, in chunks bounded by the device-memory budget (the
         // uniform batched factorization holds an LU per scenario, so the footprint scales with the chunk).
         double[][] resultsByIndex = new double[contingencies.size()][];
+        boolean[] notAppliedByIndex = new boolean[contingencies.size()];
         // The replayed contingency loss pre-distribution per contingency (pu); NaN where none was replayed.
         double[] preDistributedByIndex = new double[contingencies.size()];
         java.util.Arrays.fill(preDistributedByIndex, Double.NaN);
@@ -311,7 +312,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         new ChunkInputs.DevicePhaseInputs(phases, hvdcControllers, reactiveCapabilityCurves, forcedTargetQ,
                                 areaInterchangeControl, areaInterchangeControlBaseMoves, automationSystem),
                         new ChunkInputs.ResultSinks(resultsByIndex, preDistributedByIndex, distributedByIndex,
-                                automationSystemSwitchedByIndex, deviceTapMovesByIndex, distributedSlackGeneratorMovesByIndex),
+                                automationSystemSwitchedByIndex, deviceTapMovesByIndex, distributedSlackGeneratorMovesByIndex,
+                                notAppliedByIndex),
                         config));
             }
         }
@@ -322,6 +324,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
         for (int i = 0; i < contingencies.size(); i++) {
             String id = contingencies.get(i).contingencyId();
             double[] result = resultsByIndex[i];
+            if (notAppliedByIndex[i]) {
+                // a strategy pair OLF never applies (its contingency has no violation): no result at all, the CPU has
+                // nothing to replay
+                GpuBatchScopeCensus.record("PAIR:NOT_APPLIED:NO_VIOLATION");
+                continue;
+            }
             if (result != null && result.length == 3) {    // the state went to the sink: the result carries no state
                 results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],

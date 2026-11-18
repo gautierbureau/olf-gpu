@@ -109,11 +109,13 @@ final class GpuBatchPrecomputer {
      * What the precompute needs to screen each handed-back scenario on the device and keep only what the host answers it
      * with (P4 of docs/device-final-results-plan.md, {@link GpuStateHandback}): the run's limit reductions (the screen's
      * table), which scenarios the host may answer from their state rows alone ({@code sparse}), whether the comparison
-     * also reads every full state, and the realistic-voltage band the screen reports buses outside of.
+     * also reads every full state, the realistic-voltage band the screen reports buses outside of, and the
+     * increased-violations thresholds of OLF's filtering against the base case (GpuBaseViolations).
      */
     record HandbackSettings(List<com.powsybl.security.limitreduction.LimitReduction> limitReductions,
                             java.util.function.Predicate<String> sparse, boolean compare, double minRealisticV,
-                            double maxRealisticV) {
+                            double maxRealisticV,
+                            com.powsybl.security.SecurityAnalysisParameters.IncreasedViolationsParameters increasedViolations) {
     }
 
     /**
@@ -178,6 +180,8 @@ final class GpuBatchPrecomputer {
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be held out of it there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
+            // the pairs whose application the contingency's violations decide, by id (GpuStrategyComposer.mayApply)
+            Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations = new HashMap<>();
             for (PropagatedContingency propagatedContingency : contingencies) {
                 String contingencyId = propagatedContingency.getContingency().getId();
                 if (leftToCpu.contains(contingencyId)) {
@@ -189,7 +193,7 @@ final class GpuBatchPrecomputer {
                 SolveGroup group = groups.get(g);
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
                         group.withoutStrategies().contains(contingencyId) ? List.of() : strategies,
-                        group.settings().config(), actions);
+                        group.settings().config(), actions, pairsOnViolations);
             }
             int batchSize = batches.stream().mapToInt(List::size).sum();
             if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -242,10 +246,17 @@ final class GpuBatchPrecomputer {
                 limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.sa.LimitReductionManager.create(
                         handbackSettings.limitReductions()));
                 violationScreen = GpuViolationScreen.build(net, limitTable, screenData, screenMapper, es, baseVariableRows);
+                // the base case's violations, for the types of those OLF may report per contingency: which strategy pairs
+                // its violations may select (pairsOnViolations)
+                if (!pairsOnViolations.isEmpty()) {
+                    violationScreen.withBaseViolations(GpuBaseViolations.of(net, limitTable, handbackSettings.limitReductions(),
+                            handbackSettings.increasedViolations()));
+                }
                 GpuStateView view = new GpuStateView(net, baseVariableRows);
                 java.util.function.Predicate<String> sparse = view.usable() ? handbackSettings.sparse() : id -> false;
                 handback = new GpuStateHandback(violationScreen, limitTable, view, net, scenarios, sparse,
-                        handbackSettings.compare(), true, handbackSettings.minRealisticV(), handbackSettings.maxRealisticV());
+                        handbackSettings.compare(), true, handbackSettings.minRealisticV(), handbackSettings.maxRealisticV(),
+                        pairsOnViolations);
                 if (!handbackSettings.compare()) {
                     fullStates = (int) scenarios.keySet().stream().filter(id -> !sparse.test(id)).count();
                 }
@@ -360,7 +371,7 @@ final class GpuBatchPrecomputer {
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
                     handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
-                    limitTable, violationScreen);
+                    limitTable, violationScreen, handback != null ? handback.possibleTypes : Map.of());
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
@@ -391,7 +402,8 @@ final class GpuBatchPrecomputer {
                                           final AcLoadFlowContext context, final ZeroImpedanceTreeReplay ziTree,
                                           final List<BatchContingency> batch,
                                           final List<OperatorStrategy> strategies, final BatchConfig config,
-                                          final List<Action> actions) {
+                                          final List<Action> actions,
+                                          final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations) {
         java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, propagatedContingency);
         List<LfGenerator> gens = propagatedContingency.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net,
                                                           propagatedContingency, lostLfBusIds);
@@ -552,6 +564,9 @@ final class GpuBatchPrecomputer {
                     if (pair != null) {
                         pair = withPairTree(pair, propagatedContingency, branches, zeroImpedanceBranchOutages, ziTree);
                         batch.add(pair);
+                        if (GpuStrategyComposer.candidateActionLists(strategy, 0) != null) {
+                            pairsOnViolations.put(pair.contingencyId(), new GpuStrategyComposer.StrategyPair(strategy, actionIds));
+                        }
                     }
                 }
             }

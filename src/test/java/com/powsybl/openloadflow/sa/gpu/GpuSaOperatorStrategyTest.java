@@ -1476,7 +1476,8 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     /** A strategy in several stages: OLF evaluates every stage's condition on the post-contingency violations and
      *  applies the actions of the stages that hold, in stage order (none holding: no result). The device precomputes
      *  one pair per combination of the conditional stages and answers with the one OLF selects. ieee14 has no
-     *  violation after B4's load loss, so AnyViolationCondition fails and an empty AllViolationCondition holds. */
+     *  violation after B4's load loss, so AnyViolationCondition fails and an empty AllViolationCondition holds: once the
+     *  contingency is handed back without a violation, only the combination its conditions select is solved. */
     @Test
     void multiStageStrategiesMatchCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1505,8 +1506,10 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 // nothing holds: no result on either side
                 new com.powsybl.contingency.strategy.OperatorStrategy("sNone", ctx,
                         List.of(stage("a", anyViolation, "up2"), stage("b", anyViolation, "open1011"))));
-        // the contingency, sBoth (1), sFirstOnly (2 combinations), sMixed (4), sNone (3)
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 11);
+        // the contingency, then of the combinations (sBoth 1, sFirstOnly 2, sMixed 4, sNone 3) the one each strategy's
+        // conditions select without a violation: sBoth's, sFirstOnly's first stage alone, sMixed's stages a and c, none
+        // of sNone's
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 4);
     }
 
     /** A strategy pair re-anchors its distribution on what its parent's moved, read off the parent's final targets.
@@ -1863,8 +1866,8 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
 
     @Test
     void violationConditionNotTriggeredMatchesCpu() {
-        // Negative case: no limits => no violations => the condition never passes. The speculative
-        // pair still precomputes (count 2) but NEITHER arm produces an operator strategy result.
+        // Negative case: no limits => no violations => the condition never passes, NEITHER arm produces an operator
+        // strategy result. The contingency is handed back without a violation, so its pair is not solved (count 1).
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = distributedSlackNetworkWithExtras();
@@ -1878,7 +1881,85 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 new com.powsybl.contingency.strategy.OperatorStrategy("sViolNone",
                         com.powsybl.contingency.ContingencyContext.all(),
                         new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("shed4")));
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 1);
+    }
+
+    /** A violation of the base case the contingency leaves as it was is not one OLF's condition sees: its filtering
+     *  against the base case drops it (same limit, value within the flow proportional threshold), so the contingency
+     *  selects no violation-conditioned action and the device does not solve the pair. ieee14 after B4's load loss, a
+     *  current limit under the base current of a line whose current moves by less than 2 %. */
+    @Test
+    void unchangedBaseViolationDoesNotSelectTheStrategy() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = loadAtBus(network, "B4").getId();
+        limitLineUnderItsBaseCurrent(network, loadId, ratio -> Math.abs(ratio - 1) < 0.02);
+        var cpu = assertStrategyMatchesCpu(network, List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))),
+                strategiesOnViolation(loadId), List.of(genAction("up2", "B2-G", true, 10)), 1);
+        assertEquals(0, cpu.getOperatorStrategyResults().size(), "the fixture needs OLF to filter the base violation out");
+    }
+
+    /** The same base violation made worse by the contingency, past the flow proportional threshold: OLF reports it, the
+     *  condition holds and the device solves the pair. A line whose current rises by more than 20 %. */
+    @Test
+    void worsenedBaseViolationSelectsTheStrategy() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = loadAtBus(network, "B4").getId();
+        limitLineUnderItsBaseCurrent(network, loadId, ratio -> ratio > 1.2);
+        var cpu = assertStrategyMatchesCpu(network, List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))),
+                strategiesOnViolation(loadId), List.of(genAction("up2", "B2-G", true, 10)), 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the fixture needs OLF to report the worsened violation");
+    }
+
+    private static List<com.powsybl.contingency.strategy.OperatorStrategy> strategiesOnViolation(String contingencyId) {
+        return List.of(new com.powsybl.contingency.strategy.OperatorStrategy("sOnViolation",
+                com.powsybl.contingency.ContingencyContext.specificContingency(contingencyId),
+                new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("up2")));
+    }
+
+    /** Gives the first line whose side-1 current, from OLF's load flows with and without load {@code loadId}, moves by a
+     *  ratio {@code accepted} takes a permanent limit at 90 % of its base current: a violation of the base case. */
+    private void limitLineUnderItsBaseCurrent(Network network, String loadId, java.util.function.DoublePredicate accepted) {
+        var runner = new com.powsybl.loadflow.LoadFlow.Runner(
+                new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        var lfp = new com.powsybl.loadflow.LoadFlowParameters().setDistributedSlack(true).setUseReactiveLimits(true);
+        runner.run(network, lfp);
+        java.util.Map<String, Double> base = new java.util.HashMap<>();
+        network.getLineStream().forEach(line -> base.put(line.getId(), line.getTerminal1().getI()));
+        var load = network.getLoad(loadId);
+        load.getTerminal().disconnect();
+        runner.run(network, lfp);
+        var line = network.getLineStream()
+                .filter(l -> base.get(l.getId()) > 1 && accepted.test(l.getTerminal1().getI() / base.get(l.getId())))
+                .findFirst().orElseThrow();
+        load.getTerminal().connect();
+        line.newCurrentLimits1().setPermanentLimit(0.9 * base.get(line.getId())).add();
+    }
+
+    /** A violation the device screen does not see keeps the pair: the screen evaluates the branches' and buses' limits,
+     *  the host checks the voltage-angle limits on every contingency. OLF's voltage-angle fixture: with NHV1_NHV2_2 out,
+     *  the angle across NHV1_NHV2_1 reaches -7.5 degrees, below the limit's -7, and nothing else is violated. */
+    @Test
+    void voltageAngleViolationKeepsItsStrategyPair() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.EurostagFactory.fix(
+                com.powsybl.iidm.network.test.EurostagTutorialExample1Factory.create());
+        var line = network.getLine("NHV1_NHV2_1");
+        network.newVoltageAngleLimit().setId("val").from(line.getTerminal1()).to(line.getTerminal2())
+                .setHighLimit(7.0).setLowLimit(-7.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("NHV1_NHV2_2", new BranchContingency("NHV1_NHV2_2")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.LoadActionBuilder().withId("shed")
+                .withLoadId("LOAD").withRelativeValue(false).withActivePowerValue(400).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sAngle",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("shed")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the fixture needs the angle violation to select the strategy");
     }
 
     @Test

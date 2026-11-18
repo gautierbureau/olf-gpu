@@ -13,9 +13,11 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
 import gnu.trove.list.array.TIntArrayList;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -54,13 +56,26 @@ final class GpuStateHandback implements StateHandback {
     final Map<String, int[]> candidates = new HashMap<>();
     /** The rows of every scenario answered from them alone. */
     final Map<String, GpuGatheredState> gathered = new HashMap<>();
+    /** Per converged contingency, the types of the violations OLF may report for it (GpuBaseViolations' bits): those the
+     *  screen left against the base case's violations, every type where it does not decide. Absent without the base
+     *  case's violations on the device. */
+    final Map<String, Integer> possibleTypes = new HashMap<>();
+    /** The strategy pairs whose application the contingency's violations decide, by id. */
+    private final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations;
+    /** True when the screen evaluates every limit the host checks on a contingency that changes no branch: no
+     *  voltage-angle limit (the host checks those on every scenario) and no branch with limits the screen does not cover
+     *  but out of the network at base (no contingency brings it back). */
+    private final boolean screenSeesEveryLimit;
+    /** Each branch's index in the limit table, by branch num (-1: not in it). */
+    private final int[] tableIndexOfBranchNum;
     /** What the handback read: rows gathered, full states read back. */
     private long rowsGathered;
     private long fullStatesRead;
 
     GpuStateHandback(GpuViolationScreen screen, GpuLimitTable table, GpuStateView view, LfNetwork network,
                      Map<String, BatchContingency> scenarios, Predicate<String> sparse, boolean compare, boolean realistic,
-                     double minRealisticV, double maxRealisticV) {
+                     double minRealisticV, double maxRealisticV,
+                     Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations) {
         this.screen = screen;
         this.table = table;
         this.view = view;
@@ -71,6 +86,8 @@ final class GpuStateHandback implements StateHandback {
         this.realistic = realistic;
         this.minRealisticV = minRealisticV;
         this.maxRealisticV = maxRealisticV;
+        this.pairsOnViolations = pairsOnViolations;
+        boolean everyLimitScreened = network.getVoltageAngleLimits().isEmpty();
         for (LfNetwork.LfVoltageAngleLimit limit : network.getVoltageAngleLimits()) {
             view.rowsOf(limit.getFrom(), everyScenarioRows::set);
             view.rowsOf(limit.getTo(), everyScenarioRows::set);
@@ -79,7 +96,14 @@ final class GpuStateHandback implements StateHandback {
         for (int b = 0; b < branches.length; b++) {
             if (!screen.covers(b) && table.groupStart(b) != table.groupEnd(b)) {
                 view.rowsOf(branches[b], everyScenarioRows::set);
+                everyLimitScreened &= outOfTheNetwork(branches[b]);
             }
+        }
+        screenSeesEveryLimit = everyLimitScreened;
+        tableIndexOfBranchNum = new int[network.getBranches().size()];
+        Arrays.fill(tableIndexOfBranchNum, -1);
+        for (int b = 0; b < branches.length; b++) {
+            tableIndexOfBranchNum[branches[b].getNum()] = b;
         }
     }
 
@@ -93,6 +117,7 @@ final class GpuStateHandback implements StateHandback {
                     : GpuScreenScenario.BASE;
         }
         int[][] records = screen.screenHandedBack(batchHandle, screened, realistic, minRealisticV, maxRealisticV);
+        int[] possible = records != null ? screen.possibleTypes(count) : null;
         int realisticBase = screen.realisticRecordBase();
         int busBase = table.limitCount();
         TIntArrayList gatherScenario = new TIntArrayList();
@@ -107,6 +132,10 @@ final class GpuStateHandback implements StateHandback {
                 continue;                                    // nothing the host reads: exhausted (no result) or the CPU's
             }
             int[] scenarioRecords = records != null ? records[s] : null;
+            if (possible != null && ids[s].indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
+                possibleTypes.put(ids[s], screenDecides(scenarios.get(ids[s]), automationSwitched[s], tapMoves[s], screened[s])
+                        ? possible[s] : GpuBaseViolations.ALL);
+            }
             if (scenarioRecords == null) {
                 full[s] = true;                              // an overflow, or the device refused: the host screens it
                 continue;
@@ -157,6 +186,58 @@ final class GpuStateHandback implements StateHandback {
                     Arrays.copyOfRange(values, start[s], end[s])));
         }
         return full;
+    }
+
+    /**
+     * Whether the screen's possible types are all of a contingency's: every limit seen (no voltage-angle limit, no live
+     * branch it does not cover) and every branch the contingency changes evaluated as such. A state OLF finds unrealistic
+     * reports no violation at all, and the types are left whatever the record buffer held, so neither matters.
+     */
+    private boolean screenDecides(BatchContingency contingency, int[] automationSwitched, double[] tapMoves,
+                                  GpuScreenScenario screened) {
+        return screenSeesEveryLimit && screensEveryChangedBranch(contingency, automationSwitched, tapMoves, screened);
+    }
+
+    /** A branch out of the network at base: disabled, or every bus it has disabled by OLF's connectivity. */
+    private static boolean outOfTheNetwork(LfBranch branch) {
+        return branch.isDisabled()
+                || (branch.getBus1() == null || branch.getBus1().isDisabled()) && (branch.getBus2() == null || branch.getBus2().isDisabled());
+    }
+
+    /** Whether the screen evaluated as such every branch with limits the scenario opens at one side, retaps or switches:
+     *  the host scans in full those it did not (their records are dropped), which an empty screen does not decide. */
+    private boolean screensEveryChangedBranch(BatchContingency contingency, int[] automationSwitched, double[] tapMoves,
+                                              GpuScreenScenario screened) {
+        List<LfBranch> changed = new ArrayList<>();
+        if (contingency != null) {
+            contingency.sideOpenBranches().forEach(sideOpen -> changed.add(sideOpen.branch()));
+            contingency.tapOverrides().forEach(tap -> changed.add(tap.branch()));
+            changed.addAll(contingency.reclosedBranches());
+        }
+        if (automationSwitched != null) {
+            for (int num : automationSwitched) {
+                changed.add(network.getBranch(num));
+            }
+        }
+        if (tapMoves != null) {
+            for (int k = 0; k + 2 < tapMoves.length; k += 3) {
+                changed.add(network.getBranch((int) tapMoves[k]));
+            }
+        }
+        for (LfBranch branch : changed) {
+            int b = tableIndexOfBranchNum[branch.getNum()];
+            if (b >= 0 && table.groupStart(b) != table.groupEnd(b) && !screened.covered().contains(branch)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean pairMayApply(String pairId) {
+        GpuStrategyComposer.StrategyPair pair = pairsOnViolations.get(pairId);
+        Integer types = pair == null ? null : possibleTypes.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
+        return types == null || GpuStrategyComposer.mayApply(pair.strategy(), pair.actionIds(), types);
     }
 
     /** The rows of the branches a scenario opens at one side, retaps or switches: the host scans those in full where the

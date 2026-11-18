@@ -96,6 +96,79 @@ final class GpuStrategyComposer {
         return List.copyOf(lists);
     }
 
+    /**
+     * The candidate action lists OLF may apply for this strategy after a contingency on which only violations of the types
+     * {@code possibleTypes} (GpuBaseViolations' bits) may be reported. OLF evaluates every stage's condition on the
+     * contingency's violations (AbstractSecurityAnalysis.checkCondition): a TrueCondition holds, and so does an
+     * AllViolationCondition naming no violation (the empty set is contained in any); an AnyViolationCondition, an
+     * AtLeastOneViolationCondition and an AllViolationCondition naming violations may hold only when a type their filters
+     * keep may be reported. A list is kept when some assignment of the conditional stages consistent with that gives it.
+     * Null when a stage's condition reads the network (a threshold) or is of another type: the violations do not decide.
+     */
+    static List<List<String>> candidateActionLists(OperatorStrategy strategy, int possibleTypes) {
+        List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
+        List<Integer> conditional = new java.util.ArrayList<>();
+        List<Boolean> holds = new java.util.ArrayList<>();
+        List<Boolean> mayHold = new java.util.ArrayList<>();
+        for (int i = 0; i < stages.size(); i++) {
+            var condition = stages.get(i).getCondition();
+            if (condition instanceof com.powsybl.contingency.strategy.condition.TrueCondition) {
+                continue;
+            }
+            java.util.Set<com.powsybl.contingency.violations.LimitViolationType> filters;
+            boolean alwaysHolds = false;
+            if (condition instanceof com.powsybl.contingency.strategy.condition.AnyViolationCondition any) {
+                filters = any.getFilters();
+            } else if (condition instanceof com.powsybl.contingency.strategy.condition.AtLeastOneViolationCondition atLeastOne) {
+                filters = atLeastOne.getFilters();
+            } else if (condition instanceof com.powsybl.contingency.strategy.condition.AllViolationCondition all) {
+                filters = all.getFilters();
+                alwaysHolds = all.getViolationIds().isEmpty();
+            } else {
+                return null;
+            }
+            conditional.add(i);
+            holds.add(alwaysHolds);
+            mayHold.add(alwaysHolds || (GpuBaseViolations.bits(filters) & possibleTypes) != 0);
+        }
+        if (conditional.size() > MAX_CONDITIONAL_STAGES) {
+            return List.of();
+        }
+        java.util.LinkedHashSet<List<String>> lists = new java.util.LinkedHashSet<>();
+        for (int mask = 0; mask < 1 << conditional.size(); mask++) {
+            boolean consistent = true;
+            for (int c = 0; c < conditional.size(); c++) {
+                boolean in = (mask & 1 << c) != 0;
+                consistent &= in ? mayHold.get(c) : !holds.get(c);
+            }
+            if (!consistent) {
+                continue;
+            }
+            List<String> ids = new java.util.ArrayList<>();
+            for (int i = 0; i < stages.size(); i++) {
+                int c = conditional.indexOf(i);
+                if (c < 0 || (mask & 1 << c) != 0) {
+                    ids.addAll(stages.get(i).getActionIds());
+                }
+            }
+            if (!ids.isEmpty()) {
+                lists.add(List.copyOf(ids));
+            }
+        }
+        return List.copyOf(lists);
+    }
+
+    /** A strategy pair's strategy and the action list it applies, for deciding whether OLF may apply it. */
+    record StrategyPair(OperatorStrategy strategy, List<String> actionIds) {
+    }
+
+    /** Whether OLF may apply {@code actionIds}, one of the strategy's candidate lists, after a contingency on which only
+     *  violations of the types {@code possibleTypes} may be reported (see {@link #candidateActionLists(OperatorStrategy, int)}). */
+    static boolean mayApply(OperatorStrategy strategy, List<String> actionIds, int possibleTypes) {
+        List<List<String>> lists = candidateActionLists(strategy, possibleTypes);
+        return lists == null || lists.contains(actionIds);
+    }
+
     /** The batch id of a (contingency, strategy) pair applying {@code actionIds}: a single-stage strategy has one
      *  candidate list and keeps the plain id; a multi-stage one adds the list, which is what OLF hands
      *  runActionSimulation once its conditions are evaluated. */

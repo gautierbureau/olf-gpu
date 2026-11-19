@@ -317,7 +317,7 @@ final class GpuStrategyComposer {
                 com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(loadAction.getLoadId());
                 LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
                 if (bus == null) {
-                    return refused("LOAD_NOT_IN_LF_NETWORK");
+                    continue;                                // not in OLF's network: its LfLoadAction is invalid and changes nothing
                 }
                 if (ctgLostLoadIds.contains(loadAction.getLoadId())) {
                     continue;                                // OLF's LfLoadAction does nothing on a load the contingency lost
@@ -386,7 +386,7 @@ final class GpuStrategyComposer {
                 com.powsybl.openloadflow.network.LfGenerator lfGen = net.getGeneratorById(generatorAction.getGeneratorId());
                 LfBus bus = lfGen != null ? lfGen.getBus() : null;    // OLF's own map, never the bus view
                 if (bus == null) {
-                    return refused("GENERATOR_NOT_IN_LF_NETWORK");
+                    continue;                                // not in OLF's network: its LfGeneratorAction is invalid and changes nothing
                 }
                 if (ctgGens.contains(lfGen)) {
                     continue;                                // OLF's LfGeneratorAction does nothing on a generator the contingency lost

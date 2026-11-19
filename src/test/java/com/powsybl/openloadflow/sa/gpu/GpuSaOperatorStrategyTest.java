@@ -322,6 +322,44 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 
+    /** An action on a load or a generator OLF's network does not hold (here an island outside the main component): OLF's
+     *  LfLoadAction and LfGeneratorAction are invalid there, report the failure and change nothing, and the strategy's other
+     *  actions apply. The device composes the pair without that action, alone or beside a tap action. */
+    @Test
+    void actionsOnElementsOutsideTheNetworkChangeNothingLikeOlf() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTapPosition(0).setRegulating(false);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine().setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.iidm.network.VoltageLevel island = network.newSubstation().setId("SI").add().newVoltageLevel().setId("VLI")
+                .setNominalV(l0.getTerminal1().getVoltageLevel().getNominalV())
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        island.getBusBreakerView().newBus().setId("BI").add();
+        island.newLoad().setId("LI").setBus("BI").setConnectableBus("BI").setP0(10).setQ0(5).add();
+        island.newGenerator().setId("GI").setBus("BI").setConnectableBus("BI").setMinP(0).setMaxP(50).setTargetP(10)
+                .setVoltageRegulatorOn(true).setTargetV(island.getNominalV()).add();
+        List<Contingency> contingencies = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.RatioTapChangerTapPositionAction("tapUp", "T2wT", false, 2),
+                new com.powsybl.action.LoadActionBuilder().withId("moreIsland").withLoadId("LI").withRelativeValue(true)
+                        .withActivePowerValue(5).build(),
+                new com.powsybl.action.GeneratorActionBuilder().withId("genIsland").withGeneratorId("GI")
+                        .withActivePowerRelativeValue(false).withActivePowerValue(20).build());
+        com.powsybl.contingency.ContingencyContext all = com.powsybl.contingency.ContingencyContext.all();
+        com.powsybl.contingency.strategy.condition.TrueCondition always = new com.powsybl.contingency.strategy.condition.TrueCondition();
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sLoad", all, always, List.of("moreIsland")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sGenTap", all, always, List.of("genIsland", "tapUp")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sLoadGen", all, always, List.of("moreIsland", "genIsland")));
+        // the contingency and its three pairs, all on the device
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 4);
+    }
+
     @Test
     void pstTapPositionActionStrategyBatchMatchesCpu() {
         // #24 stage 2b: PhaseTapChanger tap action on a FIXED-tap PST = per-scenario (r1, a1)

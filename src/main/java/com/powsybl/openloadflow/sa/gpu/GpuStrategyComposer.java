@@ -256,6 +256,7 @@ final class GpuStrategyComposer {
         List<LfBranch> opened = new java.util.ArrayList<>();         // branches an open takes out
         List<LfBranch> deadIslandCloses = new java.util.ArrayList<>(); // switches closing onto a bus out of the network
         List<LfBranch> loopCloses = new java.util.ArrayList<>();       // switches closing within one zero-impedance network
+        List<LfBus> broughtBackBuses = new java.util.ArrayList<>();    // buses out of the network at base the actions bring back
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
         Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
         List<com.powsybl.openloadflow.network.LfHvdc> acEmulationOff = new java.util.ArrayList<>();
@@ -454,7 +455,7 @@ final class GpuStrategyComposer {
         composeLoopCloses(loopCloses, zeroImpedanceOutages, reclosed);
         if (!deadIslandCloses.isEmpty()) {
             String islandRefusal = composeReenergizedIsland(net, ctgCut, deadIslandCloses, reenabled, opened, loads, reclosed,
-                    deadBusRows);
+                    deadBusRows, broughtBackBuses);
             if (islandRefusal != null) {
                 return refused(islandRefusal);
             }
@@ -475,7 +476,7 @@ final class GpuStrategyComposer {
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, zeroImpedanceOutages, ctgHvdcs, ctgSideOpens,
-                contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff);
+                contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff, broughtBackBuses);
     }
 
     /** The closes of switches within one zero-impedance network at base: a loop at base, but the contingency's and the
@@ -532,7 +533,8 @@ final class GpuStrategyComposer {
     private static String composeReenergizedIsland(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> deadIslandCloses,
                                                    List<LfBranch> reenabled, List<LfBranch> opened, List<LoadLoss> loads,
                                                    List<LfBranch> reclosed,
-                                                   com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+                                                   com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows,
+                                                   List<LfBus> broughtBackBuses) {
         List<LfBranch> closed = new java.util.ArrayList<>(reenabled);
         closed.addAll(deadIslandCloses);
         BroughtBack broughtBack = broughtBack(net, ctgCut, closed, opened);
@@ -542,6 +544,7 @@ final class GpuStrategyComposer {
                 island.add(bus);
             }
         }
+        broughtBackBuses.addAll(island);                 // OLF's count takes their balances (ActionSeed)
         String busRefusal = refusedIslandBus(island, deadBusRows);
         if (busRefusal != null) {
             return busRefusal;

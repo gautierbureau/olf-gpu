@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfShunt;
@@ -46,11 +47,29 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                List<GeneratorMove> generatorActions,
                                /** Strategy pairs: the AC-emulation links an HvdcAction switches to fixed set points (OLF's
                                 *  LfHvdcAction: each station's target becomes the flow at the strategy's starting state). */
-                               List<LfHvdc> acEmulationOffHvdcs) {
+                               List<LfHvdc> acEmulationOffHvdcs,
+                               /** Strategy pairs: the buses out of the network at base that the actions bring back
+                                *  (AbstractLfBranchAction.getNetworkActivations). OLF's equation count grows by their active
+                                *  and reactive power balances, two per bus, whether the device merges the bus into the one
+                                *  its switch joins or gives it rows past OLF's (DeadBusRows). */
+                               List<LfBus> broughtBackBuses) {
 
     /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
      *  SECOND phase, WARM-CONTINUED from their parent contingency's state and PV/PQ states. */
     public static final char STRATEGY_KEY_SEP = '\u0001';
+
+    /** Without buses brought back. */
+    @SuppressWarnings("java:S107")
+    public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
+                            List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                            List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                            List<LfBranch> outagedZeroImpedanceBranches, List<LfHvdc> outagedHvdcs, List<SideOpen> sideOpenBranches,
+                            List<LfBranch> stickyNonSpanningTreeBranches, List<GeneratorMove> generatorActions,
+                            List<LfHvdc> acEmulationOffHvdcs) {
+        this(contingencyId, outagedBranches, lostGenerators, lostLoads, shuntShifts, tapOverrides, outagedShunts,
+                reclosedBranches, outagedZeroImpedanceBranches, outagedHvdcs, sideOpenBranches, stickyNonSpanningTreeBranches, generatorActions,
+                acEmulationOffHvdcs, List.of());
+    }
 
     @SuppressWarnings("java:S107")
     public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,

@@ -63,6 +63,9 @@ import java.util.Set;
  */
 public final class GpuBatchedSecurityAnalysisSolver {
 
+    /** The equations the last pair bringing buses back from out of the network added to OLF's count (ActionSeed; tests). */
+    public static final java.util.concurrent.atomic.AtomicInteger LAST_BROUGHT_BACK_EQUATIONS = new java.util.concurrent.atomic.AtomicInteger();
+
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchedSecurityAnalysisSolver.class);
 
     /** OLF default outer-loop convergence tolerances (per-unit on the 100 MVA base): slackBusPMaxMismatch =

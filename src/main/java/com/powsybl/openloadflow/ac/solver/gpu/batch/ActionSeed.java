@@ -36,6 +36,14 @@ final class ActionSeed {
         final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final GpuAcData gpuData = ctx.gpuData();
         final RunScratch rs = ctx.rs();
+        // OLF's equation count takes the balances of every bus the actions bring back from out of the network, merged into
+        // the bus its switch joins or with rows past OLF's (a switch's ZERO_PHI / ZERO_V take the place of its DUMMY_TARGET
+        // identities: same count)
+        int broughtBackEquations = 2 * contingencies.get(ci).broughtBackBuses().size();
+        ctx.cl().nActive[s] += broughtBackEquations;
+        if (broughtBackEquations > 0) {
+            GpuBatchedSecurityAnalysisSolver.LAST_BROUGHT_BACK_EQUATIONS.set(broughtBackEquations);
+        }
         java.util.Set<LfBus> broughtBack = new java.util.HashSet<>();
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
             if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
@@ -74,8 +82,8 @@ final class ActionSeed {
 
     /**
      * A bus out of the network at base that the slot's actions bring back across the branches they close (DeadBusRows): its
-     * BUS_PHI and BUS_V rows past OLF's become equations, and OLF's equation count takes its two balances (a closing
-     * switch's ZERO_PHI and ZERO_V take the place of its DUMMY_TARGET identities, same count). The bus's balances are at
+     * BUS_PHI and BUS_V rows past OLF's become equations (OLF's equation count takes its balances in {@link #seed}). The
+     * bus's balances are at
      * OLF's bus targets on its own rows, or on its closing switch's DUMMY_P / DUMMY_Q rows when it is that switch's child,
      * its own rows then holding the switch's ZERO_PHI / ZERO_V at 0 (a switch: no ratio, no phase shift). The rows start
      * where every lane holds them, at OLF's start values.
@@ -100,6 +108,5 @@ final class ActionSeed {
             rs.overrides.add(s * n + phiRow, bus.getTargetP());
             rs.overrides.add(s * n + vRow, bus.getTargetQ());
         }
-        ctx.cl().nActive[s] += 2;
     }
 }

@@ -1231,6 +1231,26 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(withDeadSectionAndLine(420.), 2);
     }
 
+    /** OLF's equation count, behind its stopping threshold sqrt(eps^2 * count), takes the active and reactive power balances
+     *  of every bus a pair brings back (each switch keeps two equations, ZERO_PHI / ZERO_V closed and DUMMY_TARGET_P /
+     *  DUMMY_TARGET_Q open): BBS4 merged into BBS3, BBS4 and BBS7 on their rows past OLF's, BBS5 and BBS6 coupling BBS1 and
+     *  BBS2. The merged buses used to add nothing. */
+    @Test
+    void pairsCountTheEquationsOfTheBusesTheyBringBack() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        var added = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.LAST_BROUGHT_BACK_EQUATIONS;
+        added.set(-1);
+        assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
+        assertEquals(2, added.get(), "BBS4, merged into BBS3: its two balances");
+        added.set(-1);
+        assertDeadSectionCloseMatchesCpu(withDeadSectionAndLine(420.), 2);
+        assertEquals(4, added.get(), "BBS4 and BBS7, on their rows past OLF's");
+        added.set(-1);
+        assertDeadCouplingSectionCloseMatchesCpu(withDeadCouplingSection(true), 2);
+        assertEquals(4, added.get(), "BBS5 and BBS6, merged into the coupled node");
+    }
+
     /** BBS7's voltage above its limit after the close: the violation OLF reports at a bus the actions bring back, whose
      *  voltage the device screen does not read (it has no base row), is found on the host. */
     @Test

@@ -38,7 +38,13 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
      *  and row modes, the state size, the element count, the variable types (MAX_VOLTAGE_CHANGE scaling only, else
      *  null) and each HVDC's element index. */
     record BaseCase(GpuAcElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
-                    int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex) {
+                    int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex,
+                    com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows) {
+
+        /** OLF's active equation count of a lane before any of its own changes: the device rows less the dead buses'. */
+        int olfRowCount() {
+            return deadBusRows.isEmpty() ? n : deadBusRows.olfRowCount();
+        }
     }
 
     /** The run's Newton-Raphson parameters, whether its outer loops hold OLF's DistributedSlackOuterLoop and
@@ -75,7 +81,8 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
     /** The same inputs from another base state. */
     ChunkInputs withBaseState(double[] baseState) {
         return new ChunkInputs(contingencies, new BaseCase(base.elementMapper(), base.gpuData(), baseState,
-                base.baseTargets(), base.baseRowMode(), base.n(), base.nElements(), base.varType(), base.hvdcElemIndex()),
+                base.baseTargets(), base.baseRowMode(), base.n(), base.nElements(), base.varType(), base.hvdcElemIndex(),
+                base.deadBusRows()),
                 plan, settings, phases, sinks, config);
     }
 }

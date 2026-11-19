@@ -161,7 +161,8 @@ final class GpuBatchPrecomputer {
             // re-point the network's evaluables off the engine's system, breaking fall-through CPU solves).
             // After the converged base load flow the engine's state vector holds the base operating point.
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
-            double[] baseState = es.getStateVector().get().clone();
+            var deadBusRows = deadBusRows(net, es, strategies, actions);
+            double[] baseState = deadBusRows.withStartValues(es.getStateVector().get().clone());
             var target = context.getTargetVector();
 
             // one batch per group, the contingencies taken in OLF's order
@@ -292,10 +293,9 @@ final class GpuBatchPrecomputer {
                                 .withOuterLoops(settings.distributedSlack(), settings.reactiveLimits())
                                 .withOuterLoopTolerances(settings.reactiveLimitTol(), settings.slackDistTol())
                                 .withConvEpsPerEq(settings.convEpsPerEq())
-                                .withConfig(config));
-                results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context,
-                        settings.distributedSlack(), settings.reactiveLimits(), settings.reactiveLimitTol(),
-                        settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config));
+                                .withConfig(config).withDeadBusRows(deadBusRows));
+                results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context, settings.distributedSlack(),
+                        settings.reactiveLimits(), settings.reactiveLimitTol(), settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config, deadBusRows));
             }
             // the converged states: the sink when the run has one (every chunk put its states there as it
             // completed), a heap map otherwise
@@ -636,13 +636,26 @@ final class GpuBatchPrecomputer {
      * <p>Cost, NOT yet measured: switching mode evicts the single-entry context cache, so the pass
      * pays one cuDSS analysis plus a solve over the rejected scenarios on every run.
      */
+    /** The device rows the last precompute added past OLF's (tests). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_DEAD_BUS_ROW_COUNT = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** The dead buses a strategy's switch close can bring back, with device rows past OLF's (DeadBusRows). */
+    private static com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows(LfNetwork net,
+            EquationSystem<AcVariableType, AcEquationType> es, List<OperatorStrategy> strategies, List<Action> actions) {
+        var rows = com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows.of(net, es.getIndex().getSortedVariablesToFind().size(),
+                GpuStrategyComposer.switchClosesOntoDeadBuses(net, strategies, actions));
+        LAST_DEAD_BUS_ROW_COUNT.set(rows.rowCount() - rows.olfRowCount());
+        return rows;
+    }
+
     private static List<BatchScenarioResult> retryRejectedOnDevice(
             List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
             double[] baseState, EquationSystem<AcVariableType, AcEquationType> es,
             com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> target,
             AcLoadFlowContext context,
             boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
-            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config,
+            com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows) {
         if (config.robustSolveMode()) {
             return results;
         }
@@ -669,7 +682,8 @@ final class GpuBatchPrecomputer {
                             .withOuterLoops(distributedSlack, reactiveLimits)
                             .withOuterLoopTolerances(reactiveLimitTol, slackDistTol)
                             .withConvEpsPerEq(convEpsPerEq)
-                            .withConfig(config.withRobustSolveMode()));
+                            .withConfig(config.withRobustSolveMode())
+                            .withDeadBusRows(deadBusRows));
         } catch (RuntimeException e) {
             // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
             // results, which are already correct for every scenario that converged.

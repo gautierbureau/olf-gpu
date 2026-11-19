@@ -590,7 +590,7 @@ final class GpuBatchChunkSolver {
                 }
                 GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotOutaged, chunkSize);
             }
-            cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
+            cl = new ChunkLists(chunkSize, in.base().olfRowCount(), gpuData, forcedTargetQ, nDistributedSlackGenerators);
             seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
                     plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
                     curveEntriesByPRow, rs, cl);

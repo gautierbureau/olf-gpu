@@ -73,6 +73,35 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
                         ElementPack loadModel, ReactiveRelocationCandidates reactiveRelocation) {
 
     /**
+     * This data on {@code rowCount} rows, the rows past its own held as identities and nothing else (the dead buses' rows,
+     * DeadBusRows): their voltage-row parameters at 0 (no slope, no realistic-voltage check), no dependent relocation group,
+     * and each in the identity rows, which give it its diagonal.
+     */
+    public GpuAcData withAddedIdentityRows(int rowCount, int[] addedRows) {
+        if (addedRows.length == 0) {
+            return this;
+        }
+        int[] identityRows = java.util.Arrays.copyOf(baseOpenBranches.identityRows(), baseOpenBranches.identityRows().length + addedRows.length);
+        System.arraycopy(addedRows, 0, identityRows, baseOpenBranches.identityRows().length, addedRows.length);
+        BaseOpenBranches baseOpen = new BaseOpenBranches(baseOpenBranches.closedBranchElements(), baseOpenBranches.zeroImpedanceElements(),
+                baseOpenBranches.zeroImpedanceBranchNums(), identityRows);
+        VoltageRowParameters rows = new VoltageRowParameters(
+                voltageRows.slope().length == 0 ? voltageRows.slope() : java.util.Arrays.copyOf(voltageRows.slope(), rowCount),
+                voltageRows.nominalV().length == 0 ? voltageRows.nominalV() : java.util.Arrays.copyOf(voltageRows.nominalV(), rowCount));
+        int[] dependentGroupOfRow = reactiveRelocation.dependentGroupOfRow();
+        if (dependentGroupOfRow.length > 0) {
+            int olfRows = dependentGroupOfRow.length;
+            dependentGroupOfRow = java.util.Arrays.copyOf(dependentGroupOfRow, rowCount);
+            java.util.Arrays.fill(dependentGroupOfRow, olfRows, rowCount, -1);
+        }
+        var relocation = new ReactiveRelocationCandidates(
+                reactiveRelocation.groupStart(), reactiveRelocation.candidateRows(), reactiveRelocation.dependentBaseGroup(),
+                reactiveRelocation.baseTargetRow(), dependentGroupOfRow);
+        return new GpuAcData(closedBranch, openBranch, shunt, hvdcAcEmulation, distrQ, distrQMembers, zeroImpedanceBranch, distrRho,
+                distrShuntB, reactiveLimits, remoteMemberReactiveTerms, rows, distributedSlack, baseOpen, loadModel, relocation);
+    }
+
+    /**
      * Content equality over the packs a cached batched context depends on: the element packs (indices and
      * parameters), the DISTR_Q / DISTR_RHO / zero-impedance terms, and the reactive-limit, voltage-row and
      * distributed-slack inputs {@code createBatchContext} takes. Arrays the per-chunk table install re-reads from

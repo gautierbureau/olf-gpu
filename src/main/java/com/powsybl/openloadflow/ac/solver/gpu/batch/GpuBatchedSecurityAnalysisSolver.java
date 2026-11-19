@@ -172,8 +172,18 @@ public final class GpuBatchedSecurityAnalysisSolver {
         GpuAcElementMapper elementMapper = new GpuAcElementMapper(network, baseOpenIds);
 
         int n = baseState.length;
-        int nElements = gpuData.getTotalElementCount();
         double[] baseTargets = baseActivation.applyTargets(targetVector.getArray());
+        // the dead buses' rows past OLF's (DeadBusRows): fixed variables at their start values, a diagonal each
+        var deadBusRows = request.deadBusRows();
+        if (!deadBusRows.isEmpty()) {
+            if (n != deadBusRows.rowCount()) {
+                throw new IllegalStateException("base state of " + n + " rows, " + deadBusRows.rowCount() + " expected");
+            }
+            gpuData = gpuData.withAddedIdentityRows(n, deadBusRows.rows());
+            baseActivation = baseActivation.lengthened(n);
+            baseTargets = deadBusRows.withStartValues(baseTargets);
+        }
+        int nElements = gpuData.getTotalElementCount();
 
         // Qualify each contingency. Outages that keep the main component intact batch as a value-only
         // mask over the fixed pattern. A FRAGMENTING outage batches too in the full-loadflow mode
@@ -305,7 +315,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, gpuData);
                 GpuBatchChunkSolver.solveQualifiedInChunks(new ChunkInputs(contingencies,
                         new ChunkInputs.BaseCase(elementMapper, gpuData, baseState, baseTargets, baseActivation.rowMode(),
-                                n, nElements, varType, hvdcElemIndex),
+                                n, nElements, varType, hvdcElemIndex, deadBusRows),
                         plan,
                         new ChunkInputs.SolveSettings(parameters, distributedSlack, reactiveLimits, tol, reactiveLimitTol, slackDistTol,
                                 convEpsPerEq, rowCriteria),

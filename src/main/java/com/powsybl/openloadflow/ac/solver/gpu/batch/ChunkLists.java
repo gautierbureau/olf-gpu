@@ -118,12 +118,12 @@ final class ChunkLists {
     // the slack's retained share, which is not a device defect.
     final double[] preAbsorbedBySlot;
 
-    ChunkLists(int chunkSize, int n, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int nDistributedSlackGenerators) {
+    ChunkLists(int chunkSize, int olfRowCount, GpuAcData gpuData, ForceTargetQInReactiveLimits.Channel forcedTargetQ, int nDistributedSlackGenerators) {
         this.distributedSlackBusRowOverrideByScenario = new int[chunkSize][];
         this.nDistrQMembersAll = gpuData.distrQMembers().busNum() != null ? gpuData.distrQMembers().busNum().length : 0;
         this.distrQSubgroupDense = new byte[chunkSize * nDistrQMembersAll];
         this.nActive = new int[chunkSize];
-        java.util.Arrays.fill(nActive, n);
+        java.util.Arrays.fill(nActive, olfRowCount);
         this.preLossBySlot = new double[chunkSize];
         this.genPreMovesBySlot = forcedTargetQ != null || nDistributedSlackGenerators > 0 ? new double[chunkSize][] : null;
         this.preAbsorbedBySlot = new double[chunkSize];

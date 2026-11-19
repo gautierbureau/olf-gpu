@@ -996,6 +996,17 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
     }
 
+    /** The dead section a strategy's switch may bring back has its device rows past OLF's, one BUS_PHI and one BUS_V row per
+     *  bus, held fixed in every lane: the run matches the CPU with them. */
+    @Test
+    void deadSectionGetsDeviceRowsPastOlfs() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.set(-1);
+        assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
+        assertEquals(2, GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.get(), "BBS4's bus: its BUS_PHI and BUS_V rows");
+    }
+
     @Test
     void deadEmptySectionCloseStrategyBatchMatchesCpu() {
         // the same with nothing at BBS4: the pair is the contingency's network, BBS4 at BBS3's voltage

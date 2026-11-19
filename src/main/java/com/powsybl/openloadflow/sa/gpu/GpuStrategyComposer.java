@@ -199,6 +199,26 @@ final class GpuStrategyComposer {
         return lists == null || lists.contains(actionIds);
     }
 
+    /** The switches the strategies close onto a bus out of OLF's network: the ways into the dead sections their pairs may
+     *  bring back (DeadBusRows). */
+    static List<LfBranch> switchClosesOntoDeadBuses(LfNetwork net, List<OperatorStrategy> strategies, List<Action> actions) {
+        java.util.Set<String> used = new java.util.HashSet<>();
+        for (OperatorStrategy strategy : strategies) {
+            strategy.getConditionalActions().forEach(conditional -> used.addAll(conditional.getActionIds()));
+        }
+        List<LfBranch> closes = new java.util.ArrayList<>();
+        for (Action action : actions) {
+            if (used.contains(action.getId()) && action instanceof com.powsybl.action.SwitchAction switchAction && !switchAction.isOpen()) {
+                LfBranch branch = net.getBranchById(switchAction.getSwitchId());
+                if (branch != null && (branch.getBus1() != null && branch.getBus1().isDisabled()
+                        || branch.getBus2() != null && branch.getBus2().isDisabled())) {
+                    closes.add(branch);
+                }
+            }
+        }
+        return closes;
+    }
+
     /** The batch id of a (contingency, strategy) pair applying {@code actionIds}: a single-stage strategy has one
      *  candidate list and keeps the plain id; a multi-stage one adds the list, which is what OLF hands
      *  runActionSimulation once its conditions are evaluated. */

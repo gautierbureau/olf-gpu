@@ -67,38 +67,38 @@ public final class DeadBusRows {
     }
 
     /**
-     * The rows of the buses the given switch closes bring back across an impedant branch, each close taken alone on OLF's
-     * connectivity at base (a close whose switch has no end in the network brings nothing back).
+     * The rows of the buses each strategy's switch closes bring back, its closes taken together on OLF's connectivity at base
+     * (a close with no end out of the network brings nothing back). A switch's child is the bus out of the network it
+     * reaches first from the network's side, in the strategy's order; the first switch to reach a bus keeps it.
      */
-    public static DeadBusRows of(LfNetwork network, int olfRowCount, Collection<LfBranch> closes) {
+    public static DeadBusRows of(LfNetwork network, int olfRowCount, Collection<? extends Collection<LfBranch>> closeGroups) {
         Set<LfBus> withRows = new LinkedHashSet<>();
         Map<LfBus, LfBranch> switchOf = new HashMap<>();
         GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
         LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-        for (LfBranch close : closes) {
-            LfBus bus1 = close.getBus1();
-            LfBus bus2 = close.getBus2();
-            if (bus1 == null || bus2 == null || bus1.isDisabled() == bus2.isDisabled()) {
-                continue;                                    // not a close from the network onto a dead bus
+        for (Collection<LfBranch> group : closeGroups) {
+            List<LfBranch> closes = group.stream().filter(b -> b.getBus1() != null && b.getBus2() != null
+                    && (b.getBus1().isDisabled() || b.getBus2().isDisabled())).distinct().toList();
+            if (closes.isEmpty()) {
+                continue;
             }
-            LfBus deadEnd = bus1.isDisabled() ? bus1 : bus2;
             Set<LfBus> island;
             Set<LfBranch> edges;
             connectivity.startTemporaryChanges();
             try {
                 connectivity.setMainComponentVertex(slack);
-                connectivity.addEdge(bus1, bus2, close);
+                closes.forEach(b -> connectivity.addEdge(b.getBus1(), b.getBus2(), b));
                 island = new HashSet<>(connectivity.getVerticesAddedToMainComponent());
                 edges = new HashSet<>(connectivity.getEdgesAddedToMainComponent());
             } finally {
                 connectivity.undoTemporaryChanges();
                 connectivity.setMainComponentVertex(slack);
             }
-            if (!island.contains(deadEnd) || !needsRows(island, edges)) {
+            if (island.isEmpty() || !needsRows(island, edges)) {
                 continue;                                    // switches alone: merged by the pairs, no rows
             }
             withRows.addAll(island);
-            switchOf.putIfAbsent(deadEnd, close);
+            assignChildren(closes, island, edges, switchOf);
         }
         if (withRows.isEmpty()) {
             return NONE;
@@ -111,6 +111,53 @@ public final class DeadBusRows {
             indexOfBusNum[ordered.get(k).getNum()] = k;
         }
         return new DeadBusRows(olfRowCount, Collections.unmodifiableList(ordered), indexOfBusNum, switchOf);
+    }
+
+    /** From the network's side outward: a close from a reached bus (one in the network, or of the island already reached) to
+     *  one not reached yet makes that bus its child, and what the island's other branches join to it is reached with it. */
+    private static void assignChildren(List<LfBranch> closes, Set<LfBus> island, Set<LfBranch> edges, Map<LfBus, LfBranch> switchOf) {
+        Set<LfBus> reached = new HashSet<>();
+        boolean progress = true;
+        while (progress) {
+            progress = false;
+            for (LfBranch close : closes) {
+                LfBus child = childOf(close, island, reached);
+                if (child == null) {
+                    continue;
+                }
+                switchOf.putIfAbsent(child, close);
+                java.util.Deque<LfBus> queue = new java.util.ArrayDeque<>(List.of(child));
+                reached.add(child);
+                while (!queue.isEmpty()) {
+                    LfBus bus = queue.poll();
+                    for (LfBranch branch : bus.getBranches()) {
+                        if (!edges.contains(branch) || closes.contains(branch) || branch.getBus1() == null || branch.getBus2() == null) {
+                            continue;
+                        }
+                        LfBus other = branch.getBus1() == bus ? branch.getBus2() : branch.getBus1();
+                        if (island.contains(other) && reached.add(other)) {
+                            queue.add(other);
+                        }
+                    }
+                }
+                progress = true;
+            }
+        }
+    }
+
+    /** The island bus a close reaches from a reached end (a bus of the network, or one already reached), null if none. */
+    private static LfBus childOf(LfBranch close, Set<LfBus> island, Set<LfBus> reached) {
+        LfBus bus1 = close.getBus1();
+        LfBus bus2 = close.getBus2();
+        boolean from1 = !island.contains(bus1) || reached.contains(bus1);
+        boolean from2 = !island.contains(bus2) || reached.contains(bus2);
+        if (from1 && island.contains(bus2) && !reached.contains(bus2)) {
+            return bus2;
+        }
+        if (from2 && island.contains(bus1) && !reached.contains(bus1)) {
+            return bus1;
+        }
+        return null;
     }
 
     /**

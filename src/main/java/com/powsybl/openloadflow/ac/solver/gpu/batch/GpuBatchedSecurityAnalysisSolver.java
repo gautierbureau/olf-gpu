@@ -433,10 +433,17 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 rowCriteria[1][phi] = criteria.p() / 100.0;
                 rowCriteria[1][v] = criteria.q() / 100.0;
             } else {
+                int dummyPRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4];
+                int dummyQRow = gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5];
                 rowCriteria[1][phi] = criteria.angle();                      // ZERO_PHI
                 rowCriteria[1][v] = criteria.v();                            // ZERO_V
-                rowCriteria[1][gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4]] = criteria.p() / 100.0;
-                rowCriteria[1][gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5]] = criteria.q() / 100.0;
+                rowCriteria[1][dummyPRow] = criteria.p() / 100.0;
+                rowCriteria[1][dummyQRow] = criteria.q() / 100.0;
+                // brought back through another switch, its dummy rows identities: its own rows hold its balances
+                rowCriteria[2][phi] = criteria.p() / 100.0;
+                rowCriteria[3][phi] = dummyPRow;
+                rowCriteria[2][v] = criteria.q() / 100.0;
+                rowCriteria[3][v] = dummyQRow;
             }
         }
         return rowCriteria;

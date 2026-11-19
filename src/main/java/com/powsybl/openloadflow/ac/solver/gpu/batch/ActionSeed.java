@@ -73,7 +73,7 @@ final class ActionSeed {
             }
             for (LfBus end : java.util.Arrays.asList(reclosed.getBus1(), reclosed.getBus2())) {
                 if (end != null && ctx.deadBusRows().phiRow(end) >= 0 && broughtBack.add(end)) {
-                    bringBack(ctx, s, end);
+                    bringBack(ctx, s, end, contingencies.get(ci).reclosedBranches());
                 }
             }
         }
@@ -100,11 +100,13 @@ final class ActionSeed {
      * A bus out of the network at base that the slot's actions bring back across the branches they close (DeadBusRows): its
      * fixed shunt and its branches open at one side are enabled, its BUS_PHI and BUS_V rows past OLF's become equations (OLF's equation count takes its balances in {@link #seed}). The
      * bus's balances are at
-     * OLF's bus targets on its own rows, or on its closing switch's DUMMY_P / DUMMY_Q rows when it is that switch's child,
-     * its own rows then holding the switch's ZERO_PHI / ZERO_V at 0 (a switch: no ratio, no phase shift). The rows start
+     * OLF's bus targets on its own rows, or on its closing switch's DUMMY_P / DUMMY_Q rows when it is that switch's child and
+     * the pair closes that switch, its own rows then holding the switch's ZERO_PHI / ZERO_V at 0 (a switch: no ratio, no
+     * phase shift). Brought back through another switch, its switch's dummy rows stay identities, and the fill's stock
+     * placement puts the equations written there back on the bus's own rows. The rows start
      * where every lane holds them, at OLF's start values.
      */
-    private static void bringBack(SlotSeeding ctx, int s, LfBus bus) {
+    private static void bringBack(SlotSeeding ctx, int s, LfBus bus, java.util.List<LfBranch> reclosed) {
         final RunScratch rs = ctx.rs();
         final int n = ctx.n();
         int phiRow = ctx.deadBusRows().phiRow(bus);
@@ -121,7 +123,7 @@ final class ActionSeed {
         rs.rowModes.set(s, phiRow, GpuRowMode.EQUATION);
         rs.rowModes.set(s, vRow, GpuRowMode.EQUATION);
         LfBranch closing = ctx.deadBusRows().switchOf(bus);
-        if (closing != null) {
+        if (closing != null && reclosed.contains(closing)) {
             Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(closing.getNum());
             int dpRow = ctx.gpuData().zeroImpedanceBranch().indices()[ze * 11 + 4];
             int distrQRow = ctx.gpuData().zeroImpedanceBranch().indices()[ze * 11 + 5];

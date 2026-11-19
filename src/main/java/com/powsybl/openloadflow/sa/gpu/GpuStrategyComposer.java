@@ -199,21 +199,25 @@ final class GpuStrategyComposer {
         return lists == null || lists.contains(actionIds);
     }
 
-    /** The switches the strategies close onto a bus out of OLF's network: the ways into the dead sections their pairs may
-     *  bring back (DeadBusRows). */
-    static List<LfBranch> switchClosesOntoDeadBuses(LfNetwork net, List<OperatorStrategy> strategies, List<Action> actions) {
-        java.util.Set<String> used = new java.util.HashSet<>();
+    /** The switches each strategy closes onto a bus out of OLF's network (one list per strategy, in its actions' order): the
+     *  ways into the dead sections its pairs may bring back (DeadBusRows). */
+    static List<List<LfBranch>> switchClosesOntoDeadBuses(LfNetwork net, List<OperatorStrategy> strategies, List<Action> actions) {
+        Map<String, Action> actionById = new java.util.HashMap<>();
+        actions.forEach(a -> actionById.put(a.getId(), a));
+        List<List<LfBranch>> closes = new java.util.ArrayList<>();
         for (OperatorStrategy strategy : strategies) {
-            strategy.getConditionalActions().forEach(conditional -> used.addAll(conditional.getActionIds()));
-        }
-        List<LfBranch> closes = new java.util.ArrayList<>();
-        for (Action action : actions) {
-            if (used.contains(action.getId()) && action instanceof com.powsybl.action.SwitchAction switchAction && !switchAction.isOpen()) {
-                LfBranch branch = net.getBranchById(switchAction.getSwitchId());
-                if (branch != null && (branch.getBus1() != null && branch.getBus1().isDisabled()
-                        || branch.getBus2() != null && branch.getBus2().isDisabled())) {
-                    closes.add(branch);
+            List<LfBranch> strategyCloses = new java.util.ArrayList<>();
+            strategy.getConditionalActions().forEach(conditional -> conditional.getActionIds().forEach(id -> {
+                if (actionById.get(id) instanceof com.powsybl.action.SwitchAction switchAction && !switchAction.isOpen()) {
+                    LfBranch branch = net.getBranchById(switchAction.getSwitchId());
+                    if (branch != null && !strategyCloses.contains(branch) && (branch.getBus1() != null && branch.getBus1().isDisabled()
+                            || branch.getBus2() != null && branch.getBus2().isDisabled())) {
+                        strategyCloses.add(branch);
+                    }
                 }
+            }));
+            if (!strategyCloses.isEmpty()) {
+                closes.add(strategyCloses);
             }
         }
         return closes;
@@ -593,9 +597,10 @@ final class GpuStrategyComposer {
     }
 
     /**
-     * An island holding an impedant branch, with OLF's own equations on the device rows past OLF's (DeadBusRows): every bus of
-     * the island has rows, every switch into it is the closing switch whose child is the bus it reaches (the dummy rows
-     * holding the child's balances, DeadBusRows#switchOf), and what it joins in the network is there after the contingency.
+     * An island holding an impedant branch, a shunt or a branch open at one side, with OLF's own equations on the device rows
+     * past OLF's (DeadBusRows): every bus of the island has rows, every switch closed into it or inside it is packed (a
+     * switch's child has its balances on the switch's dummy rows while the pair closes that switch, DeadBusRows#switchOf),
+     * and what it joins in the network is there after the contingency.
      * The pair closes the switches and the island's impedant branches, and the slot turns the rows into equations (ActionSeed).
      * Its buses carry no injection (refusedIslandBus).
      */
@@ -618,11 +623,14 @@ final class GpuStrategyComposer {
                 return "SWITCH_CLOSE_DEAD_ISLAND_JOINS_A_BUS_BROUGHT_BACK";
             }
             if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                if (outside == null) {
+                // a switch between two buses of the island is packed when it holds one of them as its child (a strategy's
+                // switch between two dead sections); one onto a bus another switch holds is packed plain (its ZERO_PHI /
+                // ZERO_V on its own dummy rows), the bus then holding its own balances (ActionSeed.bringBack)
+                if (outside == null && deadBusRows.switchOf(b.getBus1()) != b && deadBusRows.switchOf(b.getBus2()) != b) {
                     return "SWITCH_CLOSE_DEAD_ISLAND_ZERO_IMPEDANCE_INSIDE";
                 }
-                if (deadBusRows.switchOf(in1 ? b.getBus1() : b.getBus2()) != b) {
-                    return "SWITCH_CLOSE_DEAD_ISLAND_OTHER_SWITCH";  // its bus is another switch's child
+                if (!deadBusRows.packable(b)) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";
                 }
             } else if (b.isVoltageController() || b.isPhaseController() || b.isTransformerReactivePowerController()
                     || b.isPhaseControlled() || b.isTransformerReactivePowerControlled()) {
@@ -631,12 +639,6 @@ final class GpuStrategyComposer {
                 return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";
             }
             closes.add(b);
-        }
-        for (LfBus bus : island) {
-            LfBranch closing = deadBusRows.switchOf(bus);
-            if (closing != null && !closes.contains(closing)) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_OTHER_SWITCH";      // its balances are on a switch the pair leaves open
-            }
         }
         for (LfBranch b : closes) {
             if (!reclosed.contains(b)) {
@@ -668,9 +670,12 @@ final class GpuStrategyComposer {
                 return "SWITCH_CLOSE_DEAD_ISLAND_WITH_LOAD_MODEL";
             }
             for (LfBranch b : bus.getBranches()) {
-                if (!b.isConnectedAtBothSides() && (deadBusRows.phiRow(bus) < 0 || b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))) {
+                if (!b.isConnectedAtBothSides() && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_SWITCH";
+                }
+                if (!b.isConnectedAtBothSides() && deadBusRows.phiRow(bus) < 0) {
                     // OLF enables it too, its charging at the bus: on the device only on the bus's rows past OLF's
-                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH_WITHOUT_ROWS";
                 }
             }
             if (deadBusRows.phiRow(bus) >= 0 && !bus.getLoads().isEmpty()) {

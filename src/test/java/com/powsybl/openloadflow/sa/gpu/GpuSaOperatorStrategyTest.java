@@ -1061,6 +1061,41 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(network, 2);
     }
 
+    /** BBS4 reached from BBS3 by BD or by BE, both open at base, one strategy closing each: BBS4's rows are packed as BD's
+     *  child (its balances on BD's dummy rows), and the pair closing BE alone has BE couple BBS3 and BBS4 on BE's own dummy
+     *  rows, BBS4's balances back on its own rows. */
+    @Test
+    void deadSectionReachedThroughAnotherSwitchStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        network.getVoltageLevel("VL2").getNodeBreakerView().newBreaker().setId("BE").setNode1(0).setNode2(20).setOpen(true).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false),
+                new com.powsybl.action.SwitchAction("closeBE", "BE", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD", com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBE", com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBE")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 3);
+    }
+
+    /** BBS8, out of the network at base, reached from BBS4 by the breaker BF, open: one strategy closing BD and
+     *  BF brings back an island of two sections. BBS8 is BF's child, BF packed between BBS4's rows and BBS8's. */
+    @Test
+    void deadIslandOfTwoSectionsClosedByOneStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        var vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBusbarSection().setId("BBS8").setNode(25).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BF").setNode1(20).setNode2(25).setOpen(true).add();
+        // C open: BBS1 and BBS2 apart, the energized network larger than the dead one (its component the largest)
+        network.getSwitch("C").setOpen(true);
+        assertSwitchClosesMatchCpu(network, List.of("BD", "BF"));
+    }
+
     /** A shunt SH7 at BBS7, beyond LX: closing BD brings it back with BBS7, its term on BBS7's rows past OLF's. */
     @Test
     void shuntBeyondALineCloseStrategyBatchMatchesCpu() {

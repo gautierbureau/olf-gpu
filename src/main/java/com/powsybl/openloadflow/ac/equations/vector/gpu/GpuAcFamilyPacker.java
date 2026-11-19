@@ -391,7 +391,7 @@ final class GpuAcFamilyPacker {
                 int dpRow = dummyPCol[br.getNum()];
                 int distrQRow = dummyQCol[br.getNum()];
                 if (b1 != null && b2 != null && (b1.isDisabled() || b2.isDisabled()) && dpRow >= 0 && distrQRow >= 0
-                        && deadBusRows.packable(br) && (deadBusRows.switchOf(b1) == br || deadBusRows.switchOf(b2) == br)) {
+                        && deadBusRows.packable(br)) {
                     packClosingSwitch(br, deadBusRows, columns, baseOpenZeroImpedanceBranches, zeroImpedanceBranchParameters,
                             baseOpenZeroImpedanceBranchNums, zeroImpedanceBranchNums, zeroImpedanceBranchIndices,
                             zeroImpedanceBranchAlternateReactiveDestination);
@@ -440,7 +440,8 @@ final class GpuAcFamilyPacker {
 
     /**
      * The switch a strategy closes onto a bus of an island with rows past OLF's (DeadBusRows), packed base-open as a
-     * coupler-tree edge whose CHILD is that bus: the bus's balances on the switch's DUMMY_P / DUMMY_Q rows (where every
+     * coupler-tree edge whose CHILD is that bus when it is the bus's switch (DeadBusRows#switchOf; otherwise packed plain,
+     * its ZERO_PHI / ZERO_V on its own dummy rows): the bus's balances on the switch's DUMMY_P / DUMMY_Q rows (where every
      * element at the bus puts them, see pRowOf), the switch's ZERO_PHI / ZERO_V on the bus's own rows. The coupler-tree
      * relocation's layout, so every row keeps a diagonal: while the switch is open the dummy rows are DUMMY_TARGET
      * identities and the bus's rows fixed; the pair closing it makes all four equations (ActionSeed).
@@ -452,7 +453,8 @@ final class GpuAcFamilyPacker {
                                           List<int[]> zeroImpedanceBranchAlternateReactiveDestination) {
         LfBus b1 = br.getBus1();
         LfBus b2 = br.getBus2();
-        int childSide = deadBusRows.switchOf(b1) == br ? GpuTwoSides.ONE : GpuTwoSides.TWO;
+        int childSide = deadBusRows.switchOf(b1) == br ? GpuTwoSides.ONE
+                : deadBusRows.switchOf(b2) == br ? GpuTwoSides.TWO : GpuTwoSides.NONE;    // NONE: its bus is another switch's child
         baseOpenZeroImpedanceBranches.add(zeroImpedanceBranchParameters.size());
         baseOpenZeroImpedanceBranchNums.add(br.getNum());
         zeroImpedanceBranchNums.add(br.getNum());

@@ -1096,6 +1096,30 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertSwitchClosesMatchCpu(network, List.of("BD", "BF"));
     }
 
+    /** BBS9, with a load, hangs on BBS3 by the breaker BG; the dead BBS4 (and BBS7 beyond LX) is reached from BBS9 by BH, open.
+     *  The contingency opens BG, cutting BBS9 off; the strategy closes BG back and BH: the island joins a bus the same pair
+     *  brings back. */
+    @Test
+    void deadIslandJoiningABusThePairBringsBackStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        var vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBusbarSection().setId("BBS9").setNode(30).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BG").setNode1(0).setNode2(30).setOpen(false).add();
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(30).setNode2(31).add();
+        vl2.newLoad().setId("LD9").setNode(31).setP0(4).setQ0(1).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BH").setNode1(30).setNode2(20).setOpen(true).add();
+        network.getSwitch("C").setOpen(true);   // the energized network the largest component
+        List<Contingency> contingencies = List.of(new Contingency("BG", new com.powsybl.contingency.SwitchContingency("BG")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBG", "BG", false),
+                new com.powsybl.action.SwitchAction("closeBH", "BH", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sClose", com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBG", "closeBH")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
     /** A shunt SH7 at BBS7, beyond LX: closing BD brings it back with BBS7, its term on BBS7's rows past OLF's. */
     @Test
     void shuntBeyondALineCloseStrategyBatchMatchesCpu() {

@@ -246,13 +246,15 @@ public final class GpuBatchQualification {
             int strategySep = c.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP);
             if (strategySep < 0) {
                 pb.islandedByContingency.put(c.contingencyId(), islandedHere);
-                pb.openedByContingency.put(c.contingencyId(), c.outagedBranches());
+                List<LfBranch> opened = new java.util.ArrayList<>(c.outagedBranches());
+                opened.addAll(c.outagedZeroImpedanceBranches());     // a switch it opens: the pair may close it back
+                pb.openedByContingency.put(c.contingencyId(), opened);
             } else {
                 String parentId = c.contingencyId().substring(0, strategySep);
                 Set<Integer> parentIslanded = pb.islandedByContingency.getOrDefault(parentId, Set.of());
                 Set<Integer> reclosedEnds = new java.util.HashSet<>();
                 for (LfBranch b : pb.openedByContingency.getOrDefault(parentId, List.of())) {
-                    if (!c.outagedBranches().contains(b)) {
+                    if (!c.outagedBranches().contains(b) && !c.outagedZeroImpedanceBranches().contains(b)) {
                         if (b.getBus1() != null) {
                             reclosedEnds.add(b.getBus1().getNum());
                         }

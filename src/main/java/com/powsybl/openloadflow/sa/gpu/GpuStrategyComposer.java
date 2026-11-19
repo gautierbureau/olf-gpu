@@ -599,8 +599,9 @@ final class GpuStrategyComposer {
     /**
      * An island holding an impedant branch, a shunt or a branch open at one side, with OLF's own equations on the device rows
      * past OLF's (DeadBusRows): every bus of the island has rows, every switch closed into it or inside it is packed (a
-     * switch's child has its balances on the switch's dummy rows while the pair closes that switch, DeadBusRows#switchOf),
-     * and what it joins in the network is there after the contingency.
+     * switch's child has its balances on the switch's dummy rows while the pair closes that switch, DeadBusRows#switchOf).
+     * It may join a bus the pair brings back too (a switch the contingency opened, closed again): the plan holds such a
+     * pair to the buses its recloses bring back (PAIR:RECLOSE_INTO_ISLAND).
      * The pair closes the switches and the island's impedant branches, and the slot turns the rows into equations (ActionSeed).
      * Its buses carry no injection (refusedIslandBus).
      */
@@ -619,9 +620,6 @@ final class GpuStrategyComposer {
                 continue;                                    // a contingency's outage the actions put back
             }
             LfBus outside = in1 && in2 ? null : (in1 ? b.getBus2() : b.getBus1());
-            if (outside != null && broughtBack.buses().contains(outside)) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_JOINS_A_BUS_BROUGHT_BACK";
-            }
             if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 // a switch between two buses of the island is packed when it holds one of them as its child (a strategy's
                 // switch between two dead sections); one onto a bus another switch holds is packed plain (its ZERO_PHI /

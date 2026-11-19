@@ -40,6 +40,10 @@ namespace olfgpu {
 // is the BUS_V variable itself, so its sensitivity is dx at the pilot row.
 constexpr double SECONDARY_VOLTAGE_CONTROL_DV_EPS = 1e-4;                          // OLF DV_EPS (0.1 kV)
 constexpr double SECONDARY_VOLTAGE_CONTROL_DK_DIFF_MAX_EPS = 1e-3;                 // OLF DK_DIFF_MAX_EPS (1 MVar)
+constexpr double SECONDARY_VOLTAGE_CONTROL_K_SATURATION_EPS = 5e-2;               // OLF K_SATURATION_EPS
+constexpr double SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_KV = 2;        // OLF MAX_TARGET_VOLTAGE_STEP_KV
+constexpr double SECONDARY_VOLTAGE_CONTROL_MIN_PROGRESS_RATIO = 1e-2;             // OLF MIN_PROGRESS_RATIO
+constexpr int SECONDARY_VOLTAGE_CONTROL_MAX_NO_PROGRESS_COUNT = 2;                // OLF MAX_NO_PROGRESS_COUNT
 
 struct SecondaryVoltageControlTables {
     int nControllerBuses, nZones, nReactiveLimitEntries;
@@ -49,6 +53,8 @@ struct SecondaryVoltageControlTables {
     const int* zoneStart; const int* zoneControllerBus; const int* zonePilotBusVRow; const double* zoneTargetV;
     double* controlledBusTargetV; double* k0; double* jk; double* jvpp; double* secondaryVoltageControlReactiveLimitTargetV;
     char* controllerBusEnabled; char* needsAdjustment; char* rejected;
+    const double* controlledBusNominalV;
+    double* zoneLastPilotDv; double* zoneLastDk; int* zoneNoProgress; char* zoneStalled;
     double minPlausibleV, maxPlausibleV;
 };
 
@@ -99,6 +105,7 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
     double pilotDv = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotBusVRow[z]];
     double kMin = 1e300;
     double kMax = -1e300;
+    double kSum = 0.0;
     bool allAbove = true;
     bool allBelow = true;
     for (int k = lo; k < hi; k++) {
@@ -108,6 +115,7 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
         T.k0[(size_t) s * T.nControllerBuses + c] = kk;
         kMin = fmin(kMin, kk);
         kMax = fmax(kMax, kk);
+        kSum += kk;
         allAbove &= kk > 1.0;
         allBelow &= kk < -1.0;
         T.controllerBusEnabled[(size_t) s * T.nControllerBuses + c] = secondaryVoltageControlControllerAtLimit(T, limitType, s, c) ? 0 : 1;
@@ -122,8 +130,55 @@ __global__ void secondaryVoltageControlTriggerBatch(SecondaryVoltageControlTable
         if (T.controllerBusEnabled[(size_t) s * T.nControllerBuses + T.zoneControllerBus[k]]) nEnabled++;
     }
     bool allAtLimits = allAbove || allBelow;
-    if (nEnabled > 0 && (fabs(pilotDv) > SECONDARY_VOLTAGE_CONTROL_DV_EPS || (!allAtLimits && fabs(kMax - kMin) > SECONDARY_VOLTAGE_CONTROL_DK_DIFF_MAX_EPS))) {
+    if (nEnabled == 0) {
+        return;
+    }
+    // OLF processSecondaryVoltageControl: a zone given up as stalled is not looked at again in this load flow (its
+    // controllers stay in the zone system the other zones' adjustment solves)
+    size_t zs = (size_t) s * T.nZones + z;
+    if (T.zoneStalled[zs]) {
+        return;
+    }
+    double kAverage = kSum / (hi - lo);
+    double dkDiffMax = kMax - kMin;
+    // OLF shouldAdjustSecondaryVoltageControl: the pilot deadband only where the zone's average k leaves room in the
+    // direction the pilot needs, and once the pilot target is reached, the k alignment only short of saturation
+    bool adjust;
+    if (fabs(pilotDv) > SECONDARY_VOLTAGE_CONTROL_DV_EPS) {
+        adjust = (pilotDv > 0 && kAverage < 1 - SECONDARY_VOLTAGE_CONTROL_K_SATURATION_EPS)
+                || (pilotDv < 0 && kAverage > -1 + SECONDARY_VOLTAGE_CONTROL_K_SATURATION_EPS);
+    } else if (allAtLimits) {
+        adjust = false;
+    } else if (kAverage <= -1 + SECONDARY_VOLTAGE_CONTROL_K_SATURATION_EPS || kAverage >= 1 - SECONDARY_VOLTAGE_CONTROL_K_SATURATION_EPS) {
+        adjust = false;
+    } else {
+        adjust = fabs(dkDiffMax) > SECONDARY_VOLTAGE_CONTROL_DK_DIFF_MAX_EPS;
+    }
+    if (!adjust) {
+        // the zone does not need to be adjusted anymore: its progress tracking starts again
+        T.zoneLastPilotDv[zs] = NAN;
+        T.zoneLastDk[zs] = NAN;
+        T.zoneNoProgress[zs] = 0;
+        return;
+    }
+    // OLF isStalled: the zone's error must decrease by MIN_PROGRESS_RATIO from one adjustment to the next, on the pilot
+    // point dv or on the k spread; MAX_NO_PROGRESS_COUNT adjustments in a row without progress give the zone up
+    double previousPilotDv = T.zoneLastPilotDv[zs];
+    double previousDk = T.zoneLastDk[zs];
+    double pilotDvAbs = fabs(pilotDv);
+    T.zoneLastPilotDv[zs] = pilotDvAbs;
+    T.zoneLastDk[zs] = dkDiffMax;
+    if (isnan(previousPilotDv) || pilotDvAbs < previousPilotDv * (1 - SECONDARY_VOLTAGE_CONTROL_MIN_PROGRESS_RATIO)
+            || dkDiffMax < previousDk * (1 - SECONDARY_VOLTAGE_CONTROL_MIN_PROGRESS_RATIO)) {
+        T.zoneNoProgress[zs] = 0;
         T.needsAdjustment[s] = 1;
+        return;
+    }
+    int count = ++T.zoneNoProgress[zs];
+    if (count < SECONDARY_VOLTAGE_CONTROL_MAX_NO_PROGRESS_COUNT) {
+        T.needsAdjustment[s] = 1;
+    } else {
+        T.zoneStalled[zs] = 1;
     }
 }
 
@@ -256,9 +311,9 @@ __global__ void secondaryVoltageControlPointersBatch(int nScenarios, int nC, dou
     rhsPtr[s] = rhs + (size_t) s * nC;
 }
 
-// After the batched solve: OLF's plausibility test on the new targets, then commit. A singular zone
-// system (cuBLAS info != 0) or an implausible target sends the scenario to the CPU, which is where
-// OLF's own MatrixException / FAILED verdict would land it.
+// After the batched solve: OLF clips each controlled bus's target voltage step to MAX_TARGET_VOLTAGE_STEP_KV, and the new
+// target to the plausible range, then commits. A singular zone system (cuBLAS info != 0) sends the scenario to the CPU,
+// which is where OLF's own MatrixException would land it.
 __global__ void secondaryVoltageControlCommitBatch(SecondaryVoltageControlTables T, int nScenarios, const char* outerLoopCheckActive,
                                const int* info, const double* rhs, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
@@ -269,18 +324,24 @@ __global__ void secondaryVoltageControlCommitBatch(SecondaryVoltageControlTables
         return;
     }
     const double* dv = rhs + (size_t) s * nC;
-    for (int i = 0; i < nC; i++) {
-        if (!T.controllerBusEnabled[(size_t) s * nC + i]) continue;
-        double nt = T.controlledBusTargetV[(size_t) s * nC + i] + dv[i];
-        if (!(nt >= T.minPlausibleV && nt <= T.maxPlausibleV)) {
-            T.rejected[s] = 1;
-            return;
-        }
-    }
     bool moved = false;
     for (int i = 0; i < nC; i++) {
         if (!T.controllerBusEnabled[(size_t) s * nC + i]) continue;
-        T.controlledBusTargetV[(size_t) s * nC + i] += dv[i];
+        double nominalV = T.controlledBusNominalV[i];
+        double step = dv[i];
+        double stepKv = step * nominalV;                     // OLF clipTargetVoltageChange
+        if (stepKv > SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_KV) {
+            step = SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_KV / nominalV;
+        } else if (stepKv < -SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_KV) {
+            step = -SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_KV / nominalV;
+        }
+        double nt = T.controlledBusTargetV[(size_t) s * nC + i] + step;
+        if (nt < T.minPlausibleV) {                          // OLF clipTargetVoltageToPlausibleRange
+            nt = T.minPlausibleV;
+        } else if (nt > T.maxPlausibleV) {
+            nt = T.maxPlausibleV;
+        }
+        T.controlledBusTargetV[(size_t) s * nC + i] = nt;
         moved = true;
     }
     if (moved) {
@@ -323,6 +384,9 @@ static SecondaryVoltageControlTables secondaryVoltageControlTables(BatchSolverCo
     T.jk = ctx->dSecondaryVoltageControlJk.as<double>(); T.jvpp = ctx->dSecondaryVoltageControlJvpp.as<double>(); T.secondaryVoltageControlReactiveLimitTargetV = ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>();
     T.controllerBusEnabled = ctx->dSecondaryVoltageControlControllerBusEnabled.as<char>(); T.needsAdjustment = ctx->dSecondaryVoltageControlNeedsAdjustment.as<char>(); T.rejected = ctx->dSecondaryVoltageControlRejected.as<char>();
     T.minPlausibleV = ctx->secondaryVoltageControlMinPlausibleTargetV; T.maxPlausibleV = ctx->secondaryVoltageControlMaxPlausibleTargetV;
+    T.controlledBusNominalV = ctx->dSecondaryVoltageControlControlledBusNominalV.as<double>();
+    T.zoneLastPilotDv = ctx->dSecondaryVoltageControlZoneLastPilotDv.as<double>(); T.zoneLastDk = ctx->dSecondaryVoltageControlZoneLastDk.as<double>();
+    T.zoneNoProgress = ctx->dSecondaryVoltageControlZoneNoProgress.as<int>(); T.zoneStalled = ctx->dSecondaryVoltageControlZoneStalled.as<char>();
     return T;
 }
 
@@ -334,6 +398,12 @@ void secondaryVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass&) {
     resetInstalledRows(ctx, ctx->dSecondaryVoltageControlNeedsAdjustment.as<char>(), 1, nullptr, char(0));
     resetInstalledRows(ctx, ctx->dSecondaryVoltageControlRejected.as<char>(), 1, nullptr, char(0));
     resetInstalledRows(ctx, ctx->dSecondaryVoltageControlControllerBusEnabled.as<char>(), nc, nullptr, char(1));
+    // OLF's ContextData is created per load flow (SecondaryVoltageControlOuterLoop.initialize)
+    const size_t nz = static_cast<size_t>(ctx->nSecondaryVoltageControlZones);
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlZoneLastPilotDv.as<double>(), nz, nullptr, std::nan(""));
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlZoneLastDk.as<double>(), nz, nullptr, std::nan(""));
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlZoneNoProgress.as<int>(), nz, nullptr, 0);
+    resetInstalledRows(ctx, ctx->dSecondaryVoltageControlZoneStalled.as<char>(), nz, nullptr, char(0));
 }
 
 void secondaryVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {

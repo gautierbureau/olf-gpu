@@ -69,8 +69,8 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      *  ever switches to PQ), {@code controlledBusVRow} the CONTROLLED bus's BUS_TARGET_V row (the
      *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
      *  CONTROLLED bus's VC target). Local control collapses the two. */
-    public record ControllerBus(int vRow, int controlledBusVRow, int controlledBusNum, int reactiveLimitEntry, double baseTargetV, double minQ, double maxQ,
-                  double loadTargetQ, List<ReactiveTerm> reactiveTerms) {
+    public record ControllerBus(int vRow, int controlledBusVRow, int controlledBusNum, int reactiveLimitEntry, double baseTargetV,
+                  double controlledBusNominalV, double minQ, double maxQ, double loadTargetQ, List<ReactiveTerm> reactiveTerms) {
     }
 
     public record Zone(int pilotVRow, double pilotTargetV, int[] controllerBuses) {
@@ -173,7 +173,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
                 }
                 zoneControllerBuses.add(controllerBuses.size());
                 controllerBuses.add(new ControllerBus(vRow, controlledBusVRow, voltageControl.getControlledBus().getNum(), reactiveLimitEntry, voltageControl.getTargetValue(),
-                        controller.getMinQ(), controller.getMaxQ(),
+                        voltageControl.getControlledBus().getNominalV(), controller.getMinQ(), controller.getMaxQ(),
                         controller.getLoadTargetQ(), reactiveTerms));
             }
             if (zoneControllerBuses.isEmpty()) {
@@ -231,7 +231,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
      *  inside the sweep at OLF's position, with no host round trip and no orchestrator after it. */
     public static boolean uploadToDevice(long handle, Controllers controllers) {
         if (controllers == null || controllers.controllerBuses().isEmpty() || controllers.zones().isEmpty()) {
-            SecondaryVoltageControlNative.setBatchSecondaryVoltageControl(handle, null, null, null, null, null, null, null,
+            SecondaryVoltageControlNative.setBatchSecondaryVoltageControl(handle, null, null, null, null, null, null, null, null,
                     null, null, null, null, null, null, null, null, null, 0, 0);
             return false;
         }
@@ -241,6 +241,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         int[] busVRow = new int[nControllerBuses];
         int[] reactiveLimitEntry = new int[nControllerBuses];
         double[] baseTargetV = new double[nControllerBuses];
+        double[] controlledBusNominalV = new double[nControllerBuses];
         double[] minQ = new double[nControllerBuses];
         double[] maxQ = new double[nControllerBuses];
         double[] loadQ = new double[nControllerBuses];
@@ -255,6 +256,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
             busVRow[c] = controllerBus.vRow();
             reactiveLimitEntry[c] = controllerBus.reactiveLimitEntry();
             baseTargetV[c] = controllerBus.baseTargetV();
+            controlledBusNominalV[c] = controllerBus.controlledBusNominalV();
             minQ[c] = controllerBus.minQ();
             maxQ[c] = controllerBus.maxQ();
             loadQ[c] = controllerBus.loadTargetQ();
@@ -283,7 +285,7 @@ public final class GpuSecondaryVoltageControlOuterLoop {
         }
         zoneStart[nZones] = zoneControllerBus.size();
         boolean owned = SecondaryVoltageControlNative.setBatchSecondaryVoltageControl(handle, controlledBusVRow, busVRow, reactiveLimitEntry, baseTargetV,
-                minQ, maxQ, loadQ, qPtr,
+                controlledBusNominalV, minQ, maxQ, loadQ, qPtr,
                 reactiveTermKind.stream().mapToInt(Integer::intValue).toArray(),
                 reactiveTermSide.stream().mapToInt(Integer::intValue).toArray(),
                 reactiveTermElement.stream().mapToInt(Integer::intValue).toArray(),

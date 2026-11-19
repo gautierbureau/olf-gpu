@@ -147,9 +147,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters distributedSlackParameters = config.distributedSlackParameters();
+        // the dead buses a strategy may bring back (DeadBusRows): their branches packed between their rows
+        var deadBusRows = request.deadBusRows();
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZeroImpedanceBranchIds.isEmpty()
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlackParameters)
-                : GpuAcDataExtractor.extract(network, equationSystem, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters);
+                : GpuAcDataExtractor.extract(network, equationSystem, baseOpenIds, baseOpenZeroImpedanceBranchIds, distributedSlackParameters,
+                        deadBusRows);
         // the participants' anchors before any solve: a contingency's generator moves are read from there
         String[] distributedSlackGeneratorIds = gpuData.distributedSlack() != null && gpuData.distributedSlack().generatorId() != null
                 ? gpuData.distributedSlack().generatorId() : new String[0];
@@ -169,13 +172,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 LOGGER.warn("OLF_GPU_SA_EQ_DUMP failed: {}", e.toString());
             }
         }
-        GpuAcElementMapper elementMapper = new GpuAcElementMapper(network, baseOpenIds);
+        GpuAcElementMapper elementMapper = new GpuAcElementMapper(network, baseOpenIds, deadBusRows);
 
         int n = baseState.length;
         double[] baseTargets = baseActivation.applyTargets(targetVector.getArray());
         // the dead buses' rows past OLF's (DeadBusRows): fixed variables at their start values, a diagonal each
-        var deadBusRows = request.deadBusRows();
-        if (!deadBusRows.isEmpty()) {
+        if (!deadBusRows.buses().isEmpty()) {
             if (n != deadBusRows.rowCount()) {
                 throw new IllegalStateException("base state of " + n + " rows, " + deadBusRows.rowCount() + " expected");
             }
@@ -280,12 +282,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
             // context's thresholds, since contexts survive across runs).
-            double[][] rowCriteria = config.perEqCriteria() != null
-                    ? GpuAcActivationExtractor.extractRowCriteria(network, equationSystem, baseActivation, n,
-                            config.perEqCriteria().p(), config.perEqCriteria().q(), config.perEqCriteria().v(),
-                            config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
-                            config.perEqCriteria().eps())
-                    : null;
+            double[][] rowCriteria = rowCriteria(network, equationSystem, baseActivation, n, config, deadBusRows, gpuData);
             // Every phase's tables, built by the SAME function the base load flow calls (#58): a phase
             // added there reaches both routes or neither.
             DevicePhases.Built phases = DevicePhases.build(new DevicePhases.Request(
@@ -306,7 +303,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (DevicePhaseOwnership.batchable()) {
                 // built in the order the call evaluated them when they were its arguments
                 var hvdcElemIndex = GpuHvdcAcEmulationLimitsOuterLoop.elementIndices(network, nElements);
-                int[] varType = config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
+                int[] varType = varType(equationSystem, n, config, deadBusRows);
                 // every AC emulation link of the pack, whichever of its loops the run names: the slack check counts a link's
                 // flow at the slack bus from these tables (hvdcSlackBalanceBatch), with or without a loop to freeze or limit
                 // it, which an explicit loop list may leave out (measured: 2.6 MW distributed on a 2.4 MW link where OLF
@@ -399,5 +396,58 @@ public final class GpuBatchedSecurityAnalysisSolver {
     }
 
     private GpuBatchedSecurityAnalysisSolver() {
+    }
+
+    /**
+     * The PER_EQUATION_TYPE stopping thresholds per row (null under UNIFORM_CRITERIA - the chunk solver then CLEARS the
+     * cached context's thresholds, since contexts survive across runs). The rows past OLF's (DeadBusRows) get those
+     * GpuAcActivationExtractor gives a bus's own rows: its BUS_PHI row the angle threshold as a fixed variable and the
+     * active power one as its balance, its BUS_V row the voltage threshold and the reactive power one (power in per unit);
+     * a closing switch's child holds the switch's ZERO_PHI / ZERO_V there (angle and voltage thresholds) and its balances
+     * on the switch's dummy rows.
+     */
+    @SuppressWarnings("java:S107")
+    private static double[][] rowCriteria(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                          GpuAcActivation baseActivation, int n, BatchConfig config,
+                                          com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows, GpuAcData gpuData) {
+        var criteria = config.perEqCriteria();
+        if (criteria == null) {
+            return null;
+        }
+        double[][] rowCriteria = GpuAcActivationExtractor.extractRowCriteria(network, equationSystem, baseActivation, n,
+                criteria.p(), criteria.q(), criteria.v(), criteria.angle(), criteria.ratio(), criteria.b(), criteria.eps());
+        for (var bus : deadBusRows.buses()) {
+            int phi = deadBusRows.phiRow(bus);
+            int v = deadBusRows.vRow(bus);
+            rowCriteria[0][phi] = criteria.angle();
+            rowCriteria[0][v] = criteria.v();
+            var closing = deadBusRows.switchOf(bus);
+            Integer ze = closing == null ? null : gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum().get(closing.getNum());
+            if (ze == null) {
+                rowCriteria[1][phi] = criteria.p() / 100.0;
+                rowCriteria[1][v] = criteria.q() / 100.0;
+            } else {
+                rowCriteria[1][phi] = criteria.angle();                      // ZERO_PHI
+                rowCriteria[1][v] = criteria.v();                            // ZERO_V
+                rowCriteria[1][gpuData.zeroImpedanceBranch().indices()[ze * 11 + 4]] = criteria.p() / 100.0;
+                rowCriteria[1][gpuData.zeroImpedanceBranch().indices()[ze * 11 + 5]] = criteria.q() / 100.0;
+            }
+        }
+        return rowCriteria;
+    }
+
+    /** Each row's variable type under MAX_VOLTAGE_CHANGE (null otherwise), the rows past OLF's (DeadBusRows) their bus's
+     *  BUS_PHI and BUS_V: a bus brought back moves as OLF's limits it. */
+    private static int[] varType(EquationSystem<AcVariableType, AcEquationType> equationSystem, int n, BatchConfig config,
+                                 com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        if (config.stateVectorScalingMode() != GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
+            return null;
+        }
+        int[] varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
+        for (var bus : deadBusRows.buses()) {
+            varType[deadBusRows.phiRow(bus)] = AcVariableType.BUS_PHI.ordinal();
+            varType[deadBusRows.vRow(bus)] = AcVariableType.BUS_V.ordinal();
+        }
+        return varType;
     }
 }

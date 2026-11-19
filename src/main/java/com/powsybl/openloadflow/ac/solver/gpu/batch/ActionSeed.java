@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.ShuntShift;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.TapR1Override;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 
 import java.util.List;
 
@@ -35,6 +36,7 @@ final class ActionSeed {
         final GpuAcElementMapper elementMapper = ctx.elementMapper();
         final GpuAcData gpuData = ctx.gpuData();
         final RunScratch rs = ctx.rs();
+        java.util.Set<LfBus> broughtBack = new java.util.HashSet<>();
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
             if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(reclosed.getNum());
@@ -48,6 +50,11 @@ final class ActionSeed {
                 rs.rowModes.set(s, distrQRow, GpuRowMode.EQUATION);
             } else {
                 rs.disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
+            }
+            for (LfBus end : java.util.Arrays.asList(reclosed.getBus1(), reclosed.getBus2())) {
+                if (end != null && ctx.deadBusRows().phiRow(end) >= 0 && broughtBack.add(end)) {
+                    bringBack(ctx, s, end);
+                }
             }
         }
         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
@@ -63,5 +70,36 @@ final class ActionSeed {
             rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.deltaG());
             rs.shuntAdmittanceOverrideDeltaList.add(shuntShift.deltaB());
         }
+    }
+
+    /**
+     * A bus out of the network at base that the slot's actions bring back across the branches they close (DeadBusRows): its
+     * BUS_PHI and BUS_V rows past OLF's become equations, and OLF's equation count takes its two balances (a closing
+     * switch's ZERO_PHI and ZERO_V take the place of its DUMMY_TARGET identities, same count). The bus's balances are at
+     * OLF's bus targets on its own rows, or on its closing switch's DUMMY_P / DUMMY_Q rows when it is that switch's child,
+     * its own rows then holding the switch's ZERO_PHI / ZERO_V at 0 (a switch: no ratio, no phase shift). The rows start
+     * where every lane holds them, at OLF's start values.
+     */
+    private static void bringBack(SlotSeeding ctx, int s, LfBus bus) {
+        final RunScratch rs = ctx.rs();
+        final int n = ctx.n();
+        int phiRow = ctx.deadBusRows().phiRow(bus);
+        int vRow = ctx.deadBusRows().vRow(bus);
+        rs.rowModes.set(s, phiRow, GpuRowMode.EQUATION);
+        rs.rowModes.set(s, vRow, GpuRowMode.EQUATION);
+        LfBranch closing = ctx.deadBusRows().switchOf(bus);
+        if (closing != null) {
+            Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(closing.getNum());
+            int dpRow = ctx.gpuData().zeroImpedanceBranch().indices()[ze * 11 + 4];
+            int distrQRow = ctx.gpuData().zeroImpedanceBranch().indices()[ze * 11 + 5];
+            rs.overrides.add(s * n + dpRow, bus.getTargetP());
+            rs.overrides.add(s * n + distrQRow, bus.getTargetQ());
+            rs.overrides.add(s * n + phiRow, 0);
+            rs.overrides.add(s * n + vRow, 0);
+        } else {
+            rs.overrides.add(s * n + phiRow, bus.getTargetP());
+            rs.overrides.add(s * n + vRow, bus.getTargetQ());
+        }
+        ctx.cl().nActive[s] += 2;
     }
 }

@@ -46,6 +46,12 @@ public class GpuAcElementMapper {
     /** Batch-SA flavor: BASE-OPEN closable branches (see the extractor's matching overload) are
      *  appended AFTER the normal closed branches — identical enumeration on both sides. */
     public GpuAcElementMapper(LfNetwork network, java.util.Set<String> baseOpenBranchIds) {
+        this(network, baseOpenBranchIds, DeadBusRows.none());
+    }
+
+    /** As above, a base-open branch of an island a strategy may bring back taken as the extractor packs it
+     *  (DeadBusRows#packable). */
+    public GpuAcElementMapper(LfNetwork network, java.util.Set<String> baseOpenBranchIds, DeadBusRows deadBusRows) {
         Objects.requireNonNull(network);
         this.branchToElementIndex = new HashMap<>();
         List<LfBranch> closedBranches = new ArrayList<>();
@@ -72,7 +78,7 @@ public class GpuAcElementMapper {
                 if (branch.isDisabled() && baseOpenBranchIds.contains(branch.getId())
                         && !branch.isZeroImpedance(LoadFlowModel.AC)
                         && branch.getBus1() != null && branch.getBus2() != null
-                        && !branch.getBus1().isDisabled() && !branch.getBus2().isDisabled()) {
+                        && deadBusRows.packable(branch)) {
                     closedBranches.add(branch);
                 }
             }

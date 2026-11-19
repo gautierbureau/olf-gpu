@@ -195,7 +195,7 @@ final class GpuBatchPrecomputer {
                 SolveGroup group = groups.get(g);
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
                         group.withoutStrategies().contains(contingencyId) ? List.of() : strategiesByContingency.get(contingencyId),
-                        group.settings().config(), actions, pairsOnViolations);
+                        group.settings().config(), actions, pairsOnViolations, deadBusRows);
             }
             int batchSize = batches.stream().mapToInt(List::size).sum();
             if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -372,7 +372,7 @@ final class GpuBatchPrecomputer {
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
                     handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
-                    limitTable, violationScreen, handback != null ? handback.possibleTypes : Map.of());
+                    limitTable, violationScreen, handback != null ? handback.possibleTypes : Map.of(), deadBusVariableRows(es, deadBusRows));
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
@@ -404,7 +404,8 @@ final class GpuBatchPrecomputer {
                                           final List<BatchContingency> batch,
                                           final List<OperatorStrategy> strategies, final BatchConfig config,
                                           final List<Action> actions,
-                                          final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations) {
+                                          final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations,
+                                          final com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, propagatedContingency);
         List<LfGenerator> gens = propagatedContingency.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net,
                                                           propagatedContingency, lostLfBusIds);
@@ -541,7 +542,7 @@ final class GpuBatchPrecomputer {
                 for (List<String> actionIds : GpuStrategyComposer.candidateActionLists(strategy)) {
                     BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, propagatedContingency.getContingency().getId(), strategy, actionIds, actions,
                             zeroImpedanceBranchOutages, branches, gens, loads, propagatedContingency.getLoadIdsToLose().keySet(), shifts, hvdcs,
-                            sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt);
+                            sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt, deadBusRows);
                     if (pair == null) {
                         GpuBatchScopeCensus.record("PAIR:COMPOSE_REFUSED");
                     }
@@ -640,11 +641,22 @@ final class GpuBatchPrecomputer {
     static final java.util.concurrent.atomic.AtomicInteger LAST_DEAD_BUS_ROW_COUNT = new java.util.concurrent.atomic.AtomicInteger();
 
     /** The dead buses a strategy's switch close can bring back, with device rows past OLF's (DeadBusRows). */
-    private static com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows(LfNetwork net,
+    private static com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows(LfNetwork net,
             EquationSystem<AcVariableType, AcEquationType> es, List<OperatorStrategy> strategies, List<Action> actions) {
-        var rows = com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows.of(net, es.getIndex().getSortedVariablesToFind().size(),
+        var rows = com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows.of(net, es.getIndex().getSortedVariablesToFind().size(),
                 GpuStrategyComposer.switchClosesOntoDeadBuses(net, strategies, actions));
         LAST_DEAD_BUS_ROW_COUNT.set(rows.rowCount() - rows.olfRowCount());
+        return rows;
+    }
+
+    /** The BUS_PHI and BUS_V variables of the buses with rows past OLF's, with those rows. */
+    private static Map<Variable<AcVariableType>, Integer> deadBusVariableRows(EquationSystem<AcVariableType, AcEquationType> es,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        Map<Variable<AcVariableType>, Integer> rows = new HashMap<>();
+        for (com.powsybl.openloadflow.network.LfBus bus : deadBusRows.buses()) {
+            rows.put(es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI), deadBusRows.phiRow(bus));
+            rows.put(es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V), deadBusRows.vRow(bus));
+        }
         return rows;
     }
 
@@ -655,7 +667,7 @@ final class GpuBatchPrecomputer {
             AcLoadFlowContext context,
             boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
             double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config,
-            com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         if (config.robustSolveMode()) {
             return results;
         }

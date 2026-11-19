@@ -67,6 +67,16 @@ final class GpuStateInjector {
          *  ever removes variables - a disabled bus's V and PHI - and the index sorts both lists the same way), so the
          *  row mapping is a two-pointer merge on REFERENCES, without reading a field of any of the 32k variables. */
         private Variable<AcVariableType>[] baseByRow;
+        /** The variables with rows past OLF's (DeadBusRows): absent from the base, present once a pair's actions
+         *  bring their bus back, read through the keyed map. */
+        private Map<Variable<AcVariableType>, Integer> deadBusVariableRows = Map.of();
+    }
+
+    /** The run's variables with rows past OLF's (PrecomputedBatch#deadBusVariableRows): the keyed map is rebuilt with them. */
+    static void deadBusVariableRows(Remap remap, Map<Variable<AcVariableType>, Integer> rows) {
+        remap.deadBusVariableRows = rows;
+        remap.baseRowKeyed = null;
+        remap.vars = null;
     }
 
     /** Current row -> base row by merging the current sorted list into the base one on reference equality, or null
@@ -93,14 +103,19 @@ final class GpuStateInjector {
         return rows;
     }
 
-    private static int[] buildKeyedBaseRows(Map<Variable<AcVariableType>, Integer> baseVariableRows, int types) {
+    private static int[] buildKeyedBaseRows(Map<Variable<AcVariableType>, Integer> baseVariableRows,
+                                            Map<Variable<AcVariableType>, Integer> deadBusVariableRows, int types) {
         int maxElem = 0;
         for (Variable<AcVariableType> v : baseVariableRows.keySet()) {
+            maxElem = Math.max(maxElem, v.getElementNum());
+        }
+        for (Variable<AcVariableType> v : deadBusVariableRows.keySet()) {
             maxElem = Math.max(maxElem, v.getElementNum());
         }
         int[] keyed = new int[(maxElem + 1) * types];
         java.util.Arrays.fill(keyed, -1);
         baseVariableRows.forEach((v, row) -> keyed[v.getElementNum() * types + v.getType().ordinal()] = row);
+        deadBusVariableRows.forEach((v, row) -> keyed[v.getElementNum() * types + v.getType().ordinal()] = row);
         return keyed;
     }
 
@@ -130,7 +145,7 @@ final class GpuStateInjector {
             }
             if (remap.baseRowKeyed == null) {
                 remap.types = AcVariableType.values().length;
-                remap.baseRowKeyed = buildKeyedBaseRows(baseVariableRows, remap.types);
+                remap.baseRowKeyed = buildKeyedBaseRows(baseVariableRows, remap.deadBusVariableRows, remap.types);
             }
             int[] keyed = remap.baseRowKeyed;
             int types = remap.types;

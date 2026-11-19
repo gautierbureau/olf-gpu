@@ -39,7 +39,7 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
      *  null) and each HVDC's element index. */
     record BaseCase(GpuAcElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
                     int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex,
-                    com.powsybl.openloadflow.ac.solver.gpu.batch.plan.DeadBusRows deadBusRows) {
+                    com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
 
         /** OLF's active equation count of a lane before any of its own changes: the device rows less the dead buses'. */
         int olfRowCount() {

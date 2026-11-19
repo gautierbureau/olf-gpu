@@ -62,12 +62,15 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         /** Per converged contingency the device screened against the base case's violations, the
                          *  types of the violations OLF may report for it (GpuBaseViolations' bits, GpuStateHandback): the
                          *  strategy pairs its violations cannot select were not solved, as OLF never applies them. */
-                        Map<String, Integer> possibleViolationTypes) {
+                        Map<String, Integer> possibleViolationTypes,
+                        /** The variables of the buses with device rows past OLF's (DeadBusRows), with those rows: a pair
+                         *  bringing such a bus back finds its voltage there. */
+                        Map<Variable<AcVariableType>, Integer> deadBusVariableRows) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
         return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of());
     }
 
     /** True when the device converged scenario {@code id}: its full state, or the rows the host answers it with. */

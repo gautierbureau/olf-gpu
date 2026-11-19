@@ -593,7 +593,7 @@ final class GpuBatchChunkSolver {
             cl = new ChunkLists(chunkSize, in.base().olfRowCount(), gpuData, forcedTargetQ, nDistributedSlackGenerators);
             seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
                     plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
-                    curveEntriesByPRow, rs, cl);
+                    curveEntriesByPRow, rs, cl, in.base().deadBusRows());
             rs.resetChunk();
             for (int s = 0; s < chunkSize; s++) {
                 rs.resetSlot(s);

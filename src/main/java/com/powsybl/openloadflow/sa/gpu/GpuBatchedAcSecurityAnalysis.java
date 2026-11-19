@@ -777,6 +777,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return true;
     }
 
+    /** The buses in the network without a row in the base system: those an action brought back from out of the network, in
+     *  bus order. */
+    private static java.util.Set<LfBus> busesWithoutBaseRow(LfNetwork network,
+            com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType, com.powsybl.openloadflow.ac.equations.AcEquationType> equationSystem,
+            Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseVariableRows) {
+        java.util.Set<LfBus> withoutBaseRow = new java.util.LinkedHashSet<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!bus.isDisabled() && !baseVariableRows.containsKey(equationSystem.getVariableSet()
+                    .getVariable(bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V))) {
+                withoutBaseRow.add(bus);
+            }
+        }
+        return withoutBaseRow;
+    }
+
     /**
      * The buses an action brought back from out of the network (GpuStrategyComposer.composeReenergizedIsland) have no row in
      * the device's system: OLF's equation system gives them rows once the actions enabled them, which the injected state,
@@ -785,17 +800,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private static void copyVoltageToReenergizedBuses(LfNetwork network,
             com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType, com.powsybl.openloadflow.ac.equations.AcEquationType> equationSystem,
-            Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseVariableRows) {
-        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>();
-        for (LfBus bus : network.getBuses()) {
-            if (!bus.isDisabled() && !baseVariableRows.containsKey(equationSystem.getVariableSet()
-                    .getVariable(bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V))) {
-                withoutBaseRow.add(bus);
-            }
-        }
-        if (withoutBaseRow.isEmpty()) {
+            java.util.Set<LfBus> reenergized) {
+        if (reenergized.isEmpty()) {
             return;
         }
+        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>(reenergized);
         java.util.ArrayDeque<LfBus> todo = new java.util.ArrayDeque<>();
         for (LfBus bus : network.getBuses()) {
             if (!bus.isDisabled() && !withoutBaseRow.contains(bus)) {
@@ -1036,6 +1045,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
                                   GpuContingencyTopology topology) {
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, fromState, topology,
+                java.util.Set.of());
+    }
+
+    /** As above, the voltages of {@code busesInFull} checked too: buses the screen does not read (no base row), which a
+     *  pair's actions brought back. */
+    @SuppressWarnings("java:S107")
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
+                                  GpuContingencyTopology topology, java.util.Set<LfBus> busesInFull) {
         GpuSaRunState run = runState.get();
         GpuStateView view = fromState != null ? run.stateView : null;
         if (run.limitScanner == null) {
@@ -1072,9 +1092,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 : sideOpenedTableIndices(run, network, contingencyId);
         if (run.violationScreen != null) {
             int[] candidates = run.candidates.get(contingencyId);
-            run.limitScanner.detectFromCandidates(network, manager,
-                    candidates != null ? candidates : run.violationScreen.screen(run.precomputed.states().get(contingencyId),
-                            screenScenario(run, network, contingencyId)),
+            if (candidates == null) {
+                candidates = run.violationScreen.screen(run.precomputed.states().get(contingencyId), screenScenario(run, network, contingencyId));
+            }
+            run.limitScanner.detectFromCandidates(network, manager, GpuLimitScanner.withBuses(run.limitTable, candidates, busesInFull),
                     run.violationScreen, run.uncoveredBranches, sideOpened, view, fromState, topology);
             if (GpuStateViewCheck.comparesDecisions()) {     // the screen against a full scan of the same values
                 var fullScan = new LimitViolationManager(reference, limitScalings,
@@ -1133,6 +1154,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         run.precomputed = GpuBatchPrecomputer.precompute(network, run.lfNetwork, run.context,
                 run.contingencies, run.operatorStrategies, run.actions, groups, leftToCpu, handbackSettings(run, parameters),
                 reportNode);
+        GpuStateInjector.deadBusVariableRows(run.remap, run.precomputed.deadBusVariableRows());
         if (run.precomputed.violationScreen() != null) {     // the scenarios were screened on the device as they came back
             run.limitTable = run.precomputed.limitTable();
             run.limitScanner = new GpuLimitScanner(run.limitTable);
@@ -1336,7 +1358,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, strategyFlowReadSet(runState.get(), scId, contingency.getId(), operatorStrategy, scanInFull));
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
-        copyVoltageToReenergizedBuses(network, precomputed.equationSystem(), precomputed.baseVariableRows());
+        java.util.Set<LfBus> reenergized = busesWithoutBaseRow(network, precomputed.equationSystem(), precomputed.baseVariableRows());
+        copyVoltageToReenergizedBuses(network, precomputed.equationSystem(), reenergized);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
@@ -1346,7 +1369,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
         postActionsNetworkResult.update();
         detectViolations(network, postActionsViolationManager, limitScalings, preContingencyLimitViolationManager,
-                securityAnalysisParameters, scId, scanInFull);
+                securityAnalysisParameters, scId, scanInFull, null, GpuContingencyTopology.NETWORK, reenergized);
         // what restorePostContingencyState must undo: with tap actions only, the retapped branches and the voltages
         List<LfBranch> retapped = new java.util.ArrayList<>();
         for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {

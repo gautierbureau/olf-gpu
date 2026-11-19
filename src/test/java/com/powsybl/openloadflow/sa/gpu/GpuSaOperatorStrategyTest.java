@@ -996,15 +996,19 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
     }
 
-    /** The dead section a strategy's switch may bring back has its device rows past OLF's, one BUS_PHI and one BUS_V row per
-     *  bus, held fixed in every lane: the run matches the CPU with them. */
+    /** The dead buses a strategy's switch may bring back have device rows past OLF's, one BUS_PHI and one BUS_V row each, when
+     *  their island holds an impedant branch (BBS4 and BBS7, joined by LX); a section of switches alone (BBS4 without LX) is
+     *  merged into the switch's bus and has none. */
     @Test
-    void deadSectionGetsDeviceRowsPastOlfs() {
+    void onlyIslandsWithABranchGetRowsPastOlfs() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.set(-1);
         assertDeadSectionCloseMatchesCpu(withDeadSection(true, false), 2);
-        assertEquals(2, GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.get(), "BBS4's bus: its BUS_PHI and BUS_V rows");
+        assertEquals(0, GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.get(), "BBS4 is merged into BBS3: no rows");
+        GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.set(-1);
+        assertDeadSectionCloseMatchesCpu(withDeadSectionAndLine(420.), 2);
+        assertEquals(4, GpuBatchPrecomputer.LAST_DEAD_BUS_ROW_COUNT.get(), "BBS4's and BBS7's BUS_PHI and BUS_V rows");
     }
 
     @Test
@@ -1198,6 +1202,53 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                     .setVoltageRegulatorOn(true).add();
         }
         return network;
+    }
+
+    /** {@link #withDeadSection} without a load or a generator, BBS4 leading by the closed breaker BX and the line LX (with its
+     *  charging) to BBS7, alone in the voltage level VL3 of a substation S3, reached by the closed breaker BY: BBS4 and BBS7
+     *  are out of the network at base, and closing BD brings both back, BBS7 across an impedant branch. */
+    private static Network withDeadSectionAndLine(double vl3HighVoltageLimit) {
+        Network network = withDeadSection(false, false);
+        network.getVoltageLevel("VL2").getNodeBreakerView().newBreaker().setId("BX").setNode1(20).setNode2(24).setOpen(false).add();
+        var vl3 = network.newSubstation().setId("S3").add().newVoltageLevel().setId("VL3").setNominalV(400)
+                .setLowVoltageLimit(370.).setHighVoltageLimit(vl3HighVoltageLimit)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vl3.getNodeBreakerView().newBusbarSection().setId("BBS7").setNode(0).add();
+        vl3.getNodeBreakerView().newBreaker().setId("BY").setNode1(0).setNode2(1).setOpen(false).add();
+        network.newLine().setId("LX").setVoltageLevel1("VL2").setNode1(24).setVoltageLevel2("VL3").setNode2(1)
+                .setR(2).setX(20).setG1(0).setB1(2e-4).setG2(0).setB2(2e-4).add();
+        return network;
+    }
+
+    /** Closing BD brings back BBS4 and BBS7 beyond the line LX: both get their own rows, BD couples BBS3 and BBS4 (BBS4's balances
+     *  on BD's dummy rows, BD's ZERO_PHI / ZERO_V on BBS4's), LX joins BBS4 to BBS7, and the pair matches OLF, BBS7's voltage
+     *  (the line's charging raises it) included. Merged into BBS3 instead, BBS4 started from BBS3's voltage where OLF starts it
+     *  from its own, and the pair converged 5e-4 kV away from OLF's. */
+    @Test
+    void deadBusBeyondALineCloseStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertDeadSectionCloseMatchesCpu(withDeadSectionAndLine(420.), 2);
+    }
+
+    /** BBS7's voltage above its limit after the close: the violation OLF reports at a bus the actions bring back, whose
+     *  voltage the device screen does not read (it has no base row), is found on the host. */
+    @Test
+    void deadBusBeyondALineReportsItsVoltageViolation() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")));
+        var cpu = assertStrategyMatchesCpu(withDeadSectionAndLine(380.), contingencies, strategies, actions, 2);
+        org.junit.jupiter.api.Assertions.assertTrue(cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0)
+                .getLimitViolationsResult()
+                .getLimitViolations().stream().anyMatch(v -> "VL3".equals(v.getSubjectId())
+                        && v.getLimitType() == com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE),
+                "OLF reports BBS7's high voltage: the comparison is not vacuous");
     }
 
     /** OLF's node-breaker network with a third line L3 from BBS1 (breaker B5) to BBS3 (breaker B6): with the coupler C

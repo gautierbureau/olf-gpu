@@ -244,7 +244,8 @@ final class GpuStrategyComposer {
                                                     List<BatchContingency.SideOpen> ctgSideOpens,
                                                     List<LfBranch> contingencyStickyNonSpanningTreeBranches,
                                                     com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
-                                                    com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType) {
+                                                    com.powsybl.loadflow.LoadFlowParameters.BalanceType balanceType,
+                                                    com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
         List<LfBranch> zeroImpedanceOutages = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
         List<LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
@@ -452,7 +453,8 @@ final class GpuStrategyComposer {
         ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));
         composeLoopCloses(loopCloses, zeroImpedanceOutages, reclosed);
         if (!deadIslandCloses.isEmpty()) {
-            String islandRefusal = composeReenergizedIsland(net, ctgCut, deadIslandCloses, reenabled, opened, loads, reclosed);
+            String islandRefusal = composeReenergizedIsland(net, ctgCut, deadIslandCloses, reenabled, opened, loads, reclosed,
+                    deadBusRows);
             if (islandRefusal != null) {
                 return refused(islandRefusal);
             }
@@ -519,16 +521,18 @@ final class GpuStrategyComposer {
     /**
      * The buses out of the network that switches closing onto them bring back, composed onto the pair. OLF enables every bus and
      * branch the actions add to the main component (AbstractLfBranchAction.getNetworkActivations), so the island is the
-     * one its connectivity finds, linked by zero-impedance branches alone. Hanging on one bus of the network, it is then the
-     * same electrical node as that bus, whose balance takes the island's injections (OLF's bus targets, as LoadLoss carries a
-     * load removed). Reached through the two switches of a dead-section coupler (DeadSectionCouplers), it couples their two
-     * buses: the pair closes the coupler's carrier, and the coupled node takes the injections. Its buses have no rows on the
-     * device; their voltage is the node's (GpuBatchedAcSecurityAnalysis.copyVoltageToReenergizedBuses). Any other shape: the
-     * reason, and the CPU.
+     * one its connectivity finds. Linked by zero-impedance branches alone, hanging on one bus of the network, it is that
+     * bus's electrical node, whose balance takes its injections (OLF's bus targets, as LoadLoss carries a load removed).
+     * Reached through the two switches of a dead-section coupler (DeadSectionCouplers), it couples their two buses: the
+     * pair closes the coupler's carrier, and the coupled node takes the injections. Its buses have no rows on the device;
+     * their voltage is the node's (GpuBatchedAcSecurityAnalysis.copyVoltageToReenergizedBuses). An island holding an
+     * impedant branch has rows past OLF's instead (DeadBusRows), composed by {@link #composeIslandWithRows}. Any other
+     * shape: the reason, and the CPU.
      */
     private static String composeReenergizedIsland(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> deadIslandCloses,
                                                    List<LfBranch> reenabled, List<LfBranch> opened, List<LoadLoss> loads,
-                                                   List<LfBranch> reclosed) {
+                                                   List<LfBranch> reclosed,
+                                                   com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         List<LfBranch> closed = new java.util.ArrayList<>(reenabled);
         closed.addAll(deadIslandCloses);
         BroughtBack broughtBack = broughtBack(net, ctgCut, closed, opened);
@@ -538,27 +542,14 @@ final class GpuStrategyComposer {
                 island.add(bus);
             }
         }
-        for (LfBus bus : island) {
-            if (!bus.getGenerators().isEmpty()) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_GENERATOR";
-            }
-            if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_SHUNT";
-            }
-            if (!bus.getHvdcs().isEmpty()) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_HVDC";
-            }
-            if (bus.getLoads().stream().anyMatch(load -> load.getLoadModel().isPresent())) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_LOAD_MODEL";
-            }
-            for (LfBranch b : bus.getBranches()) {
-                if (!b.isConnectedAtBothSides()) {
-                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";     // OLF enables it too: its charging at the bus
-                }
-                if (broughtBack.edges().contains(b) && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                    return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";
-                }
-            }
+        String busRefusal = refusedIslandBus(island, deadBusRows);
+        if (busRefusal != null) {
+            return busRefusal;
+        }
+        boolean impedant = broughtBack.edges().stream().anyMatch(b -> !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                && (island.contains(b.getBus1()) || island.contains(b.getBus2())));
+        if (impedant || island.stream().anyMatch(bus -> deadBusRows.phiRow(bus) >= 0)) {
+            return composeIslandWithRows(island, broughtBack, reclosed, deadBusRows);
         }
         // the island in its sections: one strategy can close onto several, each joining the network on its own
         java.util.Set<LfBus> done = new java.util.HashSet<>();
@@ -591,6 +582,89 @@ final class GpuStrategyComposer {
             String refusal = composeSection(net, attachments, p, q, loads, reclosed);
             if (refusal != null) {
                 return refusal;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * An island holding an impedant branch, with OLF's own equations on the device rows past OLF's (DeadBusRows): every bus of
+     * the island has rows, every switch into it is the closing switch whose child is the bus it reaches (the dummy rows
+     * holding the child's balances, DeadBusRows#switchOf), and what it joins in the network is there after the contingency.
+     * The pair closes the switches and the island's impedant branches, and the slot turns the rows into equations (ActionSeed).
+     * Its buses carry no injection (refusedIslandBus).
+     */
+    private static String composeIslandWithRows(java.util.Set<LfBus> island, BroughtBack broughtBack, List<LfBranch> reclosed,
+                                                com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        java.util.Set<LfBranch> closes = new java.util.LinkedHashSet<>();
+        for (LfBus bus : island) {
+            if (deadBusRows.phiRow(bus) < 0) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";   // no rows: an island the strategies' closes do not reach alone
+            }
+        }
+        for (LfBranch b : broughtBack.edges()) {
+            boolean in1 = island.contains(b.getBus1());
+            boolean in2 = island.contains(b.getBus2());
+            if (!in1 && !in2) {
+                continue;                                    // a contingency's outage the actions put back
+            }
+            LfBus outside = in1 && in2 ? null : (in1 ? b.getBus2() : b.getBus1());
+            if (outside != null && broughtBack.buses().contains(outside)) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_JOINS_A_BUS_BROUGHT_BACK";
+            }
+            if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                if (outside == null) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ZERO_IMPEDANCE_INSIDE";
+                }
+                if (deadBusRows.switchOf(in1 ? b.getBus1() : b.getBus2()) != b) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_OTHER_SWITCH";  // its bus is another switch's child
+                }
+            } else if (b.isVoltageController() || b.isPhaseController() || b.isTransformerReactivePowerController()
+                    || b.isPhaseControlled() || b.isTransformerReactivePowerControlled()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_CONTROLLED_BRANCH";
+            } else if (!deadBusRows.packable(b)) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";
+            }
+            closes.add(b);
+        }
+        for (LfBus bus : island) {
+            LfBranch closing = deadBusRows.switchOf(bus);
+            if (closing != null && !closes.contains(closing)) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_OTHER_SWITCH";      // its balances are on a switch the pair leaves open
+            }
+        }
+        for (LfBranch b : closes) {
+            if (!reclosed.contains(b)) {
+                reclosed.add(b);
+            }
+        }
+        return null;
+    }
+
+    /** The island buses the device cannot hold: a generator, a shunt, an HVDC, a load model or a branch open at one side;
+     *  a load at a bus with rows past OLF's. */
+    private static String refusedIslandBus(java.util.Set<LfBus> island,
+                                           com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        for (LfBus bus : island) {
+            if (!bus.getGenerators().isEmpty()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_GENERATOR";
+            }
+            if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_SHUNT";
+            }
+            if (!bus.getHvdcs().isEmpty()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_HVDC";
+            }
+            if (bus.getLoads().stream().anyMatch(load -> load.getLoadModel().isPresent())) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_LOAD_MODEL";
+            }
+            for (LfBranch b : bus.getBranches()) {
+                if (!b.isConnectedAtBothSides()) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";     // OLF enables it too: its charging at the bus
+                }
+            }
+            if (deadBusRows.phiRow(bus) >= 0 && !bus.getLoads().isEmpty()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_LOAD_WITH_ROWS";
             }
         }
         return null;

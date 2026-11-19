@@ -1045,6 +1045,22 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(network, 2);
     }
 
+    /** A line LY from BBS7 to the bus VL4_BUS of VL4, connected at BBS7 only: OLF enables it with BBS7 when BD closes, its charging
+     *  at BBS7 (an open branch on BBS7's rows past OLF's). */
+    @Test
+    void branchOpenAtOneSideBeyondALineCloseStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        network.getVoltageLevel("VL3").getNodeBreakerView().newInternalConnection().setNode1(0).setNode2(3).add();
+        var vl4 = network.getSubstation("S3").newVoltageLevel().setId("VL4").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl4.getBusBreakerView().newBus().setId("VL4_BUS").add();
+        network.newLine().setId("LY").setVoltageLevel1("VL3").setNode1(3).setVoltageLevel2("VL4").setConnectableBus2("VL4_BUS")
+                .setR(1).setX(15).setG1(0).setB1(5e-4).setG2(0).setB2(5e-4).add();
+        assertDeadSectionCloseMatchesCpu(network, 2);
+    }
+
     /** A shunt SH7 at BBS7, beyond LX: closing BD brings it back with BBS7, its term on BBS7's rows past OLF's. */
     @Test
     void shuntBeyondALineCloseStrategyBatchMatchesCpu() {

@@ -182,6 +182,26 @@ final class GpuAcFamilyPacker {
             }
         }
 
+        // Branches open at one side at a bus out of the network with rows past OLF's (DeadBusRows): OLF enables them with
+        // their bus, their charging there. Appended after the open branches above, on the bus's rows, masked in every lane
+        // until a pair brings the bus back (GpuAcData.deadOpenBranchElements, ActionSeed); the element mapper takes them
+        // in the same order.
+        for (LfBranch br : network.getBranches()) {
+            LfBus oneSideBus = deadBusRows.oneSideBusWithRows(br);
+            if (oneSideBus == null) {
+                continue;
+            }
+            PiModel pi = br.getPiModel();
+            openBranchElementOf[br.getNum()] = openBranchParameters.size();
+            openBranchParameters.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(),
+                pi.getR1()});
+            int p = pRowOf(oneSideBus, columns, deadBusRows);
+            int q = qRowOf(oneSideBus, columns, deadBusRows);
+            int v = vColOf(oneSideBus, columns, deadBusRows);
+            openBranchIndices.add(br.getBus2() != null ? new int[] {-1, -1, p, q, -1, v} : new int[] {p, q, -1, -1, v, -1});
+            openBranchAlternateReactiveDestination.add(new int[] {-1, -1});
+        }
+
         // BASE-OPEN closable branches (batch SA only): appended AFTER the normal closed branches so
         // every normal element index is unchanged; the element mapper mirrors this enumeration.
         List<Integer> baseOpenCb = new ArrayList<>();

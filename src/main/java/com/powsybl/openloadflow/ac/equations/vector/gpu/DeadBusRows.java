@@ -114,14 +114,15 @@ public final class DeadBusRows {
     }
 
     /**
-     * Whether an island needs OLF's own equations on rows: it holds an impedant branch or a shunt, whose terms depend on
+     * Whether an island needs OLF's own equations on rows: it holds an impedant branch, a shunt or a branch open at one side
+     * (OLF enables it with its bus: its charging there), whose terms depend on
      * their buses' own voltages, which OLF starts from each bus's own value (merged into the switch's bus, the first
      * Newton step would be evaluated elsewhere). Switches alone carry nothing that depends on a voltage.
      */
     private static boolean needsRows(Set<LfBus> island, Set<LfBranch> edges) {
         return edges.stream().anyMatch(b -> !b.isZeroImpedance(LoadFlowModel.AC))
                 || island.stream().anyMatch(bus -> bus.getShunt().isPresent() || bus.getControllerShunt().isPresent()
-                        || bus.getSvcShunt().isPresent());
+                        || bus.getSvcShunt().isPresent() || bus.getBranches().stream().anyMatch(b -> !b.isConnectedAtBothSides()));
     }
 
     public boolean isEmpty() {
@@ -151,6 +152,18 @@ public final class DeadBusRows {
     /** Whether a branch end is on the device: a bus of the network, or a bus with rows here. */
     public boolean onDevice(LfBus bus) {
         return bus != null && (!bus.isDisabled() || phiRow(bus) >= 0);
+    }
+
+    /** The bus of a branch open at one side whose open-branch element sits on rows past OLF's: its connected end, when that
+     *  bus has rows here; null otherwise. */
+    public LfBus oneSideBusWithRows(LfBranch branch) {
+        LfBus bus1 = branch.getBus1();
+        LfBus bus2 = branch.getBus2();
+        if (!branch.isDisabled() || branch.isZeroImpedance(LoadFlowModel.AC) || (bus1 == null) == (bus2 == null)) {
+            return null;
+        }
+        LfBus bus = bus1 != null ? bus1 : bus2;
+        return bus.isDisabled() && phiRow(bus) >= 0 ? bus : null;
     }
 
     /** Whether a branch with both ends is packed: both ends on the device ({@link #onDevice}). */

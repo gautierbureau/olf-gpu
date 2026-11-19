@@ -647,7 +647,8 @@ final class GpuStrategyComposer {
     }
 
     /** The island buses the device cannot hold: a generator, a shunt with a voltage control or an SVC's stand-by one, a
-     *  fixed shunt on a bus without rows, an HVDC, a load model or a branch open at one side; a load at a bus with rows. */
+     *  fixed shunt on a bus without rows, an HVDC, a load model, a branch open at one side at a bus without rows; a load at
+     *  a bus with rows. */
     private static String refusedIslandBus(java.util.Set<LfBus> island,
                                            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         for (LfBus bus : island) {
@@ -667,8 +668,9 @@ final class GpuStrategyComposer {
                 return "SWITCH_CLOSE_DEAD_ISLAND_WITH_LOAD_MODEL";
             }
             for (LfBranch b : bus.getBranches()) {
-                if (!b.isConnectedAtBothSides()) {
-                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";     // OLF enables it too: its charging at the bus
+                if (!b.isConnectedAtBothSides() && (deadBusRows.phiRow(bus) < 0 || b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))) {
+                    // OLF enables it too, its charging at the bus: on the device only on the bus's rows past OLF's
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";
                 }
             }
             if (deadBusRows.phiRow(bus) >= 0 && !bus.getLoads().isEmpty()) {

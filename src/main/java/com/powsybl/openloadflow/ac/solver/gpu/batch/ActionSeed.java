@@ -98,7 +98,7 @@ final class ActionSeed {
 
     /**
      * A bus out of the network at base that the slot's actions bring back across the branches they close (DeadBusRows): its
-     * fixed shunt is enabled, its BUS_PHI and BUS_V rows past OLF's become equations (OLF's equation count takes its balances in {@link #seed}). The
+     * fixed shunt and its branches open at one side are enabled, its BUS_PHI and BUS_V rows past OLF's become equations (OLF's equation count takes its balances in {@link #seed}). The
      * bus's balances are at
      * OLF's bus targets on its own rows, or on its closing switch's DUMMY_P / DUMMY_Q rows when it is that switch's child,
      * its own rows then holding the switch's ZERO_PHI / ZERO_V at 0 (a switch: no ratio, no phase shift). The rows start
@@ -112,6 +112,12 @@ final class ActionSeed {
         // its fixed shunt comes back with it (packed on its rows, masked while it is out: deadShuntElements); the composer
         // refuses a shunt with a voltage control and an SVC's stand-by one
         bus.getShunt().ifPresent(shunt -> rs.disabledMask[s][ctx.elementMapper().getElementIndex(shunt)] = false);
+        // ...and its branches open at one side (OLF enables them with the bus: AbstractLfBranchAction.getNetworkActivations)
+        for (LfBranch oneSide : bus.getBranches()) {
+            if (ctx.deadBusRows().oneSideBusWithRows(oneSide) == bus) {
+                rs.disabledMask[s][ctx.elementMapper().getElementIndex(oneSide)] = false;
+            }
+        }
         rs.rowModes.set(s, phiRow, GpuRowMode.EQUATION);
         rs.rowModes.set(s, vRow, GpuRowMode.EQUATION);
         LfBranch closing = ctx.deadBusRows().switchOf(bus);

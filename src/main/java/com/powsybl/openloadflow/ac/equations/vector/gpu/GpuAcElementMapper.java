@@ -73,6 +73,13 @@ public class GpuAcElementMapper {
             }
         }
 
+        // branches open at one side at a bus with rows past OLF's, after the open branches, as the extractor packs them
+        for (LfBranch branch : network.getBranches()) {
+            if (deadBusRows.oneSideBusWithRows(branch) != null) {
+                openBranches.add(branch);
+            }
+        }
+
         if (!baseOpenBranchIds.isEmpty()) {
             for (LfBranch branch : network.getBranches()) {
                 if (branch.isDisabled() && baseOpenBranchIds.contains(branch.getId())

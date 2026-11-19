@@ -213,6 +213,17 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
         return deadShuntElements(Integer.MAX_VALUE);
     }
 
+    /** The open-branch elements on rows past OLF's {@code olfRowCount} (DeadBusRows): a branch open at one side at a bus out
+     *  of the network, out of every lane until a strategy brings its bus back. */
+    public int[] deadOpenBranchElements(int olfRowCount) {
+        int offset = getClosedBranchCount();
+        int[] ix = openBranch.indices();
+        return java.util.stream.IntStream.range(0, getOpenBranchCount())
+                .filter(e -> ix[e * 6 + 4] >= olfRowCount || ix[e * 6 + 5] >= olfRowCount)
+                .map(e -> offset + e)
+                .toArray();
+    }
+
     /** As above, with rows past OLF's {@code olfRowCount} (DeadBusRows): a shunt on such a bus's rows is out too until a
      *  strategy brings its bus back. */
     public int[] deadShuntElements(int olfRowCount) {

@@ -64,6 +64,7 @@ final class RunScratch {
     final double[] distributedSlackOverrideMinDelta;
     private final int[] baseOpenClosedBranchElements;
     private final int[] deadShuntElements;
+    private final int[] deadOpenBranchElements;
 
     RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode,
                boolean distributedSlackOuterLoop, int olfRowCount) {
@@ -110,6 +111,7 @@ final class RunScratch {
         this.distributedSlackOverrideMinDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.baseOpenClosedBranchElements = gpuData.baseOpenBranches().closedBranchElements();
         this.deadShuntElements = gpuData.deadShuntElements(olfRowCount);
+        this.deadOpenBranchElements = gpuData.deadOpenBranchElements(olfRowCount);
     }
 
     /** Clear the run-scope lists a chunk rebuilds, and the distributed-slack reweight. */
@@ -155,6 +157,9 @@ final class RunScratch {
         }
         for (int e : deadShuntElements) {
             disabledMask[s][e] = true;           // shunts on a bus out of the network at base: OLF evaluates nothing there
+        }
+        for (int e : deadOpenBranchElements) {
+            disabledMask[s][e] = true;           // and branches open at one side there, until a pair brings the bus back
         }
         rowModes.reset(s);                      // default: base layout (padding + non-fragmenting)
     }

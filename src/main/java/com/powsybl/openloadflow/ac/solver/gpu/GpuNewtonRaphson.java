@@ -58,6 +58,7 @@ import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
+import com.powsybl.openloadflow.lf.outerloop.AbstractHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -900,7 +901,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     /** HVDC AC emulation (freeze at OLF order 4, limits at 5) as driver phases, started from the statuses the
      *  network holds. */
     private void installHvdcDriverLoops(final int nElements, final boolean[][] elementMask, final long handle) {
-        boolean hvdcLimits = driverLoop("AcHvdcAcEmulationLimits") != null;
+        boolean hvdcLimits = driverLoop(AbstractHvdcAcEmulationLimitsOuterLoop.NAME) != null;
         // every AC emulation link, whichever of its loops the run names: the slack check counts a link's flow at the slack
         // bus from these tables, with or without a loop to freeze or limit it (an explicit loop list may leave both out)
         hvdcAcEmulationControllers = GpuHvdcAcEmulationLimitsOuterLoop.buildControllers(network, equationSystem, nElements, cachedData);

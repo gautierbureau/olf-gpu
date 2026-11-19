@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.plan.SlackRelocation;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuStateVectorScalingMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.lf.outerloop.AbstractHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.SecurityAnalysisParameters;
@@ -122,7 +123,7 @@ final class GpuSaRunScope {
         boolean hvdcLoopsRun = !contingencyLoops && com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
                 .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation()
                 || acParameters.getOuterLoops().stream().anyMatch(outerLoop ->
-                        "AcHvdcAcEmulationLimits".equals(outerLoop.getName()) || "FreezingHvdcACEmulation".equals(outerLoop.getName()));
+                        AbstractHvdcAcEmulationLimitsOuterLoop.NAME.equals(outerLoop.getName()) || "FreezingHvdcACEmulation".equals(outerLoop.getName()));
         boolean hvdcBatchable = noHvdc
                 || com.powsybl.openloadflow.ac.outerloop.gpu.GpuHvdcAcEmulationLimitsOuterLoop.allLinearAtBase(lfNetwork)
                 || hvdcLoopsRun;
@@ -212,7 +213,7 @@ final class GpuSaRunScope {
                         && !"IncrementalPhaseControl".equals(name)
                         && !"IncrementalTransformerReactivePowerControl".equals(name)
                         && !(continuousPhaseBatchable && "PhaseControl".equals(name))
-                        && !(hvdcBatchable && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
+                        && !(hvdcBatchable && (AbstractHvdcAcEmulationLimitsOuterLoop.NAME.equals(name) || "FreezingHvdcACEmulation".equals(name)))
                         && !(monitoringBatchable && "VoltageMonitoring".equals(name))
                         && !(areaInterchangeControlBatchable && "AreaInterchangeControl".equals(name))
                         && !(automationSystemBatchable && "AutomationSystem".equals(name)))
@@ -301,7 +302,7 @@ final class GpuSaRunScope {
                 && (saContingencyFreeze
                     || acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "FreezingHvdcACEmulation".equals(outerLoop.getName())));
         boolean cfgHvdcLimits = !noHvdc && hvdcBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "AcHvdcAcEmulationLimits".equals(outerLoop.getName()));
+                && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> AbstractHvdcAcEmulationLimitsOuterLoop.NAME.equals(outerLoop.getName()));
         boolean cfgSecondaryVoltageControl = secondaryVoltageControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(outerLoop -> "SecondaryVoltageControl".equals(outerLoop.getName()));
         boolean cfgVoltageMonitoring = monitoringBatchable && !noSvc

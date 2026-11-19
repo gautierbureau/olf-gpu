@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.lf.outerloop.AbstractHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -69,7 +70,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
             return true;
         }
         return switch (outerLoop.getName()) {
-            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "AreaInterchangeControl", "VoltageMonitoring", "SecondaryVoltageControl",
+            case "FreezingHvdcACEmulation", AbstractHvdcAcEmulationLimitsOuterLoop.NAME, "AreaInterchangeControl", "VoltageMonitoring", "SecondaryVoltageControl",
                  "PhaseControl", "IncrementalPhaseControl",
                  "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
                  "IncrementalTransformerReactivePowerControl",

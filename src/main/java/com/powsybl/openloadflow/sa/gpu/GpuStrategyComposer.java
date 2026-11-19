@@ -423,10 +423,12 @@ final class GpuStrategyComposer {
                 // actions before it did (measured: 70 then 50 MW on B2-G injected both, 34 MW too much)
                 generatorNetMove.merge(lfGen, deltaP, (before, d) -> relative ? before + d : d);
                 // absolute: the value replaces the parent's distributed target
+                double[] limitShift = curveLimitShift(lfGen, lfGen.getTargetP() + generatorNetMove.get(lfGen),
+                        networkParameters.isExtrapolateReactiveLimits());
                 generatorActions.add(new BatchContingency.GeneratorMove(lfGen, deltaP, !relative,
                         generatorAction.getActivePowerValue().getAsDouble() / PerUnit.SB,
                         com.powsybl.openloadflow.ac.solver.gpu.batch.GpuGeneratorParticipation.atTargetP(lfGen, gen,
-                                networkParameters, balanceType)));
+                                networkParameters, balanceType), limitShift[0], limitShift[1]));
             } else if (a instanceof com.powsybl.action.HvdcAction hvdcAction) {
                 // OLF's LfHvdcAction: only "AC emulation off" does anything (any other content is a logged no-op, and
                 // "on" is refused when the action is built); the link then holds each station at the flow of the state
@@ -697,6 +699,29 @@ final class GpuStrategyComposer {
             loads.add(new LoadLoss(node, p, q));             // the section's injections, at the node it joins
         }
         return null;
+    }
+
+    /**
+     * How a generator's reactive limits (pu) move from its target P to {@code targetP}: OLF's evaluation of its reactive
+     * capability curve (AbstractLfGenerator.getMinQ / getMaxQ, extrapolated as OLF's parameters say), {min, max}. 0 when it
+     * has no curve, or when its own limits are not its bus's: AbstractLfBus.getLimitQ takes a generator's limits only while
+     * it controls voltage or remote reactive power, its target Q otherwise.
+     */
+    private static double[] curveLimitShift(com.powsybl.openloadflow.network.LfGenerator lfGen, double targetP, boolean extrapolate) {
+        if (!(lfGen instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator alg)
+                || lfGen.getGeneratorControlType() != com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE
+                && lfGen.getGeneratorControlType() != com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
+            return new double[] {0, 0};
+        }
+        var curve = alg.getReactiveLimits().filter(limits -> limits.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
+                .map(com.powsybl.iidm.network.ReactiveCapabilityCurve.class::cast).orElse(null);
+        if (curve == null) {
+            return new double[] {0, 0};
+        }
+        double p0 = lfGen.getTargetP() * PerUnit.SB;
+        double p = targetP * PerUnit.SB;
+        return new double[] {(curve.getMinQ(p, extrapolate) - curve.getMinQ(p0, extrapolate)) / PerUnit.SB,
+            (curve.getMaxQ(p, extrapolate) - curve.getMaxQ(p0, extrapolate)) / PerUnit.SB};
     }
 
     /** A pair the device cannot hold: counted by reason (PAIR:REFUSED:<reason>), left to the CPU per-strategy path. */

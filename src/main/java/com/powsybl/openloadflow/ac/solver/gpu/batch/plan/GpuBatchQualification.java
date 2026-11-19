@@ -267,15 +267,8 @@ public final class GpuBatchQualification {
                 }
             }
             // A GeneratorAction moves its generator's target P, and with reactive limits its capability curve moves
-            // with it. The curve and forced-target-Q channels track a generator's P only when the run distributes the
-            // slack and it is in the distributed-slack generator pack (its anchor and its own move); any other curve
-            // generator keeps its limits at the base target P - CPU.
-            if (reactiveLimits && c.generatorActions().stream()
-                    .anyMatch(m -> VoltageControlReMerge.hasCurve(m.generator())
-                            && !(distributedSlack && VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId())))) {
-                refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
-                continue;
-            }
+            // with it: the curve channel follows a generator in the distributed-slack pack, and the pair's slot shifts the
+            // limits of any other (ActionSeed.shiftCurveLimits), whose P is the action's for the whole solve.
             // ...and re-checks its participation at the new target, which the device applies to the generator pack.
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
             // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.) Without the

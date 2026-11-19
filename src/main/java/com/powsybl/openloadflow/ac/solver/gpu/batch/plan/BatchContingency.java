@@ -173,7 +173,12 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
      *  verdict at a target P (pu) once the action re-checks it (GpuGeneratorParticipation), null when the re-check
      *  leaves it as it was. */
     public record GeneratorMove(LfGenerator generator, double deltaP, boolean absolute, double change,
-                                java.util.function.DoublePredicate participatesAt) {
+                                java.util.function.DoublePredicate participatesAt,
+                                /** How the generator's reactive limits (pu) move from its base P to its P after this action
+                                 *  and the strategy's earlier ones on it, as OLF evaluates its reactive capability curve; 0
+                                 *  without a curve, or when the generator's own limits are not its bus's (not controlling
+                                 *  voltage or remote reactive power: AbstractLfBus.getLimitQ takes its target Q). */
+                                double minQShift, double maxQShift) {
         public GeneratorMove {
             Objects.requireNonNull(generator);
         }

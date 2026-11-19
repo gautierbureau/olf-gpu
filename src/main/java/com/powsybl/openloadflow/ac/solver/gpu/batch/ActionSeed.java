@@ -80,6 +80,7 @@ final class ActionSeed {
         if (switchCloses > 0) {
             GpuBatchedSecurityAnalysisSolver.LAST_SWITCH_CLOSES_OUT_OF_TREE.set(switchClosesOutOfTree);
         }
+        shiftCurveLimits(ctx, s, contingencies.get(ci).generatorActions());
         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
             rs.closedBranchParameterOverrideScenarioElementList.add(s);
             rs.closedBranchParameterOverrideScenarioElementList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
@@ -122,6 +123,35 @@ final class ActionSeed {
         } else {
             rs.overrides.add(s * n + phiRow, bus.getTargetP());
             rs.overrides.add(s * n + vRow, bus.getTargetQ());
+        }
+    }
+
+    /**
+     * The reactive limits of the curve generators the slot's actions move and the curve channel does not follow (outside
+     * the distributed-slack pack, or no distribution): their P is the action's for the whole solve, so their bus's limits
+     * move by the curve's change between their base P and that P, the last action on a generator deciding, through the
+     * scenario's reactive-limit deltas (summed with the plan's, as a generator lost on the bus).
+     */
+    private static void shiftCurveLimits(SlotSeeding ctx, int s, java.util.List<BatchContingency.GeneratorMove> moves) {
+        java.util.Map<com.powsybl.openloadflow.network.LfGenerator, BatchContingency.GeneratorMove> last = new java.util.LinkedHashMap<>();
+        moves.forEach(m -> last.put(m.generator(), m));
+        java.util.List<String> followed = ctx.reactiveCapabilityCurves() != null
+                ? java.util.Arrays.asList(ctx.reactiveCapabilityCurves().reactiveCapabilityCurveGeneratorId()) : java.util.List.of();
+        for (BatchContingency.GeneratorMove m : last.values()) {
+            if (m.minQShift() == 0 && m.maxQShift() == 0 || followed.contains(m.generator().getId())) {
+                continue;
+            }
+            int entry = ctx.gpuData().reactiveLimits().entryOf(m.generator().getBus().getNum());
+            if (entry < 0) {
+                continue;                                    // its bus has no reactive-limit entry: nothing reads its limits
+            }
+            ctx.cl().reactiveLimitDeltaOverrideScenarioEntryList.add(s);
+            ctx.cl().reactiveLimitDeltaOverrideScenarioEntryList.add(entry);
+            ctx.cl().reactiveLimitDeltaOverrideValueList.add(m.minQShift());
+            ctx.cl().reactiveLimitDeltaOverrideValueList.add(m.maxQShift());
+            ctx.cl().reactiveLimitDeltaOverrideValueList.add(0.0);      // the bus's load Q
+            ctx.cl().reactiveLimitDeltaOverrideValueList.add(0.0);      // an SVC's B range
+            ctx.cl().reactiveLimitDeltaOverrideValueList.add(0.0);
         }
     }
 }

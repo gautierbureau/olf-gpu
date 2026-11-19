@@ -11,6 +11,7 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
+#include "lu_lanes.cuh"
 #include "lu_split.cuh"
 
 namespace olfgpu {
@@ -19,9 +20,6 @@ namespace {
 
 bool gOneThreadKernelsForTests = false;                      // setPivotingEngineOneThreadKernelsForTests
 
-constexpr int LU_BLOCK = 128;
-constexpr int TILE = 32;                                     // transposes: 32 entries x 32 lanes per block
-constexpr int TILE_ROWS = 8;
 constexpr int B = LU_MAX_SUPERNODE;
 constexpr int FACTOR_ROWS_MIN = 8;                           // a supernode this wide is factorized a row per warp
 
@@ -30,76 +28,6 @@ size_t factorRowsSharedBytes(int largest) {
     const size_t l = SPLIT_LANES;
     return static_cast<size_t>(largest) * largest * l * sizeof(double) + largest * l * sizeof(double)
             + 2 * static_cast<size_t>(largest) * l * sizeof(int) + 2 * l * sizeof(int) + 3 * static_cast<size_t>(largest) * l;
-}
-
-unsigned int blocksFor(size_t threads) {
-    return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
-}
-
-// The lane the k-th lane slot of a launch works on: lane k of the factorization, or the k-th selected lane (a position
-// in its lane map) when there is a selection.
-__device__ __forceinline__ int laneOf(int k, const int* __restrict__ selected) {
-    return selected == nullptr ? k : selected[k];
-}
-
-// dst[map[k] * capacity + a] = src[laneMap[a] * stride + k]: scenario-major rows to the lane-interleaved layout,
-// through a shared tile so both sides stay contiguous (k along the source, lanes along the destination). The lanes:
-// 0 .. width, or the width selected ones.
-__global__ void toInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                              const int* __restrict__ selected, const int* __restrict__ map,
-                              const double* __restrict__ src, double* __restrict__ dst) {
-    __shared__ double tile[TILE][TILE + 1];
-    const int k0 = blockIdx.x * TILE;
-    const int c0 = blockIdx.y * TILE;
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int c = c0 + r;
-        const int k = k0 + threadIdx.x;
-        if (c < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k];
-        }
-    }
-    __syncthreads();
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int k = k0 + r;
-        const int c = c0 + threadIdx.x;
-        if (c < width && k < count) {
-            dst[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)] = tile[threadIdx.x][r];
-        }
-    }
-}
-
-// The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
-__global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                                const int* __restrict__ selected, const int* __restrict__ map,
-                                const double* __restrict__ src, double* __restrict__ dst) {
-    __shared__ double tile[TILE][TILE + 1];
-    const int k0 = blockIdx.x * TILE;
-    const int c0 = blockIdx.y * TILE;
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int k = k0 + r;
-        const int c = c0 + threadIdx.x;
-        if (c < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)];
-        }
-    }
-    __syncthreads();
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int c = c0 + r;
-        const int k = k0 + threadIdx.x;
-        if (c < width && k < count) {
-            dst[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k] = tile[threadIdx.x][r];
-        }
-    }
-}
-
-__global__ void zeroFill(int nFill, int width, int capacity, const int* __restrict__ fillEntry, double* __restrict__ lu) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nFill) * width) {
-        return;
-    }
-    const int f = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(f) * width);
-    lu[static_cast<size_t>(fillEntry[f]) * capacity + a] = 0.0;
 }
 
 // Gather: every (entry, lane) of the level's supernodes takes its descendants' runs, in ascending order. Values
@@ -150,12 +78,11 @@ __global__ void factorBlocks(int nItems, int width, int capacity, const int* __r
                              const int* __restrict__ rowStart, const int* __restrict__ upperBase,
                              double* __restrict__ lu, unsigned char* __restrict__ rowPermutation,
                              unsigned char* __restrict__ columnPermutation, int* __restrict__ pivotClamps) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, nullptr, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -426,12 +353,11 @@ __global__ void applyPanels(int nItems, int width, int capacity, const int* __re
                             const int* __restrict__ lowerBase, const int* __restrict__ upperBase,
                             const unsigned char* __restrict__ rowPermutation,
                             const unsigned char* __restrict__ columnPermutation, double* __restrict__ lu) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, nullptr, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(t) * width);
     const int s = panelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -481,12 +407,11 @@ __global__ void forwardLevel(int nItems, int width, int capacity, const int* __r
                              const int* __restrict__ forwardRunLower, const int* __restrict__ forwardRunY,
                              const int* __restrict__ forwardRunLength, const unsigned char* __restrict__ rowPermutation,
                              const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -680,12 +605,11 @@ __global__ void backwardLevel(int nItems, int width, int capacity, const int* __
                               const int* __restrict__ diagonalBase, const int* __restrict__ upperBase,
                               const unsigned char* __restrict__ columnPermutation, const double* __restrict__ lu,
                               double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nItems) * width) {
+    int t;
+    int a;
+    if (!itemLane(nItems, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int s = levelSupernode[t];
     const int f = supernodeStart[s];
     const int b = supernodeStart[s + 1] - f;
@@ -765,18 +689,11 @@ __global__ void backwardLevelRows(int width, int capacity, const int* __restrict
     }
 }
 
-template <typename T>
-void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
-    if (!v.empty()) {
-        buf.upload(v.data(), v.size() * sizeof(T));
-    }
-}
-
 // The triangular solves on width lanes: every lane of the last factorization (selected null) or the selected ones.
 void solveSupernodal(SupernodalLu& lu, const int* selected, int width, const double* b, double* x,
                      cudaStream_t stream) {
-    const dim3 tileBlock(TILE, TILE_ROWS);
-    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+    const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
+    const dim3 vectorGrid((lu.n + LU_TILE - 1) / LU_TILE, (width + LU_TILE - 1) / LU_TILE);
     toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
             lu.dRowPosition.as<int>(), b, lu.dWork.as<double>());
     const int levels = static_cast<int>(lu.levelStart.size()) - 1;
@@ -952,30 +869,12 @@ void createSupernodalLu(SupernodalLu& lu, const SupernodalLuPlan& plan, int capa
 
 void factorizeSupernodalLanes(SupernodalLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
                               cudaStream_t stream) {
-    if (width < 0 || width > lu.capacity) {
-        throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
-                                 + std::to_string(lu.capacity));
-    }
-    lu.width = width;
-    lu.hLaneMap.assign(laneMap, laneMap + width);
-    if (width == 0) {
-        return;
-    }
-    CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemsetAsync(lu.dPivotClamps.p, 0, width * sizeof(int), stream));
     // Values interleaved by scenario are read in place by the gathers; scenario-major ones are copied into the
     // lane-interleaved layout first, the fill entries zeroed.
-    const double* src = layout.interleaved ? vals : nullptr;
-    if (!layout.interleaved) {
-        const dim3 tileBlock(TILE, TILE_ROWS);
-        const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
-        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-                nullptr, lu.dStoredOfA.as<int>(), vals, lu.dLu.as<double>());
-        if (lu.nFill > 0) {
-            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
-        }
+    if (!beginLaneFactorization(lu, vals, layout, laneMap, width, lu.dPivotClamps, lu.dStoredOfA, stream)) {
+        return;
     }
+    const double* src = layout.interleaved ? vals : nullptr;
     for (int l = 0; l + 1 < static_cast<int>(lu.levelStart.size()); l++) {
         const int entries = lu.levelEntryStart[l + 1] - lu.levelEntryStart[l];
         if (entries > 0) {

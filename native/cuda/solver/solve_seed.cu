@@ -50,31 +50,31 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     // limits below evaluate a curve at base + distributedSlackGeneratorMove wherever distributedSlackGeneratorMoveValid is set. Cleared only after the seed,
     // a reused context evaluated scenario slot s at the move of the contingency the PREVIOUS chunk solved in
     // that slot. applyToNetwork also reads it when the DS phase never fires (NaN targetP otherwise).
-    if (ctx->nDistributedSlackGenerators > 0 && ctx->dDistributedSlackGeneratorMove.p) {
-        resetInstalledRows(ctx, ctx->dDistributedSlackGeneratorMove.as<double>(), ctx->nDistributedSlackGenerators, nullptr, 0.0);
-        resetInstalledRows(ctx, ctx->dDistributedSlackGeneratorMoveValid.as<char>(), 1, nullptr, char(0));
+    if (ctx->distributedSlack.nDistributedSlackGenerators > 0 && ctx->distributedSlack.dDistributedSlackGeneratorMove.p) {
+        resetInstalledRows(ctx, ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>(), ctx->distributedSlack.nDistributedSlackGenerators, nullptr, 0.0);
+        resetInstalledRows(ctx, ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>(), 1, nullptr, char(0));
     }
-    if (ctx->hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
+    if (ctx->remoteVoltageControl.hasDistrQRelocationGroups && ctx->structure->nReactiveRelocationGroups > 0) {        // plan-B4: capture each group's pilot-Q target from
         size_t need = static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(double);   // the BASE carrier's row,
-        if (!ctx->dReactiveRelocationPilotTargetQ.p) ctx->dReactiveRelocationPilotTargetQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
-        if (!ctx->dReactiveRelocationSavedPilotTargetV.p) ctx->dReactiveRelocationSavedPilotTargetV.alloc(need);
-        if (!ctx->dReactiveRelocationPilotTargetVDeactivated.p) ctx->dReactiveRelocationPilotTargetVDeactivated.alloc(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(char));
-        resetInstalledRows(ctx, ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>(),   // per-solve state, like limitType
+        if (!ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.p) ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
+        if (!ctx->remoteVoltageControl.dReactiveRelocationSavedPilotTargetV.p) ctx->remoteVoltageControl.dReactiveRelocationSavedPilotTargetV.alloc(need);
+        if (!ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p) ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.alloc(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS * sizeof(char));
+        resetInstalledRows(ctx, ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.as<char>(),   // per-solve state, like limitType
                            ctx->structure->nReactiveRelocationGroups, nullptr, char(0));
         capturePilotQBatch<<<grid(ctx->structure->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nReactiveRelocationGroups, nS, n,
                 ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), dBaseMode.as<int>(),
-                ctx->dTargetBase.as<double>(), ctx->dReactiveRelocationPilotTargetQ.as<double>(),
+                ctx->dTargetBase.as<double>(), ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.as<double>(),
                 ctx->structure->dReactiveRelocationBaseTargetRow.p ? ctx->structure->dReactiveRelocationBaseTargetRow.as<int>() : nullptr,
                 installMaskOrNull(ctx));
-        if (ctx->reactiveRelocationPilotTargetQDeltas.entries() > 0) {
-            SlotEntries pilotQDeltas = ctx->reactiveRelocationPilotTargetQDeltas.view();
+        if (ctx->remoteVoltageControl.reactiveRelocationPilotTargetQDeltas.entries() > 0) {
+            SlotEntries pilotQDeltas = ctx->remoteVoltageControl.reactiveRelocationPilotTargetQDeltas.view();
             applyPilotQDeltasBatch<<<grid(nS * pilotQDeltas.capacity), BLOCK, 0, ctx->stream>>>(nS, pilotQDeltas, ctx->structure->nReactiveRelocationGroups, n,
                     ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), ctx->dMode.as<int>(),
-                    ctx->distrQSubgroup.deviceOrNull(), ctx->nDistrQMembers,
-                    ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                    ctx->dReactiveRelocationPilotTargetQ.as<double>(), ctx->dTarget.as<double>(), installMaskOrNull(ctx));
+                    ctx->remoteVoltageControl.distrQSubgroup.deviceOrNull(), ctx->remoteVoltageControl.nDistrQMembers,
+                    ctx->remoteVoltageControl.distrQSubgroup.on() ? ctx->remoteVoltageControl.dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                    ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.as<double>(), ctx->dTarget.as<double>(), installMaskOrNull(ctx));
         }
-        if (!ctx->dReactiveRelocationPilotReactiveLimitEntry.p) {
+        if (!ctx->remoteVoltageControl.dReactiveRelocationPilotReactiveLimitEntry.p) {
             // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
             // in the BASE (every member switched to PQ there) enters the pack as a local entry with an empty
             // reactive range, and that entry carries the group's V target — the value the pilot row
@@ -84,22 +84,22 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->structure->dReactiveRelocationGroupStart.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<int> rows(std::max(ptr[nReactiveRelocationGroups], 1));
             CUDA_CHECK(cudaMemcpy(rows.data(), ctx->structure->dReactiveRelocationCandidateRows.p, static_cast<size_t>(ptr[nReactiveRelocationGroups]) * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<int> vrow(std::max(ctx->nReactiveLimitEntries, 1));
-            std::vector<char> rem(std::max(ctx->nReactiveLimitEntries, 1), 0);
-            if (ctx->nReactiveLimitEntries > 0) {
-                CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dReactiveLimitVoltageRow.p, static_cast<size_t>(ctx->nReactiveLimitEntries) * sizeof(int), cudaMemcpyDeviceToHost));
-                if (ctx->dReactiveLimitVoltageControlRole.p) {
-                    CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dReactiveLimitVoltageControlRole.p, static_cast<size_t>(ctx->nReactiveLimitEntries), cudaMemcpyDeviceToHost));
+            std::vector<int> vrow(std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1));
+            std::vector<char> rem(std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1), 0);
+            if (ctx->reactiveLimits.nReactiveLimitEntries > 0) {
+                CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->reactiveLimits.dReactiveLimitVoltageRow.p, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * sizeof(int), cudaMemcpyDeviceToHost));
+                if (ctx->reactiveLimits.dReactiveLimitVoltageControlRole.p) {
+                    CUDA_CHECK(cudaMemcpy(rem.data(), ctx->reactiveLimits.dReactiveLimitVoltageControlRole.p, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries), cudaMemcpyDeviceToHost));
                 }
             }
             std::vector<int> pe(std::max(nReactiveRelocationGroups, 1), -1);
             for (int g = 0; g < nReactiveRelocationGroups; g++) {
                 int pilotRow = rows[ptr[g]];
-                for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
+                for (int i = 0; i < ctx->reactiveLimits.nReactiveLimitEntries; i++) {
                     if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
                 }
             }
-            ctx->dReactiveRelocationPilotReactiveLimitEntry.upload(pe.data(), pe.size() * sizeof(int));
+            ctx->remoteVoltageControl.dReactiveRelocationPilotReactiveLimitEntry.upload(pe.data(), pe.size() * sizeof(int));
         }
         if (nS == 1 && traceOn(Trace::BATCH_TRACE)) {
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -110,7 +110,7 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
             CUDA_CHECK(cudaMemcpy(rows.data(), ctx->structure->dReactiveRelocationCandidateRows.p, rows.size() * sizeof(int), cudaMemcpyDeviceToHost));
             std::vector<double> pq(nReactiveRelocationGroups), tg(n);
             std::vector<int> md(n);
-            CUDA_CHECK(cudaMemcpy(pq.data(), ctx->dReactiveRelocationPilotTargetQ.p, nReactiveRelocationGroups * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(pq.data(), ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.p, nReactiveRelocationGroups * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(tg.data(), ctx->dTarget.p, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(md.data(), dBaseMode.p, n * sizeof(int), cudaMemcpyDeviceToHost));
             for (int g = 0; g < nReactiveRelocationGroups; g++) {
@@ -124,76 +124,76 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     }
     // PV -> PQ switches exist only for a run with OLF's ReactiveLimitsOuterLoop: without it every entry stays NONE (all PV), as OLF,
     // whatever the packed entries or a caller's seed state hold.
-    if (reactiveLimitsSeedState != nullptr && ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {
+    if (reactiveLimitsSeedState != nullptr && ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0) {
         // WARM CONTINUATION: seed each (controller, scenario)'s limit type (switched to PQ or not) AND switch
         // count from the state the caller passes. A re-solve inside one load flow passes both; a
         // strategy pair passes its parent's PV -> PQ switches with zero counts, since OLF's reactive-limit
         // loop counts afresh in every load flow.
         // one row per installed scenario, in the install's order
-        const size_t nRows = static_cast<size_t>(ctx->nReactiveLimitEntries) * installedSlotCount(ctx);
+        const size_t nRows = static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * installedSlotCount(ctx);
         std::vector<char> qLimitType(nRows), sc(nRows);
         for (size_t k = 0; k < nRows; k++) {
             qLimitType[k] = static_cast<char>(reactiveLimitsStateQLimitType(reactiveLimitsSeedState[k]));
             sc[k] = static_cast<char>(reactiveLimitsStatePvPqSwitchCount(reactiveLimitsSeedState[k]));
         }
-        writeInstalledRows(ctx, ctx->dReactiveLimitQLimitType.as<char>(), qLimitType.data(), ctx->nReactiveLimitEntries);
-        writeInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.as<char>(), sc.data(), ctx->nReactiveLimitEntries);
+        writeInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), qLimitType.data(), ctx->reactiveLimits.nReactiveLimitEntries);
+        writeInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.as<char>(), sc.data(), ctx->reactiveLimits.nReactiveLimitEntries);
         // The limits the continued PV -> PQ switches are STAMPED at: OLF restores the generation target Q of each bus switched to PQ from
         // the parent's end, and a GeneratorAction only invalidates the bus's target P, so the first solve keeps
         // the limit at the parent's P (distributedSlackGeneratorSeedAnchor) and the reactive-limit check refreshes it afterwards.
         // curve limits at the CURRENT (seeded) targets, computed whether or not this call reads them (the driver allocates
         // them with the entries): a later install that turns usePerScenarioReactiveLimits on has this scenario read its own
-        if (ctx->dReactiveLimitMinQPerScenario.p != nullptr) {
-            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
-                    ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
-                    ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
-                    ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
+        if (ctx->reactiveLimits.dReactiveLimitMinQPerScenario.p != nullptr) {
+            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, ctx->reactiveLimits.nReactiveCapabilityCurves, n, ctx->reactiveLimits.reactiveCapabilityCurveExtrapolate,
+                    ctx->reactiveLimits.dReactiveCapabilityCurveIndices.as<int>(), ctx->reactiveLimits.dReactiveCapabilityCurveParameters.as<double>(), ctx->reactiveLimits.dReactiveCapabilityCurvePoints.as<double>(),
+                    ctx->reactiveLimits.dReactiveLimitEntryCurveStart.as<int>(), ctx->reactiveLimits.dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
+                    ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(), ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
                     ctx->dTarget.as<double>(),
-                    ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorSeedAnchor.on() ? ctx->distributedSlackGeneratorSeedAnchor.device() : ctx->distributedSlackGeneratorAnchor.deviceOrNull(),
-                    ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
-                    ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                    ctx->dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
+                    ctx->reactiveLimits.reactiveLimitDeltaOverrides.view(), ctx->reactiveLimits.reactiveCapabilityCurveOverrides.view(),
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorSeedAnchor.on() ? ctx->distributedSlack.distributedSlackGeneratorSeedAnchor.device() : ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(),
+                    ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->distributedSlack.nDistributedSlackGenerators,
+                    ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                    ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(), ctx->distributedSlack.nDistributedSlackBuses,
+                    ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.distributedSlackGeneratorBus.as<int>() : nullptr,
+                    ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(),
+                    ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
             launchForcedTargetQLimits(ctx, nS, n, installMaskOrNull(ctx));
         }
-        seedReactiveLimitRowModeFromState<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n,
-                ctx->dReactiveLimitVoltageRow.as<int>(), ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(), ctx->dReactiveLimitQLimitType.as<char>(),
+        seedReactiveLimitRowModeFromState<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, n,
+                ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(), ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+                usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(),
+                usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(),
+                usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(), ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(),
                 ctx->dMode.as<int>(), ctx->dTarget.as<double>(), usePerScenarioReactiveLimits ? 1 : 0,
-                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
-                ctx->dReactiveLimitSavedTarget.as<double>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
-                ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
+                ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 ? ctx->reactiveLimits.dReactiveLimitVoltageControlRole.as<char>() : nullptr,
+                ctx->reactiveLimits.dReactiveLimitSavedTarget.as<double>(), ctx->reactiveLimits.dReactiveLimitSavedRowMode.as<char>(),
+                ctx->reactiveLimits.hasReactiveLimitBaseQLimitType ? ctx->reactiveLimits.dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                 pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                ctx->dReactiveLimitTargetV.as<double>(), ctx->reactiveLimitTargetVOverrides.view(), ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
-                ctx->reactiveLimitLocalOverride.deviceOrNull(),
-                ctx->reactiveLimitLocalTargetV.deviceOrNull(),
+                ctx->reactiveLimits.dReactiveLimitTargetV.as<double>(), ctx->reactiveLimits.reactiveLimitTargetVOverrides.view(), ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0 ? ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                ctx->reactiveLimits.reactiveLimitLocalOverride.deviceOrNull(),
+                ctx->reactiveLimits.reactiveLimitLocalTargetV.deviceOrNull(),
                 ctx->reactiveLimitSeedTargetQ.deviceOrNull(),
-                ctx->reactiveLimitIslanded.deviceOrNull(), installMaskOrNull(ctx));
+                ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(), installMaskOrNull(ctx));
     } else {
-        resetInstalledRows(ctx, ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->nReactiveLimitEntries, nullptr, char(0));
-        if (!ctx->reactiveLimitsOuterLoop && ctx->nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no PV -> PQ switch, a base-PQ
-            resetInstalledRows(ctx, ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitEntries,   // controller included
+        resetInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.as<char>(), ctx->reactiveLimits.nReactiveLimitEntries, nullptr, char(0));
+        if (!ctx->reactiveLimits.reactiveLimitsOuterLoop && ctx->reactiveLimits.nReactiveLimitEntries > 0) {   // no ReactiveLimits loop: no PV -> PQ switch, a base-PQ
+            resetInstalledRows(ctx, ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimits.nReactiveLimitEntries,   // controller included
                                nullptr, static_cast<char>(GpuQLimitType::NONE));
-        } else if (ctx->nReactiveLimitEntries > 0) {                       // seed the limit type of base-PQ controllers (else all PV)
-            initReactiveLimitQLimitTypeBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, n, ctx->dReactiveLimitVoltageRow.as<int>(),
-                    ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
-                    ctx->dReactiveLimitTargetV.as<double>(), ctx->dReactiveLimitFlags.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                    ctx->dReactiveLimitQLimitType.as<char>(),
-                    ctx->reactiveLimitTargetVOverrides.view(),
-                    ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
-                    ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
-                    ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
-                    ctx->dTarget.as<double>(), ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(),
-                    ctx->dReactiveLimitLoadQ.as<double>(),
-                    ctx->hasReactiveLimitBaseQLimitType ? ctx->dReactiveLimitBaseQLimitType.as<char>() : nullptr,
+        } else if (ctx->reactiveLimits.nReactiveLimitEntries > 0) {                       // seed the limit type of base-PQ controllers (else all PV)
+            initReactiveLimitQLimitTypeBatch<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, n, ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
+                    ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p ? ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>() : nullptr,
+                    ctx->reactiveLimits.dReactiveLimitTargetV.as<double>(), ctx->reactiveLimits.dReactiveLimitFlags.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
+                    ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(),
+                    ctx->reactiveLimits.reactiveLimitTargetVOverrides.view(),
+                    ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0 ? ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
+                    ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 ? ctx->reactiveLimits.dReactiveLimitVoltageControlRole.as<char>() : nullptr,
+                    ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 ? ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
+                    ctx->dTarget.as<double>(), ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(),
+                    ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
+                    ctx->reactiveLimits.hasReactiveLimitBaseQLimitType ? ctx->reactiveLimits.dReactiveLimitBaseQLimitType.as<char>() : nullptr,
                     pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                    ctx->reactiveLimitGeneratorsLost.deviceOrNull(), installMaskOrNull(ctx));
+                    ctx->reactiveLimits.reactiveLimitGeneratorsLost.deviceOrNull(), installMaskOrNull(ctx));
         }
     }
     // The seeded PV/PQ states must reach the ROWS before the first fill: the balance of an enrolled pilot switched to PQ
@@ -220,56 +220,56 @@ void seedSolve(BatchSolverContext* ctx, DriverPass& drv, const int* reactiveLimi
     // this before seeding; here it runs after initReactiveLimitQLimitTypeBatch has set the scenario's limit types.
     // curve limits at the CURRENT (seeded) targets, computed whether or not this call reads them (the driver allocates them
     // with the entries): a later install that turns usePerScenarioReactiveLimits on has this scenario read its own
-    if (ctx->dReactiveLimitMinQPerScenario.p != nullptr) {
-        reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
-                ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
-                    ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
-                ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
+    if (ctx->reactiveLimits.dReactiveLimitMinQPerScenario.p != nullptr) {
+        reactiveCapabilityCurveLimitsBatch<<<grid(ctx->reactiveLimits.nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->reactiveLimits.nReactiveLimitEntries, nS, ctx->reactiveLimits.nReactiveCapabilityCurves, n, ctx->reactiveLimits.reactiveCapabilityCurveExtrapolate,
+                ctx->reactiveLimits.dReactiveCapabilityCurveIndices.as<int>(), ctx->reactiveLimits.dReactiveCapabilityCurveParameters.as<double>(), ctx->reactiveLimits.dReactiveCapabilityCurvePoints.as<double>(),
+                    ctx->reactiveLimits.dReactiveLimitEntryCurveStart.as<int>(), ctx->reactiveLimits.dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
+                ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(), ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(),
                 ctx->dTarget.as<double>(),
-                ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
-                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
-                ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                ctx->dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
+                ctx->reactiveLimits.reactiveLimitDeltaOverrides.view(), ctx->reactiveLimits.reactiveCapabilityCurveOverrides.view(),
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMove.as<double>() : nullptr,
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlack.distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlack.distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->distributedSlack.nDistributedSlackGenerators,
+                ctx->distributedSlack.nDistributedSlackBuses > 0 ? ctx->distributedSlack.dDistributedSlackBusPhiRow.as<int>() : nullptr,
+                ctx->distributedSlack.distributedSlackBusRowOverride.deviceOrNull(), ctx->distributedSlack.nDistributedSlackBuses,
+                ctx->distributedSlack.nDistributedSlackGenerators > 0 ? ctx->distributedSlack.distributedSlackGeneratorBus.as<int>() : nullptr,
+                ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>(), ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>(),
+                ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>(), installMaskOrNull(ctx));
         launchForcedTargetQLimits(ctx, nS, n, installMaskOrNull(ctx));
     }
     launchReMergedVoltageTargetRowUpdate(ctx, drv, true);                       // a main seeded switched to PQ (a continued solve)
     launchPilotTargetVEquationUpdate(ctx, drv, true, true);                     // seed: base limits, or the previous solve's flip
     launchDistrQTargetsInner(ctx, drv);
-    if (ctx->distributedSlackOuterLoop && ctx->nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->distributedSlack.nDistributedSlackBuses > 0) {   // the run's loop, not the packed table
         distributedSlackResetSolve(ctx, drv);
     }
-    if (ctx->areaInterchangeControlOuterLoop) {
+    if (ctx->areaInterchangeControl.areaInterchangeControlOuterLoop) {
         areaInterchangeControlResetSolve(ctx, drv);
     }
-    if (ctx->nMonitoringVoltageControllers > 0) {
+    if (ctx->monitoringVoltage.nMonitoringVoltageControllers > 0) {
         monitoringVoltageResetSolve(ctx, drv);
     }
-    if (ctx->nIncrementalTransformerVoltageControlControllerBranches > 0) {
+    if (ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches > 0) {
         incrementalTransformerVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nPhaseControlControllerBranches > 0) {
+    if (ctx->phaseControl.nPhaseControlControllerBranches > 0) {
         phaseControlResetSolve(ctx, drv);
     }
-    if (ctx->nTransformerVoltageControlMembers > 0) {
+    if (ctx->transformerVoltageControl.nTransformerVoltageControlMembers > 0) {
         transformerVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nSecondaryVoltageControlControllerBuses > 0) {
+    if (ctx->secondaryVoltageControl.nSecondaryVoltageControlControllerBuses > 0) {
         secondaryVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nShuntVoltageControlMembers > 0) {
+    if (ctx->shuntVoltageControl.nShuntVoltageControlMembers > 0) {
         shuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->nIncrementalFlowControlControllerBranches > 0) {
+    if (ctx->incrementalFlowControl.nIncrementalFlowControlControllerBranches > 0) {
         incrementalFlowControlResetSolve(ctx, drv);
     }
-    if (ctx->nIncrementalShuntVoltageControlControllerShunts > 0) {
+    if (ctx->incrementalShuntVoltageControl.nIncrementalShuntVoltageControlControllerShunts > 0) {
         incrementalShuntVoltageControlResetSolve(ctx, drv);
     }
-    if (ctx->distributedSlackOuterLoop && ctx->slackOnlyDistribution) {
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->distributedSlack.slackOnlyDistribution) {
         slackOnlyDistributionResetSolve(ctx, drv);
     }
 }

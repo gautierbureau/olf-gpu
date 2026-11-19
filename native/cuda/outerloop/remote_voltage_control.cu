@@ -383,36 +383,36 @@ void launchDistrQTargetsInner(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    if (ctx->nReactiveLimitRemoteEntries > 0 && ctx->nDistrQMembers > 0) {
-        updateDistrQTargetsBatch<<<grid(ctx->nDistrQMembers * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->nDistrQMembers, nS, n, ctx->nReactiveLimitEntries,
-                    ctx->dDistrQMemberKey.as<double>(), ctx->dDistrQMemberReactiveLimitEntry.as<int>(),
-                    ctx->dDistrQMemberGroupStart.as<int>(), ctx->dDistrQMemberGroupCount.as<int>(),
-                    ctx->dDistrQMemberRow.as<int>(), ctx->dDistrQMemberHasRow.as<char>(),
-                    ctx->dReactiveLimitVoltageRow.as<int>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                    usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(), ctx->dReactiveLimitQLimitType.as<char>(), usePerScenarioReactiveLimits ? 1 : 0,
+    if (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 && ctx->remoteVoltageControl.nDistrQMembers > 0) {
+        updateDistrQTargetsBatch<<<grid(ctx->remoteVoltageControl.nDistrQMembers * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->remoteVoltageControl.nDistrQMembers, nS, n, ctx->reactiveLimits.nReactiveLimitEntries,
+                    ctx->remoteVoltageControl.dDistrQMemberKey.as<double>(), ctx->remoteVoltageControl.dDistrQMemberReactiveLimitEntry.as<int>(),
+                    ctx->remoteVoltageControl.dDistrQMemberGroupStart.as<int>(), ctx->remoteVoltageControl.dDistrQMemberGroupCount.as<int>(),
+                    ctx->remoteVoltageControl.dDistrQMemberRow.as<int>(), ctx->remoteVoltageControl.dDistrQMemberHasRow.as<char>(),
+                    ctx->reactiveLimits.dReactiveLimitVoltageRow.as<int>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMinQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitMaxQ.as<double>(),
+                    usePerScenarioReactiveLimits ? ctx->reactiveLimits.dReactiveLimitLoadQPerScenario.as<double>() : ctx->reactiveLimits.dReactiveLimitLoadQ.as<double>(), ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), usePerScenarioReactiveLimits ? 1 : 0,
                     ctx->dTarget.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-                    ctx->dDistrQMemberTargetQ.as<double>(),
-                    ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr,
+                    ctx->remoteVoltageControl.dDistrQMemberTargetQ.as<double>(),
+                    ctx->remoteVoltageControl.hasDistrQRelocationGroups ? ctx->remoteVoltageControl.dDistrQMemberRelocationGroup.as<int>() : nullptr,
                     ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr,
                     ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr,
                     ctx->dMode.as<int>(),
-                    ctx->hasDistrQRelocationGroups ? ctx->dReactiveRelocationPilotTargetQ.as<double>() : nullptr, ctx->structure->nReactiveRelocationGroups,
-                    ctx->distrQInactiveMembers.view(),
+                    ctx->remoteVoltageControl.hasDistrQRelocationGroups ? ctx->remoteVoltageControl.dReactiveRelocationPilotTargetQ.as<double>() : nullptr, ctx->structure->nReactiveRelocationGroups,
+                    ctx->remoteVoltageControl.distrQInactiveMembers.view(),
                     ctx->frozenRows.view(),
-                    ctx->distrQMemberTargetQOverrides.view(),
-                    ctx->dDistrQMemberTargetPeerStart.as<int>(), ctx->dDistrQMemberTargetPeer.as<int>(),
+                    ctx->remoteVoltageControl.distrQMemberTargetQOverrides.view(),
+                    ctx->remoteVoltageControl.dDistrQMemberTargetPeerStart.as<int>(), ctx->remoteVoltageControl.dDistrQMemberTargetPeer.as<int>(),
                     pilotSelfReactiveLimitEntryOrNull(ctx),
                     ctx->structure->dRelocatedChildOwnRow.p != nullptr
                             ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-                ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
-                ctx->reactiveLimitGeneratorsLost.deviceOrNull(),
+                ctx->remoteVoltageControl.distrQSubgroup.deviceOrNull(), ctx->remoteVoltageControl.distrQSubgroup.on() ? ctx->remoteVoltageControl.dReactiveRelocationDistrQMemberStart.as<int>() : nullptr,
+                ctx->reactiveLimits.reactiveLimitGeneratorsLost.deviceOrNull(),
                 ctx->structure->dReactiveRelocationDependentBaseGroup.p ? ctx->structure->dReactiveRelocationDependentBaseGroup.as<int>() : nullptr,
-                ctx->dReactiveRelocationPilotTargetVDeactivated.p ? ctx->dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
-                    ctx->dReactiveLimitInitialTargetQ.as<double>(), ctx->dReactiveLimitReactivePowerRow.as<int>(),
-                    ctx->distrQKeyOverrides.view());
+                ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p ? ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.as<char>() : nullptr,
+                    ctx->reactiveLimits.dReactiveLimitInitialTargetQ.as<double>(), ctx->reactiveLimits.dReactiveLimitReactivePowerRow.as<int>(),
+                    ctx->remoteVoltageControl.distrQKeyOverrides.view());
     }
 }
 

@@ -95,14 +95,14 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->scenarioOverrides.zeroImpedanceBranchOpenMask.device(), ctx->scenarioOverrides.zeroImpedanceBranchCloseMask.device(), ctx->scenarioOverrides.spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
-    if (ctx->nRemoteMemberReactiveTerms > 0) {
-        fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
+    if (ctx->remoteVoltageControl.nRemoteMemberReactiveTerms > 0) {
+        fillRemoteMemberQBatch<<<grid(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, nS, n,
                 ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
-                ctx->dRemoteMemberReactiveTermRow.as<int>(), ctx->dRemoteMemberReactiveTermElement.as<int>(), ctx->dRemoteMemberReactiveTermSide.as<int>(),
-                ctx->dRemoteMemberReactiveTermKind.as<int>(), ctx->dRemoteMemberReactiveTermWeight.as<double>(),
+                ctx->remoteVoltageControl.dRemoteMemberReactiveTermRow.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermElement.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermSide.as<int>(),
+                ctx->remoteVoltageControl.dRemoteMemberReactiveTermKind.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermWeight.as<double>(),
                 ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
                 ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(),
                 ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(),
@@ -110,12 +110,12 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
                 shuntAdmittanceOverrides(ctx));
     }
     // a link on the slack bus, as OLF's slack mismatch sees it: read by the DistributedSlack check alone
-    if (ctx->distributedSlackOuterLoop && ctx->nHvdcAcEmulation > 0 && ctx->slackBusPhiRow >= 0) {
-        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->nHvdcAcEmulation, n, ctx->nElements, ctx->slackBusPhiRow,
-                ctx->slackBusRowOverride.deviceOrNull(),
-                ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(), ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
-                ctx->dHvdcElement.as<int>(), ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulationStatus.device(),
-                ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(), ctx->hvdcContingencyOutage.device(),
+    if (ctx->distributedSlack.distributedSlackOuterLoop && ctx->hvdcAcEmulation.nHvdcAcEmulation > 0 && ctx->distributedSlack.slackBusPhiRow >= 0) {
+        hvdcSlackBalanceBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->hvdcAcEmulation.nHvdcAcEmulation, n, ctx->nElements, ctx->distributedSlack.slackBusPhiRow,
+                ctx->distributedSlack.slackBusRowOverride.deviceOrNull(),
+                ctx->hvdcAcEmulation.dHvdcBus1PRow.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PRow.as<int>(), ctx->hvdcAcEmulation.dHvdcBus1PhiColumn.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PhiColumn.as<int>(),
+                ctx->hvdcAcEmulation.dHvdcElement.as<int>(), ctx->hvdcAcEmulation.dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulation.hvdcAcEmulationStatus.device(),
+                ctx->hvdcAcEmulation.hvdcAppliedDelta1.device(), ctx->hvdcAcEmulation.hvdcAppliedDelta2.device(), ctx->hvdcAcEmulation.hvdcContingencyOutage.device(),
                 ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dQbuf.as<double>());
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS * sizeof(char), ctx->stream));
@@ -178,7 +178,7 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL) {
         incrementalShuntVoltageControlStep(ctx, drv);
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL) {
-        if (ctx->nPhaseControlControllerBranches > 0) phaseControlStep(ctx, drv); else incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::ACTIVE_POWER) | controlledFlowMaskBit(GpuControlledFlow::CURRENT));  // continuous, or incremental phase
+        if (ctx->phaseControl.nPhaseControlControllerBranches > 0) phaseControlStep(ctx, drv); else incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::ACTIVE_POWER) | controlledFlowMaskBit(GpuControlledFlow::CURRENT));  // continuous, or incremental phase
     } else if (loopKind == GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL) {
         incrementalFlowControlStep(ctx, drv, controlledFlowMaskBit(GpuControlledFlow::REACTIVE_POWER));
     } else if (loopKind == GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL) {
@@ -223,12 +223,12 @@ void checkOuterLoop(BatchSolverContext* ctx, DriverPass& drv, std::vector<char>&
     traceReactiveLimitsSwitches(ctx, drv, auditLog, reactiveLimitsAuditOn, reactiveLimitsTraceScenario);
     traceReactiveLimitsState(ctx, drv, inDistributedSlackPhase, reactiveLimitTol, outerLoopUnstable);
     bool inDistributionPhase = inDistributedSlackPhase || loopKind == GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL;
-    if (inDistributionPhase && (ctx->nDistributedSlackBuses > 0 || ctx->slackOnlyDistribution) && rejectSlackDistributionFailure) {
+    if (inDistributionPhase && (ctx->distributedSlack.nDistributedSlackBuses > 0 || ctx->distributedSlack.slackOnlyDistribution) && rejectSlackDistributionFailure) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
         // to the CPU fallback (status -2), which replays it with the run's real failure behavior.
         std::vector<char> slackDistributionFailure(nS);
-        CUDA_CHECK(cudaMemcpy(slackDistributionFailure.data(), ctx->dSlackDistributionFailure.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(slackDistributionFailure.data(), ctx->distributedSlack.dSlackDistributionFailure.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
             if (slackDistributionFailure[s] && live[s]) {
                 traceReject(s, "ds-residual-saturated", outer, 0);

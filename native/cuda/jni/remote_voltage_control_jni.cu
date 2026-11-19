@@ -12,7 +12,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQInact
         JNIEnv* env, jclass, jlong handle, jintArray jSlotMember) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distrQInactiveMembers, jSlotMember, nullptr);
+        installSlotTable(env, ctx, ctx->remoteVoltageControl.distrQInactiveMembers, jSlotMember, nullptr);
     }
 }
 
@@ -28,10 +28,10 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQSubgr
     if (jDense != nullptr && env->GetArrayLength(jDense) == 0) {
         jDense = nullptr;
     }
-    installSlotRows(env, ctx, ctx->distrQSubgroup, ctx->nDistrQMembers, jDense, "setBatchDistrQSubgroups");
+    installSlotRows(env, ctx, ctx->remoteVoltageControl.distrQSubgroup, ctx->remoteVoltageControl.nDistrQMembers, jDense, "setBatchDistrQSubgroups");
     if (jDense != nullptr && !env->ExceptionCheck()) {
         std::vector<int> memberStart = jniInts(env, jReactiveRelocationDistrQMemberStart);
-        ctx->dReactiveRelocationDistrQMemberStart.upload(memberStart.data(), memberStart.size() * sizeof(int));
+        ctx->remoteVoltageControl.dReactiveRelocationDistrQMemberStart.upload(memberStart.data(), memberStart.size() * sizeof(int));
     }
 }
 
@@ -42,7 +42,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQWeigh
         JNIEnv* env, jclass, jlong handle, jintArray jScenarioTerm, jdoubleArray jWeight) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distrQWeightOverrides, jScenarioTerm, jWeight);
+        installSlotTable(env, ctx, ctx->remoteVoltageControl.distrQWeightOverrides, jScenarioTerm, jWeight);
     }
 }
 
@@ -53,7 +53,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQKeyOv
         JNIEnv* env, jclass, jlong handle, jintArray jScenarioMember, jdoubleArray jKey) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distrQKeyOverrides, jScenarioMember, jKey);
+        installSlotTable(env, ctx, ctx->remoteVoltageControl.distrQKeyOverrides, jScenarioMember, jKey);
     }
 }
 
@@ -65,7 +65,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrQMembe
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installKeyedSlotTable(env, ctx, ctx->distrQMemberTargetQOverrides, ctx->nDistrQMembers, jKeys, jVals);
+        installKeyedSlotTable(env, ctx, ctx->remoteVoltageControl.distrQMemberTargetQOverrides, ctx->remoteVoltageControl.nDistrQMembers, jKeys, jVals);
     }
 }
 
@@ -76,7 +76,7 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotQDelta
         JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installKeyedSlotTable(env, ctx, ctx->reactiveRelocationPilotTargetQDeltas, ctx->structure->nReactiveRelocationGroups, jKeys, jVals);
+        installKeyedSlotTable(env, ctx, ctx->remoteVoltageControl.reactiveRelocationPilotTargetQDeltas, ctx->structure->nReactiveRelocationGroups, jKeys, jVals);
     }
 }
 
@@ -96,8 +96,8 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchPilotNoEnab
     std::vector<double> qTargets = jniDoubles(env, jQTargets);
     SlotRuns runs = slotRuns(slots, {jniInts(env, jRows)}, jniInts(env, jSurvivorReactiveLimitEntryCounts),
                              jniInts(env, jSurvivorReactiveLimitEntries));
-    ctx->pilotFlips.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(slots.size()), runs.entryInts.data(), qTargets.data());
-    ctx->pilotFlipSurvivors.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2), runs.itemInts.data(), nullptr);
+    ctx->remoteVoltageControl.pilotFlips.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(slots.size()), runs.entryInts.data(), qTargets.data());
+    ctx->remoteVoltageControl.pilotFlipSurvivors.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2), runs.itemInts.data(), nullptr);
 }
 
 // Re-merged controls whose elected main is one of its controllers (see updateReMergedVoltageTargetRowBatch): per control
@@ -112,20 +112,20 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchReMergedVol
     if (ctx == nullptr) {
         return;
     }
-    std::vector<int> slots = ctx->nReactiveLimitEntries > 0 ? jniInts(env, jSlots) : std::vector<int>();
+    std::vector<int> slots = ctx->reactiveLimits.nReactiveLimitEntries > 0 ? jniInts(env, jSlots) : std::vector<int>();
     std::vector<double> voltageTargets = jniDoubles(env, jVoltageTargets);
     SlotRuns runs = slotRuns(slots, {jniInts(env, jMainEntries)}, jniInts(env, jControllerCounts), jniInts(env, jControllerEntries));
-    ctx->reMergedVoltageTargets.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(slots.size()), runs.entryInts.data(),
+    ctx->remoteVoltageControl.reMergedVoltageTargets.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(slots.size()), runs.entryInts.data(),
                                         voltageTargets.data());
-    ctx->reMergedVoltageTargetControllers.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2),
+    ctx->remoteVoltageControl.reMergedVoltageTargetControllers.install(ctx->nScenarios, ctx->installSlots, static_cast<int>(runs.itemInts.size() / 2),
                                                   runs.itemInts.data(), nullptr);
-    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->nReactiveLimitEntries;
-    if (ctx->reMergedVoltageTargets.entries() > 0 && ctx->dReactiveLimitReMergedVoltageRow.cap < scenarioEntries * sizeof(int)) {
+    size_t scenarioEntries = static_cast<size_t>(ctx->nScenarios) * ctx->reactiveLimits.nReactiveLimitEntries;
+    if (ctx->remoteVoltageControl.reMergedVoltageTargets.entries() > 0 && ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.cap < scenarioEntries * sizeof(int)) {
         // the bank's first re-merge: nothing held anywhere (a fresh allocation is zeroed, the rows are -1); the solve's
         // start resets its installed slots' rows (launchReMergedVoltageTargetRowUpdate), never a slot still solving
-        ctx->dReactiveLimitHoldsReMergedVoltageTarget.ensure(scenarioEntries);
-        ctx->dReactiveLimitReMergedVoltageRow.ensure(scenarioEntries * sizeof(int));
-        CUDA_CHECK(cudaMemset(ctx->dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int)));
+        ctx->reactiveLimits.dReactiveLimitHoldsReMergedVoltageTarget.ensure(scenarioEntries);
+        ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.ensure(scenarioEntries * sizeof(int));
+        CUDA_CHECK(cudaMemset(ctx->reactiveLimits.dReactiveLimitReMergedVoltageRow.p, 0xFF, scenarioEntries * sizeof(int)));
     }
 }
 
@@ -137,6 +137,6 @@ OLF_JNI(ac_equations_vector_gpu, RemoteVoltageControlNative, setBatchDistrRhoCoe
         JNIEnv* env, jclass, jlong handle, jintArray jScenarioTerm, jdoubleArray jCoefficient) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx != nullptr) {
-        installSlotTable(env, ctx, ctx->distrRhoCoefficientOverrides, jScenarioTerm, jCoefficient);
+        installSlotTable(env, ctx, ctx->scenarioOverrides.distrRhoCoefficientOverrides, jScenarioTerm, jCoefficient);
     }
 }

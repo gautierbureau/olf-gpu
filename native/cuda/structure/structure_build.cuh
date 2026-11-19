@@ -80,7 +80,8 @@ void setupFamily(Family& f, int elementCount, const double* in, int parameterStr
 // csr_pattern.cu
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices);
+                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices,
+                             int nIdentityRows, const int* identityRows);
 
 void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* closedBranchIndices, const int* openBranchIndices, const int* shuntIndices,

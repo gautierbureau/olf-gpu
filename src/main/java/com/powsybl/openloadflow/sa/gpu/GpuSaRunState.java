@@ -33,6 +33,8 @@ import java.util.Map;
 final class GpuSaRunState {
     List<PropagatedContingency> contingencies = List.of();
     List<OperatorStrategy> operatorStrategies = List.of();
+    /** Each contingency's strategies, in the order of operatorStrategies (GpuStrategyComposer.byContingency). */
+    java.util.Map<String, List<OperatorStrategy>> strategiesByContingency = java.util.Map.of();
     List<Action> actions = List.of();
     LfNetwork lfNetwork;
     AcLoadFlowContext context;
@@ -143,4 +145,9 @@ final class GpuSaRunState {
      *  rows it holds now, put back to NaN before the next scenario's. */
     double[] scratch;
     GpuGatheredState scratchHolds;
+
+    /** The strategies whose contingency context names {@code contingencyId}. */
+    List<OperatorStrategy> strategiesOf(String contingencyId) {
+        return strategiesByContingency.getOrDefault(contingencyId, List.of());
+    }
 }

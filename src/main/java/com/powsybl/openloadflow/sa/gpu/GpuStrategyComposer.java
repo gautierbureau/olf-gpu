@@ -43,20 +43,50 @@ final class GpuStrategyComposer {
     /** Stage-1 applicability: single-stage strategy with a TrueCondition whose contingency context
      *  covers this contingency. Anything else stays on the CPU per-strategy path. */
     static boolean strategyApplies(OperatorStrategy strategy, String contingencyId) {
-        if (candidateActionLists(strategy).isEmpty()) {
-            return false;                                    // too many conditional stages to speculate on
-        }
         // ANY single-stage condition qualifies — including the violation/threshold conditions: the
         // ENGINE evaluates the condition (AbstractSecurityAnalysis.checkCondition, on the CPU-detected
         // post-contingency violations) BEFORE our runActionSimulation override is invoked, so the pair
         // state is precomputed SPECULATIVELY and simply goes unused when the condition does not pass.
         // Condition semantics therefore stay 100% stock — the batch only accelerates the solve.
+        if (!targets(strategy, contingencyId)) {
+            return false;
+        }
+        return !candidateActionLists(strategy).isEmpty();    // else too many conditional stages to speculate on
+    }
+
+    /** Whether the strategy's contingency context names {@code contingencyId}. */
+    private static boolean targets(OperatorStrategy strategy, String contingencyId) {
         var contingencyContext = strategy.getContingencyContext();
         return switch (contingencyContext.getContextType()) {
             case ALL, ONLY_CONTINGENCIES -> true;
             case SPECIFIC -> contingencyId.equals(contingencyContext.getContingencyId());
             case NONE -> false;
         };
+    }
+
+    /** The strategies each contingency targets, in the order of {@code strategies}: one pass over them, instead of every
+     *  strategy tested against every contingency. */
+    static java.util.Map<String, List<OperatorStrategy>> byContingency(List<OperatorStrategy> strategies,
+                                                                       List<com.powsybl.openloadflow.network.impl.PropagatedContingency> contingencies) {
+        List<String> contingencyIds = contingencies.stream().map(c -> c.getContingency().getId()).toList();
+        java.util.Map<String, List<OperatorStrategy>> byId = new java.util.HashMap<>();
+        for (String id : contingencyIds) {
+            byId.put(id, new java.util.ArrayList<>());
+        }
+        for (OperatorStrategy strategy : strategies) {
+            var context = strategy.getContingencyContext();
+            switch (context.getContextType()) {
+                case ALL, ONLY_CONTINGENCIES -> byId.values().forEach(list -> list.add(strategy));
+                case SPECIFIC -> {
+                    List<OperatorStrategy> list = byId.get(context.getContingencyId());
+                    if (list != null) {
+                        list.add(strategy);
+                    }
+                }
+                case NONE -> { }
+            }
+        }
+        return byId;
     }
 
     /** Conditional stages a strategy may carry and still be precomputed: every combination is one pair. */
@@ -96,6 +126,79 @@ final class GpuStrategyComposer {
         return List.copyOf(lists);
     }
 
+    /**
+     * The candidate action lists OLF may apply for this strategy after a contingency on which only violations of the types
+     * {@code possibleTypes} (GpuBaseViolations' bits) may be reported. OLF evaluates every stage's condition on the
+     * contingency's violations (AbstractSecurityAnalysis.checkCondition): a TrueCondition holds, and so does an
+     * AllViolationCondition naming no violation (the empty set is contained in any); an AnyViolationCondition, an
+     * AtLeastOneViolationCondition and an AllViolationCondition naming violations may hold only when a type their filters
+     * keep may be reported. A list is kept when some assignment of the conditional stages consistent with that gives it.
+     * Null when a stage's condition reads the network (a threshold) or is of another type: the violations do not decide.
+     */
+    static List<List<String>> candidateActionLists(OperatorStrategy strategy, int possibleTypes) {
+        List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
+        List<Integer> conditional = new java.util.ArrayList<>();
+        List<Boolean> holds = new java.util.ArrayList<>();
+        List<Boolean> mayHold = new java.util.ArrayList<>();
+        for (int i = 0; i < stages.size(); i++) {
+            var condition = stages.get(i).getCondition();
+            if (condition instanceof com.powsybl.contingency.strategy.condition.TrueCondition) {
+                continue;
+            }
+            java.util.Set<com.powsybl.contingency.violations.LimitViolationType> filters;
+            boolean alwaysHolds = false;
+            if (condition instanceof com.powsybl.contingency.strategy.condition.AnyViolationCondition any) {
+                filters = any.getFilters();
+            } else if (condition instanceof com.powsybl.contingency.strategy.condition.AtLeastOneViolationCondition atLeastOne) {
+                filters = atLeastOne.getFilters();
+            } else if (condition instanceof com.powsybl.contingency.strategy.condition.AllViolationCondition all) {
+                filters = all.getFilters();
+                alwaysHolds = all.getViolationIds().isEmpty();
+            } else {
+                return null;
+            }
+            conditional.add(i);
+            holds.add(alwaysHolds);
+            mayHold.add(alwaysHolds || (GpuBaseViolations.bits(filters) & possibleTypes) != 0);
+        }
+        if (conditional.size() > MAX_CONDITIONAL_STAGES) {
+            return List.of();
+        }
+        java.util.LinkedHashSet<List<String>> lists = new java.util.LinkedHashSet<>();
+        for (int mask = 0; mask < 1 << conditional.size(); mask++) {
+            boolean consistent = true;
+            for (int c = 0; c < conditional.size(); c++) {
+                boolean in = (mask & 1 << c) != 0;
+                consistent &= in ? mayHold.get(c) : !holds.get(c);
+            }
+            if (!consistent) {
+                continue;
+            }
+            List<String> ids = new java.util.ArrayList<>();
+            for (int i = 0; i < stages.size(); i++) {
+                int c = conditional.indexOf(i);
+                if (c < 0 || (mask & 1 << c) != 0) {
+                    ids.addAll(stages.get(i).getActionIds());
+                }
+            }
+            if (!ids.isEmpty()) {
+                lists.add(List.copyOf(ids));
+            }
+        }
+        return List.copyOf(lists);
+    }
+
+    /** A strategy pair's strategy and the action list it applies, for deciding whether OLF may apply it. */
+    record StrategyPair(OperatorStrategy strategy, List<String> actionIds) {
+    }
+
+    /** Whether OLF may apply {@code actionIds}, one of the strategy's candidate lists, after a contingency on which only
+     *  violations of the types {@code possibleTypes} may be reported (see {@link #candidateActionLists(OperatorStrategy, int)}). */
+    static boolean mayApply(OperatorStrategy strategy, List<String> actionIds, int possibleTypes) {
+        List<List<String>> lists = candidateActionLists(strategy, possibleTypes);
+        return lists == null || lists.contains(actionIds);
+    }
+
     /** The batch id of a (contingency, strategy) pair applying {@code actionIds}: a single-stage strategy has one
      *  candidate list and keeps the plain id; a multi-stage one adds the list, which is what OLF hands
      *  runActionSimulation once its conditions are evaluated. */
@@ -130,6 +233,8 @@ final class GpuStrategyComposer {
         List<LfBranch> reclosed = new java.util.ArrayList<>();
         List<LfBranch> reenabled = new java.util.ArrayList<>();      // contingency outages a close puts back
         List<LfBranch> opened = new java.util.ArrayList<>();         // branches an open takes out
+        List<LfBranch> deadIslandCloses = new java.util.ArrayList<>(); // switches closing onto a bus out of the network
+        List<LfBranch> loopCloses = new java.util.ArrayList<>();       // switches closing within one zero-impedance network
         List<BatchContingency.GeneratorMove> generatorActions = new java.util.ArrayList<>();
         Map<LfGenerator, Double> generatorNetMove = new java.util.LinkedHashMap<>();
         List<com.powsybl.openloadflow.network.LfHvdc> acEmulationOff = new java.util.ArrayList<>();
@@ -153,7 +258,7 @@ final class GpuStrategyComposer {
                     LfShunt lfShunt = shuntCompensator != null ? net.getShuntById(terminalsConnectionAction.getElementId()) : null;
                     if (shuntCompensator == null || lfShunt == null
                             || !(shuntCompensator.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel linearModel)) {
-                        return null;
+                        return refused("TERMINALS_SHUNT_OUT_OF_SCOPE");
                     }
                     // NEVER from the iidm terminal: during the SA the working variant is the TEMPORARY
                     // one where the retention machinery already connected the closable shunt — ask the
@@ -176,7 +281,7 @@ final class GpuStrategyComposer {
                         continue;                            // OLF operates a branch with both ends only: as it is
                     }
                     if (ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
-                        return null;                         // the contingency opened ONE side of it: CPU
+                        return refused("TERMINALS_SIDE_OPENED_BY_CONTINGENCY");   // the contingency opened ONE side of it: CPU
                     }
                     if (terminalsConnectionAction.isOpen()) {
                         if (!branches.contains(b)) {
@@ -191,26 +296,28 @@ final class GpuStrategyComposer {
                             // per-scenario mask CLEAR on the base-open packed element — dead-island
                             // reconnection (a disabled endpoint bus) is rejected at qualification.
                             if (!b.isDisabled()) {
-                                return null;                 // closing an already-closed branch — CPU decides
+                                return refused("TERMINALS_CLOSE_OF_CLOSED_BRANCH");   // closing an already-closed branch — CPU decides
                             }
                             reclosed.add(b);
                         }
                     }
                 }
             } else if (a instanceof com.powsybl.action.SwitchAction switchAction) {
-                if (!composeSwitchAction(net, switchAction, ctgSideOpens, branches, zeroImpedanceOutages, opened, reclosed)) {
-                    return null;
+                String switchRefusal = composeSwitchAction(net, switchAction, ctgSideOpens, branches, zeroImpedanceOutages, opened, reclosed,
+                        reenabled, deadIslandCloses, loopCloses);
+                if (switchRefusal != null) {
+                    return refused(switchRefusal);
                 }
             } else if (a instanceof com.powsybl.action.LoadAction loadAction) {
                 com.powsybl.iidm.network.Load load = network.getLoad(loadAction.getLoadId());
                 if (load == null) {
-                    return null;
+                    return refused("LOAD_UNKNOWN");
                 }
                 // OLF's own load -> LfBus map, never the bus view (see GpuContingencyMapper.loadOutages)
                 com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(loadAction.getLoadId());
                 LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
                 if (bus == null) {
-                    return null;
+                    return refused("LOAD_NOT_IN_LF_NETWORK");
                 }
                 if (ctgLostLoadIds.contains(loadAction.getLoadId())) {
                     continue;                                // OLF's LfLoadAction does nothing on a load the contingency lost
@@ -257,7 +364,7 @@ final class GpuStrategyComposer {
                 LfShunt shunt = net.getShuntById(shuntCompensatorPositionAction.getShuntCompensatorId());
                 if (shuntCompensator == null || shunt == null
                         || !(shuntCompensator.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel linearModel)) {
-                    return null;                                 // unpacked / non-linear model — CPU
+                    return refused("SHUNT_POSITION_OUT_OF_SCOPE");   // unpacked / non-linear model — CPU
                 }
                 double dSections = shuntCompensatorPositionAction.getSectionCount() - shuntCompensator.getSectionCount();
                 double zb = shuntCompensator.getTerminal().getVoltageLevel().getNominalV()
@@ -270,16 +377,16 @@ final class GpuStrategyComposer {
                 // without them): a target V, a target Q or a regulator flag on the action changes nothing in OLF's
                 // equations, so it changes nothing here. The P delta is composed like a load delta with q=0.
                 if (generatorAction.getActivePowerValue().isEmpty() || generatorAction.isActivePowerRelativeValue().isEmpty()) {
-                    return null;                             // OLF does not build such an action
+                    return refused("GENERATOR_WITHOUT_ACTIVE_POWER");   // OLF does not build such an action
                 }
                 com.powsybl.iidm.network.Generator gen = network.getGenerator(generatorAction.getGeneratorId());
                 if (gen == null) {
-                    return null;
+                    return refused("GENERATOR_UNKNOWN");
                 }
                 com.powsybl.openloadflow.network.LfGenerator lfGen = net.getGeneratorById(generatorAction.getGeneratorId());
                 LfBus bus = lfGen != null ? lfGen.getBus() : null;    // OLF's own map, never the bus view
                 if (bus == null) {
-                    return null;
+                    return refused("GENERATOR_NOT_IN_LF_NETWORK");
                 }
                 if (ctgGens.contains(lfGen)) {
                     continue;                                // OLF's LfGeneratorAction does nothing on a generator the contingency lost
@@ -307,7 +414,7 @@ final class GpuStrategyComposer {
                 }
                 com.powsybl.openloadflow.network.LfHvdc hvdc = net.getHvdcById(hvdcAction.getHvdcId());
                 if (hvdcAction.isAcEmulationEnabled().get() || hvdc == null || !hvdc.isAcEmulation()) {
-                    return null;                             // refused by OLF, unknown or not emulated: CPU
+                    return refused("HVDC_OUT_OF_SCOPE");     // refused by OLF, unknown or not emulated: CPU
                 }
                 if (hvdc.isDisabled() || ctgHvdcs.contains(hvdc)) {
                     continue;                                // a link without power: OLF's action changes nothing
@@ -316,16 +423,23 @@ final class GpuStrategyComposer {
                     acEmulationOff.add(hvdc);
                 }
             } else {
-                return null;                                 // out of stage-1 scope — CPU per-strategy path
+                return refused("ACTION_TYPE_" + (a == null ? "UNKNOWN" : a.getType()));   // out of stage-1 scope — CPU
             }
         }
         generatorNetMove.forEach((g, d) -> loads.add(new LoadLoss(g.getBus(), d, 0)));
+        List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
+        ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
+        ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));
+        composeLoopCloses(loopCloses, zeroImpedanceOutages, reclosed);
+        if (!deadIslandCloses.isEmpty()) {
+            String islandRefusal = composeReenergizedIsland(net, ctgCut, deadIslandCloses, reenabled, opened, loads, reclosed);
+            if (islandRefusal != null) {
+                return refused(islandRefusal);
+            }
+        }
         if (!reenabled.isEmpty()) {
             // OLF re-enables every branch at a bus its actions bring back into the main component that is not connected
             // at both ends (AbstractLfBranchAction.getNetworkActivations), even one the contingency outaged
-            List<LfBranch> ctgCut = new java.util.ArrayList<>(contingencyZeroImpedanceBranchOutages);
-            ctgBranches.stream().filter(b -> b.getBus1() != null && b.getBus2() != null).forEach(ctgCut::add);
-            ctgSideOpens.forEach(sideOpen -> ctgCut.add(sideOpen.branch()));
             for (LfBus bus : busesBroughtBack(net, ctgCut, reenabled, opened)) {
                 for (LfBranch b : bus.getBranches()) {
                     if (b.getBus1() == null || b.getBus2() == null) {
@@ -342,18 +456,179 @@ final class GpuStrategyComposer {
                 contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff);
     }
 
-    /** Composes a SwitchAction onto the pair's outages; false when it is out of batch scope (the CPU per-strategy path). */
-    private static boolean composeSwitchAction(LfNetwork net, com.powsybl.action.SwitchAction switchAction,
+    /** The closes of switches within one zero-impedance network at base: a loop at base, but the contingency's and the
+     *  actions' openings may have split its network, and OLF's close then joins the two parts again, a merge composed like
+     *  any other (left out, the device kept them apart). A loop still: nothing to compose (a non-tree edge in OLF). */
+    private static void composeLoopCloses(List<LfBranch> loopCloses, List<LfBranch> zeroImpedanceOutages, List<LfBranch> reclosed) {
+        for (LfBranch b : loopCloses) {
+            if (!zeroImpedanceConnected(b.getBus1(), b.getBus2(), zeroImpedanceOutages, reclosed)) {
+                reclosed.add(b);
+            }
+        }
+    }
+
+    /** Whether {@code from} reaches {@code to} through zero-impedance branches closed at base and not {@code out}, or through
+     *  {@code closes}: the zero-impedance connectivity after the contingency and the actions. */
+    private static boolean zeroImpedanceConnected(LfBus from, LfBus to, List<LfBranch> out, List<LfBranch> closes) {
+        java.util.Set<LfBranch> removed = new java.util.HashSet<>(out);
+        java.util.Set<LfBranch> added = new java.util.HashSet<>(closes);
+        java.util.Set<LfBus> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<LfBus> queue = new java.util.ArrayDeque<>();
+        seen.add(from);
+        queue.add(from);
+        while (!queue.isEmpty()) {
+            LfBus bus = queue.poll();
+            if (bus == to) {
+                return true;
+            }
+            for (LfBranch br : bus.getBranches()) {
+                boolean edge = added.contains(br) || !br.isDisabled() && br.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                        && !removed.contains(br);
+                if (!edge || br.getBus1() == null || br.getBus2() == null) {
+                    continue;
+                }
+                LfBus other = br.getBus1() == bus ? br.getBus2() : br.getBus1();
+                if (seen.add(other)) {
+                    queue.add(other);
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The buses out of the network that switches closing onto them bring back, composed onto the pair. OLF enables every bus and
+     * branch the actions add to the main component (AbstractLfBranchAction.getNetworkActivations), so the island is the
+     * one its connectivity finds, linked by zero-impedance branches alone. Hanging on one bus of the network, it is then the
+     * same electrical node as that bus, whose balance takes the island's injections (OLF's bus targets, as LoadLoss carries a
+     * load removed). Reached through the two switches of a dead-section coupler (DeadSectionCouplers), it couples their two
+     * buses: the pair closes the coupler's carrier, and the coupled node takes the injections. Its buses have no rows on the
+     * device; their voltage is the node's (GpuBatchedAcSecurityAnalysis.copyVoltageToReenergizedBuses). Any other shape: the
+     * reason, and the CPU.
+     */
+    private static String composeReenergizedIsland(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> deadIslandCloses,
+                                                   List<LfBranch> reenabled, List<LfBranch> opened, List<LoadLoss> loads,
+                                                   List<LfBranch> reclosed) {
+        List<LfBranch> closed = new java.util.ArrayList<>(reenabled);
+        closed.addAll(deadIslandCloses);
+        BroughtBack broughtBack = broughtBack(net, ctgCut, closed, opened);
+        java.util.Set<LfBus> island = new java.util.LinkedHashSet<>();
+        for (LfBus bus : broughtBack.buses()) {
+            if (bus.isDisabled()) {                          // out of the network at base: re-energized (not a contingency's loss)
+                island.add(bus);
+            }
+        }
+        for (LfBus bus : island) {
+            if (!bus.getGenerators().isEmpty()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_GENERATOR";
+            }
+            if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_SHUNT";
+            }
+            if (!bus.getHvdcs().isEmpty()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_HVDC";
+            }
+            if (bus.getLoads().stream().anyMatch(load -> load.getLoadModel().isPresent())) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_LOAD_MODEL";
+            }
+            for (LfBranch b : bus.getBranches()) {
+                if (!b.isConnectedAtBothSides()) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_ONE_SIDE_BRANCH";     // OLF enables it too: its charging at the bus
+                }
+                if (broughtBack.edges().contains(b) && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                    return "SWITCH_CLOSE_DEAD_ISLAND_IMPEDANT_BRANCH";
+                }
+            }
+        }
+        // the island in its sections: one strategy can close onto several, each joining the network on its own
+        java.util.Set<LfBus> done = new java.util.HashSet<>();
+        for (LfBus start : island) {
+            if (!done.add(start)) {
+                continue;
+            }
+            Map<LfBus, LfBranch> attachments = new java.util.LinkedHashMap<>();   // bus of the network -> the switch reaching it
+            double p = 0;
+            double q = 0;
+            java.util.ArrayDeque<LfBus> queue = new java.util.ArrayDeque<>(List.of(start));
+            while (!queue.isEmpty()) {
+                LfBus bus = queue.poll();
+                for (LfBranch b : bus.getBranches()) {
+                    if (!broughtBack.edges().contains(b)) {
+                        continue;                            // not in the connectivity: a switch left open
+                    }
+                    LfBus other = b.getBus1() == bus ? b.getBus2() : b.getBus1();
+                    if (island.contains(other)) {
+                        if (done.add(other)) {
+                            queue.add(other);
+                        }
+                    } else {
+                        attachments.putIfAbsent(other, b);
+                    }
+                }
+                p += bus.getTargetP();
+                q += bus.getTargetQ();
+            }
+            String refusal = composeSection(net, attachments, p, q, loads, reclosed);
+            if (refusal != null) {
+                return refusal;
+            }
+        }
+        return null;
+    }
+
+    /** One section of a re-energized island: hanging on one bus, or the coupler between two (DeadSectionCouplers). */
+    private static String composeSection(LfNetwork net, Map<LfBus, LfBranch> attachments, double p, double q,
+                                         List<LoadLoss> loads, List<LfBranch> reclosed) {
+        LfBus node;
+        if (attachments.size() <= 1) {
+            node = attachments.isEmpty() ? null : attachments.keySet().iterator().next();
+        } else {
+            var couplers = com.powsybl.openloadflow.network.gpu.DeadSectionCouplers.of(net);
+            java.util.Iterator<LfBranch> switches = attachments.values().iterator();
+            var coupler = couplers.ofSwitch(switches.next());
+            if (attachments.size() != 2 || coupler == null || coupler != couplers.ofSwitch(switches.next())) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_SEVERAL_ATTACHMENTS";
+            }
+            node = coupler.bus1();
+            var zn1 = coupler.bus1().getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+            var zn2 = coupler.bus2().getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+            if (zn1 == null || zn2 == null || zn1 != zn2) {
+                reclosed.add(coupler.carrier());             // a merge, as composeSwitchAction closes a coupler
+            }
+        }
+        if (node != null && (p != 0 || q != 0)) {
+            loads.add(new LoadLoss(node, p, q));             // the section's injections, at the node it joins
+        }
+        return null;
+    }
+
+    /** A pair the device cannot hold: counted by reason (PAIR:REFUSED:<reason>), left to the CPU per-strategy path. */
+    private static BatchContingency refused(String reason) {
+        GpuBatchScopeCensus.record("PAIR:REFUSED:" + reason);
+        return null;
+    }
+
+    /** Composes a SwitchAction onto the pair's outages; the reason it is out of batch scope (the CPU per-strategy path), or null. */
+    private static String composeSwitchAction(LfNetwork net, com.powsybl.action.SwitchAction switchAction,
                                                List<BatchContingency.SideOpen> ctgSideOpens, List<LfBranch> branches,
-                                               List<LfBranch> zeroImpedanceOutages, List<LfBranch> opened, List<LfBranch> reclosed) {
+                                               List<LfBranch> zeroImpedanceOutages, List<LfBranch> opened, List<LfBranch> reclosed,
+                                               List<LfBranch> reenabled, List<LfBranch> deadIslandCloses, List<LfBranch> loopCloses) {
         LfBranch b = net.getBranchById(switchAction.getSwitchId());
         if (b != null && ctgSideOpens.stream().anyMatch(sideOpen -> sideOpen.branch() == b)) {
-            return false;                                    // the contingency opened ONE side of it: CPU
+            return "SWITCH_SIDE_OPENED_BY_CONTINGENCY";     // the contingency opened ONE side of it: CPU
         }
         if (b != null && switchAction.isOpen()) {
             // OPEN: OLF's LfSwitchAction takes the switch out of the connectivity and disables what that islands. A switch
             // open at base or opened by the contingency stays as it is; otherwise it joins the pair's zero-impedance
-            // outages, as the switches a contingency's propagation opens do
+            // outages, as the switches a contingency's propagation opens do. OLF applies the actions in their order: opening a
+            // switch an earlier action of the strategy closed undoes that close
+            if (reclosed.remove(b) | loopCloses.remove(b) | deadIslandCloses.remove(b)) {
+                return null;                                 // open at base, open again
+            }
+            if (reenabled.remove(b)) {
+                zeroImpedanceOutages.add(b);                 // the contingency opened it: opened again
+                return null;
+            }
             if (!b.isDisabled() && !zeroImpedanceOutages.contains(b) && !branches.contains(b)) {
                 if (b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                     zeroImpedanceOutages.add(b);
@@ -362,13 +637,25 @@ final class GpuStrategyComposer {
                 }
                 opened.add(b);
             }
-            return true;
+            return null;
         }
         if (b != null && branches.remove(b)) {
-            return true;
+            return null;
         }
-        if (b == null || !b.isDisabled() || !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-            return false;
+        if (b == null) {
+            // OLF retains a switch for an action only when the action changes its state (Actions.addAllSwitchesToOperate):
+            // an action leaving its switch as it is finds no LfBranch, and OLF's LfSwitchAction changes nothing
+            return null;
+        }
+        if (!b.isDisabled()) {
+            if (zeroImpedanceOutages.remove(b)) {
+                // a switch the contingency opened: the pair keeps it, and OLF re-enables what it brings back
+                reenabled.add(b);
+            }
+            return null;                                     // closing a closed switch: OLF enables an enabled branch
+        }
+        if (!b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+            return "SWITCH_CLOSE_NOT_ZERO_IMPEDANCE";
         }
         // CLOSE of a retained-open switch (zero-impedance branch). Only the spanning-tree MERGE shape is batched:
         // distinct zero-impedance groups (or none) on the two sides. A loop-closing switch is an electrical no-op on
@@ -376,14 +663,22 @@ final class GpuStrategyComposer {
         LfBus bus1 = b.getBus1();
         LfBus bus2 = b.getBus2();
         if (bus1 == null || bus2 == null || bus1.isDisabled() || bus2.isDisabled()) {
-            return false;                                    // dead-island re-energization — CPU
+            if (bus1 == null || bus2 == null) {
+                return "SWITCH_CLOSE_DEAD_ISLAND";
+            }
+            // a switch closing onto a bus out of the network: what it re-energizes is composed once the whole action list
+            // is known (composeReenergizedIsland)
+            deadIslandCloses.add(b);
+            return null;
         }
         var zn1 = bus1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
         var zn2 = bus2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
         if (zn1 == null || zn2 == null || zn1 != zn2) {
             reclosed.add(b);                                 // tree merge — batched
+            return null;
         }
-        return true;                                         // same zero-impedance network: loop close, no-op
+        loopCloses.add(b);                                   // same zero-impedance network at base: decided once every action is known
+        return null;
     }
 
     /**
@@ -393,6 +688,14 @@ final class GpuStrategyComposer {
      */
     private static java.util.Set<LfBus> busesBroughtBack(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> reenabled,
                                                          List<LfBranch> opened) {
+        return broughtBack(net, ctgCut, reenabled, opened).buses();
+    }
+
+    /** The buses and branches OLF's connectivity adds to the main component (see {@link #busesBroughtBack}). */
+    private record BroughtBack(java.util.Set<LfBus> buses, java.util.Set<LfBranch> edges) {
+    }
+
+    private static BroughtBack broughtBack(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> reenabled, List<LfBranch> opened) {
         com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> connectivity = net.getConnectivity();
         LfBus slack = net.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
         connectivity.startTemporaryChanges();
@@ -412,7 +715,8 @@ final class GpuStrategyComposer {
                 opened.stream().filter(b -> b.getBus1() != null && b.getBus2() != null && !cut.contains(b))
                         .forEach(connectivity::removeEdge);
                 reenabled.forEach(b -> connectivity.addEdge(b.getBus1(), b.getBus2(), b));
-                return new java.util.HashSet<>(connectivity.getVerticesAddedToMainComponent());
+                return new BroughtBack(new java.util.HashSet<>(connectivity.getVerticesAddedToMainComponent()),
+                        new java.util.HashSet<>(connectivity.getEdgesAddedToMainComponent()));
             } finally {
                 connectivity.undoTemporaryChanges();
             }

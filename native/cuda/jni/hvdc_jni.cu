@@ -20,34 +20,32 @@ OLF_JNI(ac_outerloop_gpu, HvdcNative, setBatchHvdcLoops)(
         return;
     }
     if (jElem == nullptr || env->GetArrayLength(jElem) == 0) {
-        ctx->nHvdcAcEmulation = 0;
+        ctx->hvdcAcEmulation.nHvdcAcEmulation = 0;
         return;
     }
     int nh = env->GetArrayLength(jElem);
     auto upI = [&](jintArray a, DeviceBuf& b) {
-        jint* q = env->GetIntArrayElements(a, nullptr);
+        const JniInts q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(int));
-        env->ReleaseIntArrayElements(a, q, JNI_ABORT);
     };
     auto upD = [&](jdoubleArray a, DeviceBuf& b) {
-        jdouble* q = env->GetDoubleArrayElements(a, nullptr);
+        const JniDoubles q(env, a);
         b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
-        env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
     };
-    upI(jElem, ctx->dHvdcElement);
-    upI(jHvdcBus1PRow, ctx->dHvdcBus1PRow);
-    upI(jHvdcBus2PRow, ctx->dHvdcBus2PRow);
-    upI(jHvdcBus1PhiColumn, ctx->dHvdcBus1PhiColumn);
-    upI(jHvdcBus2PhiColumn, ctx->dHvdcBus2PhiColumn);
-    upD(jIn, ctx->dHvdcAcEmulationParameters);
+    upI(jElem, ctx->hvdcAcEmulation.dHvdcElement);
+    upI(jHvdcBus1PRow, ctx->hvdcAcEmulation.dHvdcBus1PRow);
+    upI(jHvdcBus2PRow, ctx->hvdcAcEmulation.dHvdcBus2PRow);
+    upI(jHvdcBus1PhiColumn, ctx->hvdcAcEmulation.dHvdcBus1PhiColumn);
+    upI(jHvdcBus2PhiColumn, ctx->hvdcAcEmulation.dHvdcBus2PhiColumn);
+    upD(jIn, ctx->hvdcAcEmulation.dHvdcAcEmulationParameters);
     // the scenarios' starting state, per (installed slot, hvdc): the HVDC phases write it on the device as they go
-    ctx->nHvdcAcEmulation = nh;
+    ctx->hvdcAcEmulation.nHvdcAcEmulation = nh;
     const char* who = "setBatchHvdcLoops";
-    installSlotRows(env, ctx, ctx->hvdcAcEmulationStatus, nh, jHvdcAcEmulationStatus, who);
-    installSlotRows(env, ctx, ctx->hvdcAppliedDelta1, nh, jHvdcAppliedDelta1, who);
-    installSlotRows(env, ctx, ctx->hvdcAppliedDelta2, nh, jHvdcAppliedDelta2, who);
-    installSlotRows(env, ctx, ctx->hvdcContingencyOutage, nh, jHvdcContingencyOutage, who);
-    ctx->hvdcAcEmulationLimitsActive = limitsActive;
+    installSlotRows(env, ctx, ctx->hvdcAcEmulation.hvdcAcEmulationStatus, nh, jHvdcAcEmulationStatus, who);
+    installSlotRows(env, ctx, ctx->hvdcAcEmulation.hvdcAppliedDelta1, nh, jHvdcAppliedDelta1, who);
+    installSlotRows(env, ctx, ctx->hvdcAcEmulation.hvdcAppliedDelta2, nh, jHvdcAppliedDelta2, who);
+    installSlotRows(env, ctx, ctx->hvdcAcEmulation.hvdcContingencyOutage, nh, jHvdcContingencyOutage, who);
+    ctx->hvdcAcEmulation.hvdcAcEmulationLimitsActive = limitsActive;
 }
 
 /** Read the HVDC statuses back after a solve, so the host keeps its own view in step. */
@@ -55,11 +53,11 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, HvdcNative, readBatchHvdcStatus)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nHvdcAcEmulation == 0) {
+    if (ctx == nullptr || ctx->hvdcAcEmulation.nHvdcAcEmulation == 0) {
         return nullptr;
     }
     std::vector<int> host;
-    if (readInstalledRows(ctx, ctx->hvdcAcEmulationStatus.device(), static_cast<size_t>(ctx->nHvdcAcEmulation), host) != cudaSuccess) {
+    if (readInstalledRows(ctx, ctx->hvdcAcEmulation.hvdcAcEmulationStatus.device(), static_cast<size_t>(ctx->hvdcAcEmulation.nHvdcAcEmulation), host) != cudaSuccess) {
         return nullptr;
     }
     jsize len = static_cast<jsize>(host.size());

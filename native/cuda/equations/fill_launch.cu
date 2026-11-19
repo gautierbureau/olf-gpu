@@ -49,14 +49,14 @@ ReactiveRelocationTables relocationTablesOf(Family& f, SharedStructure* structur
 // Attaches the PILOT-SELF gate to a structure-built ReactiveRelocationTables. Inert (and identical to before) on any
 // context without such a group, so every existing candidate-table group keeps its exact behavior.
 ReactiveRelocationTables withPilotSelf(ReactiveRelocationTables rt, BatchSolverContext* ctx) {
-    if (ctx->hasPilotSelf && ctx->dPilotSelfCarrierSkip.p != nullptr) {
-        rt.pilotSelfCarrierSkip = ctx->dPilotSelfCarrierSkip.template as<char>();
+    if (ctx->remoteVoltageControl.hasPilotSelf && ctx->remoteVoltageControl.dPilotSelfCarrierSkip.p != nullptr) {
+        rt.pilotSelfCarrierSkip = ctx->remoteVoltageControl.dPilotSelfCarrierSkip.template as<char>();
         rt.pilotSelfCarrierSkipStride = ctx->structure->nReactiveRelocationGroups;
     }
-    if (ctx->distrQSubgroup.on()) {                                     // tasks #71: per-scenario subgroups of a split group
-        rt.distrQSubgroup = ctx->distrQSubgroup.device();
-        rt.reactiveRelocationDistrQMemberStart = ctx->dReactiveRelocationDistrQMemberStart.template as<int>();
-        rt.nDistrQMembers = ctx->nDistrQMembers;
+    if (ctx->remoteVoltageControl.distrQSubgroup.on()) {                                     // tasks #71: per-scenario subgroups of a split group
+        rt.distrQSubgroup = ctx->remoteVoltageControl.distrQSubgroup.device();
+        rt.reactiveRelocationDistrQMemberStart = ctx->remoteVoltageControl.dReactiveRelocationDistrQMemberStart.template as<int>();
+        rt.nDistrQMembers = ctx->remoteVoltageControl.nDistrQMembers;
     }
     return rt;
 }
@@ -132,7 +132,7 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 // max reactive yet cannot reach target ⇒ PQ at maxQ (2); v above target ⇒ PQ at minQ (1). switchCount
 // starts at 0 either way (a separate memset).
 const int* pilotSelfReactiveLimitEntryOrNull(BatchSolverContext* ctx) {
-    return ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p != nullptr ? ctx->dPilotSelfReactiveLimitEntry.template as<int>() : nullptr;
+    return ctx->remoteVoltageControl.hasPilotSelf && ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p != nullptr ? ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.template as<int>() : nullptr;
 }
 
 // Blocks per scenario of zeroActiveValues: each thread zeroes every (blocks x BLOCK)-th value of its scenario.
@@ -270,13 +270,13 @@ void fillTerms(BatchSolverContext* ctx, DriverPass& drv, bool fOnly, double* val
         }
     }
 int distrQTraceRow = gpuDistrQTraceRow();
-if (ctx->nDistrQ) fillDistrQBatch<<<grid(ctx->nDistrQ * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrQ, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset, ctx->structure->dDistrQElement.as<int>(), ctx->structure->dDistrQSide.as<int>(), ctx->structure->dDistrQKind.as<int>(), ctx->structure->dDistrQWeight.as<double>(), ctx->structure->dDistrQDestination.as<int>(), ctx->structure->dDistrQAlternateDestination.as<int>(), ctx->structure->dDistrQSelectorRow.as<int>(), ctx->structure->dDistrQDummyQRow.as<int>(), ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->distrQWeightOverrides.view(),
-            ctx->distrQKeyOverrides.view(), ctx->dMode.as<int>(), ctx->distrQInactiveMembers.view(),
-            ctx->nDistrQDynamicKeys ? ctx->dDistrQRowMember.as<int>() : nullptr, ctx->nDistrQDynamicKeys || ctx->hasDistrQRelocationGroups ? ctx->dDistrQInjectionMember.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberKey.as<double>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberGroupStart.as<int>() : nullptr, ctx->nDistrQDynamicKeys ? ctx->dDistrQMemberGroupCount.as<int>() : nullptr, ctx->dReactiveLimitQLimitType.as<char>(), ctx->nReactiveLimitEntries, ctx->hasPilotSelf && ctx->dPilotSelfCarrierSkip.p != nullptr ? ctx->dPilotSelfCarrierSkip.as<char>() : nullptr, ctx->structure->nReactiveRelocationGroups, ctx->hasDistrQRelocationGroups ? ctx->dDistrQMemberRelocationGroup.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr, closedBranchParameterOverrides(ctx), shuntAdmittanceOverrides(ctx), distrQTraceRow,
-                ctx->distrQSubgroup.deviceOrNull(), ctx->distrQSubgroup.on() ? ctx->dReactiveRelocationDistrQMemberStart.as<int>() : nullptr, ctx->nDistrQMembers, layout);
-    if (ctx->nDistrRho) fillDistrRhoBatch<<<grid(ctx->nDistrRho * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrRho, nS, n, nnz, ctx->structure->dDistrRhoColumn.as<int>(), ctx->structure->dDistrRhoCoefficient.as<double>(), ctx->structure->dDistrRhoDestination.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dActive.as<char>(), ctx->distrRhoCoefficientOverrides.view(), ctx->structure->hasDistrRhoRelocationGroups ? ctx->structure->dDistrRhoRelocationGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), layout);
+if (ctx->nDistrQ) fillDistrQBatch<<<grid(ctx->nDistrQ * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrQ, nS, n, nnz, ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset, ctx->structure->dDistrQElement.as<int>(), ctx->structure->dDistrQSide.as<int>(), ctx->structure->dDistrQKind.as<int>(), ctx->structure->dDistrQWeight.as<double>(), ctx->structure->dDistrQDestination.as<int>(), ctx->structure->dDistrQAlternateDestination.as<int>(), ctx->structure->dDistrQSelectorRow.as<int>(), ctx->structure->dDistrQDummyQRow.as<int>(), ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->remoteVoltageControl.distrQWeightOverrides.view(),
+            ctx->remoteVoltageControl.distrQKeyOverrides.view(), ctx->dMode.as<int>(), ctx->remoteVoltageControl.distrQInactiveMembers.view(),
+            ctx->remoteVoltageControl.nDistrQDynamicKeys ? ctx->remoteVoltageControl.dDistrQRowMember.as<int>() : nullptr, ctx->remoteVoltageControl.nDistrQDynamicKeys || ctx->remoteVoltageControl.hasDistrQRelocationGroups ? ctx->remoteVoltageControl.dDistrQInjectionMember.as<int>() : nullptr, ctx->remoteVoltageControl.nDistrQDynamicKeys ? ctx->remoteVoltageControl.dDistrQMemberKey.as<double>() : nullptr, ctx->remoteVoltageControl.nDistrQDynamicKeys ? ctx->remoteVoltageControl.dDistrQMemberReactiveLimitEntry.as<int>() : nullptr, ctx->remoteVoltageControl.nDistrQDynamicKeys ? ctx->remoteVoltageControl.dDistrQMemberGroupStart.as<int>() : nullptr, ctx->remoteVoltageControl.nDistrQDynamicKeys ? ctx->remoteVoltageControl.dDistrQMemberGroupCount.as<int>() : nullptr, ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(), ctx->reactiveLimits.nReactiveLimitEntries, ctx->remoteVoltageControl.hasPilotSelf && ctx->remoteVoltageControl.dPilotSelfCarrierSkip.p != nullptr ? ctx->remoteVoltageControl.dPilotSelfCarrierSkip.as<char>() : nullptr, ctx->structure->nReactiveRelocationGroups, ctx->remoteVoltageControl.hasDistrQRelocationGroups ? ctx->remoteVoltageControl.dDistrQMemberRelocationGroup.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationGroupStart.as<int>() : nullptr, ctx->structure->nReactiveRelocationGroups > 0 ? ctx->structure->dReactiveRelocationCandidateRows.as<int>() : nullptr, closedBranchParameterOverrides(ctx), shuntAdmittanceOverrides(ctx), distrQTraceRow,
+                ctx->remoteVoltageControl.distrQSubgroup.deviceOrNull(), ctx->remoteVoltageControl.distrQSubgroup.on() ? ctx->remoteVoltageControl.dReactiveRelocationDistrQMemberStart.as<int>() : nullptr, ctx->remoteVoltageControl.nDistrQMembers, layout);
+    if (ctx->nDistrRho) fillDistrRhoBatch<<<grid(ctx->nDistrRho * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrRho, nS, n, nnz, ctx->structure->dDistrRhoColumn.as<int>(), ctx->structure->dDistrRhoCoefficient.as<double>(), ctx->structure->dDistrRhoDestination.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dActive.as<char>(), ctx->scenarioOverrides.distrRhoCoefficientOverrides.view(), ctx->structure->hasDistrRhoRelocationGroups ? ctx->structure->dDistrRhoRelocationGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->structure->dReactiveRelocationGroupStart.as<int>(), ctx->structure->dReactiveRelocationCandidateRows.as<int>(), layout);
     if (ctx->nDistrShuntB) fillDistrShuntBBatch<<<grid(ctx->nDistrShuntB * nS), BLOCK, 0, ctx->stream>>>(ctx->nDistrShuntB, nS, n, nnz, ctx->structure->dDistrShuntBColumn.as<int>(), ctx->structure->dDistrShuntBCoefficient.as<double>(), ctx->structure->dDistrShuntBDestination.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dActive.as<char>(), layout);
-    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, ctx->structure->dZeroImpedanceAlternateDestination.as<int>(), ctx->structure->dZeroImpedanceSelectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->zeroImpedanceDynamicRelocation ? 1 : 0, withPilotSelf(zeroImpedanceRelocationTables(ctx->structure.get()), ctx), ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), layout);
+    if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), vals, F, ctx->dActive.as<char>(), ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches, ctx->structure->dZeroImpedanceAlternateDestination.as<int>(), ctx->structure->dZeroImpedanceSelectorRow.as<int>(), ctx->dMode.as<int>(), ctx->structure->zeroImpedanceDynamicRelocation ? 1 : 0, withPilotSelf(zeroImpedanceRelocationTables(ctx->structure.get()), ctx), ctx->scenarioOverrides.zeroImpedanceBranchOpenMask.device(), ctx->scenarioOverrides.zeroImpedanceBranchCloseMask.device(), ctx->scenarioOverrides.spanningTreeOverrideMask.device(), layout);
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->structure->dRowPtr.as<int>(), ctx->structure->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), vals, F, ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
                 ctx->structure->dColIdx.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr, layout);
 }
@@ -289,7 +289,7 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
     const int& nnz = drv.nnz;
     const int& nS = drv.nS;
     const bool& deviceFixedIter = drv.deviceFixedIter;
-    if (ctx->hasPilotSelf && ctx->dPilotSelfCarrierSkip.p != nullptr && ctx->structure->nReactiveRelocationGroups > 0) {
+    if (ctx->remoteVoltageControl.hasPilotSelf && ctx->remoteVoltageControl.dPilotSelfCarrierSkip.p != nullptr && ctx->structure->nReactiveRelocationGroups > 0) {
         // Recompute the PILOT-SELF gate from the CURRENT reactive-limit states BEFORE any family fill: such a pilot
         // has a Q balance to relocate only once a reactive limit has switched it to PQ, and the RL pass switches
         // buses between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
@@ -299,9 +299,9 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
         // pilot-as-controller fixture assembled -1.451 against OLF's -5.715 (= OLF + 1.0 * q_pilot), and
         // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.
         pilotSelfGateBatch<<<grid(ctx->structure->nReactiveRelocationGroups * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->structure->nReactiveRelocationGroups, nS, ctx->nReactiveLimitEntries, ctx->dPilotSelfReactiveLimitEntry.as<int>(),
-                ctx->dReactiveLimitQLimitType.as<char>(),
-                ctx->reactiveLimitIslanded.deviceOrNull(), ctx->dPilotSelfCarrierSkip.as<char>());
+                ctx->structure->nReactiveRelocationGroups, nS, ctx->reactiveLimits.nReactiveLimitEntries, ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.as<int>(),
+                ctx->reactiveLimits.dReactiveLimitQLimitType.as<char>(),
+                ctx->reactiveLimits.reactiveLimitIslanded.deviceOrNull(), ctx->remoteVoltageControl.dPilotSelfCarrierSkip.as<char>());
     }
     // the mismatch the fills add into: dF itself on the scenario-major layout, the interleaved dFillMismatch, copied into
     // dF once the row modes are applied, on the interleaved one
@@ -311,7 +311,7 @@ void fillActiveBatch(BatchSolverContext* ctx, DriverPass& drv, bool fOnly) {
             const size_t threads = static_cast<size_t>(nnz) * (ctx->layout.stride / SECTOR_SCENARIOS);
             zeroActiveInterleavedValues<<<static_cast<unsigned>((threads + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(
                     nnz, ctx->layout, ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dIdentityLane.as<char>());
-        } else if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        } else if (ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH || ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
             // the uniform batches: a retired scenario gets its identity system before every solve (newton_iteration)
             const dim3 zeroGrid(std::min((nnz + BLOCK - 1) / BLOCK, ZERO_BLOCKS_PER_SCENARIO), nS);
             zeroActiveValues<<<zeroGrid, BLOCK, 0, ctx->stream>>>(nnz, ctx->dActive.as<char>(), ctx->dVals.as<double>(),

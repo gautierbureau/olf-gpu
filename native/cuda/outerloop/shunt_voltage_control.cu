@@ -144,32 +144,32 @@ __global__ void shuntVoltageControlCheckBatch(ShuntVoltageControlTables T, int n
 
 static ShuntVoltageControlTables shuntVoltageControlTables(BatchSolverContext* ctx) {
     ShuntVoltageControlTables T;
-    T.nGroups = ctx->nShuntVoltageControlGroups; T.nMembers = ctx->nShuntVoltageControlMembers; T.nDeltaRows = ctx->nShuntVoltageControlDeltaRows; T.nShuntCompensators = ctx->nShuntVoltageControlShuntCompensators;
-    T.groupMemberStart = ctx->dShuntVoltageControlGroupMemberStart.as<int>();
-    T.deltaStart = ctx->dShuntVoltageControlDeltaStart.as<int>(); T.deltaRow = ctx->dShuntVoltageControlDeltaRow.as<int>();
-    T.deltaModeOn = ctx->dShuntVoltageControlDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dShuntVoltageControlDeltaModeOff.as<int>();
-    T.deltaTargetOn = ctx->dShuntVoltageControlDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dShuntVoltageControlDeltaTargetOff.as<double>();
-    T.memberShuntBRow = ctx->dShuntVoltageControlMemberShuntBRow.as<int>(); T.memberElement = ctx->dShuntVoltageControlMemberElement.as<int>(); T.memberShuntCompensatorStart = ctx->dShuntVoltageControlMemberShuntCompensatorStart.as<int>();
-    T.sectionStart = ctx->dShuntVoltageControlSectionStart.as<int>(); T.sectionB = ctx->dShuntVoltageControlSectionB.as<double>(); T.shuntCompensatorMinPosition = ctx->dShuntVoltageControlShuntCompensatorMinPosition.as<int>(); T.shuntCompensatorBasePosition = ctx->dShuntVoltageControlShuntCompensatorBasePosition.as<int>();
-    T.groupStep = ctx->dShuntVoltageControlGroupStep.as<int>(); T.memberState = ctx->dShuntVoltageControlMemberState.as<int>(); T.memberContinuousB = ctx->dShuntVoltageControlMemberContinuousB.as<double>();
-    T.shuntCompensatorPosition = ctx->dShuntVoltageControlShuntCompensatorPosition.as<int>(); T.savedDeltaTarget = ctx->dShuntVoltageControlSavedDeltaTarget.as<double>();
+    T.nGroups = ctx->shuntVoltageControl.nShuntVoltageControlGroups; T.nMembers = ctx->shuntVoltageControl.nShuntVoltageControlMembers; T.nDeltaRows = ctx->shuntVoltageControl.nShuntVoltageControlDeltaRows; T.nShuntCompensators = ctx->shuntVoltageControl.nShuntVoltageControlShuntCompensators;
+    T.groupMemberStart = ctx->shuntVoltageControl.dShuntVoltageControlGroupMemberStart.as<int>();
+    T.deltaStart = ctx->shuntVoltageControl.dShuntVoltageControlDeltaStart.as<int>(); T.deltaRow = ctx->shuntVoltageControl.dShuntVoltageControlDeltaRow.as<int>();
+    T.deltaModeOn = ctx->shuntVoltageControl.dShuntVoltageControlDeltaModeOn.as<int>(); T.deltaModeOff = ctx->shuntVoltageControl.dShuntVoltageControlDeltaModeOff.as<int>();
+    T.deltaTargetOn = ctx->shuntVoltageControl.dShuntVoltageControlDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->shuntVoltageControl.dShuntVoltageControlDeltaTargetOff.as<double>();
+    T.memberShuntBRow = ctx->shuntVoltageControl.dShuntVoltageControlMemberShuntBRow.as<int>(); T.memberElement = ctx->shuntVoltageControl.dShuntVoltageControlMemberElement.as<int>(); T.memberShuntCompensatorStart = ctx->shuntVoltageControl.dShuntVoltageControlMemberShuntCompensatorStart.as<int>();
+    T.sectionStart = ctx->shuntVoltageControl.dShuntVoltageControlSectionStart.as<int>(); T.sectionB = ctx->shuntVoltageControl.dShuntVoltageControlSectionB.as<double>(); T.shuntCompensatorMinPosition = ctx->shuntVoltageControl.dShuntVoltageControlShuntCompensatorMinPosition.as<int>(); T.shuntCompensatorBasePosition = ctx->shuntVoltageControl.dShuntVoltageControlShuntCompensatorBasePosition.as<int>();
+    T.groupStep = ctx->shuntVoltageControl.dShuntVoltageControlGroupStep.as<int>(); T.memberState = ctx->shuntVoltageControl.dShuntVoltageControlMemberState.as<int>(); T.memberContinuousB = ctx->shuntVoltageControl.dShuntVoltageControlMemberContinuousB.as<double>();
+    T.shuntCompensatorPosition = ctx->shuntVoltageControl.dShuntVoltageControlShuntCompensatorPosition.as<int>(); T.savedDeltaTarget = ctx->shuntVoltageControl.dShuntVoltageControlSavedDeltaTarget.as<double>();
     return T;
 }
 
 void shuntVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    if (ctx->nShuntVoltageControlMembers <= 0) return;
+    if (ctx->shuntVoltageControl.nShuntVoltageControlMembers <= 0) return;
     shuntVoltageControlCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     if (traceOn(Trace::BATCH_TRACE)) {
-        size_t nsm = static_cast<size_t>(nS) * ctx->nShuntVoltageControlMembers;
+        size_t nsm = static_cast<size_t>(nS) * ctx->shuntVoltageControl.nShuntVoltageControlMembers;
         std::vector<int> memberState(nsm);
-        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(memberState.data(), ctx->shuntVoltageControl.dShuntVoltageControlMemberState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
         int nCont = 0, nFixed = 0;
         for (size_t k = 0; k < nsm; k++) { nCont += memberState[k] == GpuDiscreteControlMemberState::CONTINUOUS; nFixed += memberState[k] == GpuDiscreteControlMemberState::ROUNDED; }
-        std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nShuntVoltageControlMembers, nCont, nFixed);
+        std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->shuntVoltageControl.nShuntVoltageControlMembers, nCont, nFixed);
     }
 }
 
@@ -179,14 +179,14 @@ void shuntVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     const double nan = std::nan("");
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-    resetInstalledRows(ctx, ctx->dShuntVoltageControlShuntCompensatorPosition.as<int>(),
-                       static_cast<size_t>(std::max(ctx->nShuntVoltageControlShuntCompensators, 1)), nullptr, 0);
-    resetInstalledRows(ctx, ctx->dShuntVoltageControlMemberState.as<int>(), ctx->nShuntVoltageControlMembers, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dShuntVoltageControlMemberContinuousB.as<double>(), ctx->nShuntVoltageControlMembers, nullptr, nan);
-    resetInstalledRows(ctx, ctx->dShuntVoltageControlSavedDeltaTarget.as<double>(),
-                       static_cast<size_t>(std::max(ctx->nShuntVoltageControlDeltaRows, 1)), nullptr, nan);
-    resetInstalledRows(ctx, ctx->dShuntVoltageControlGroupStep.as<int>(), ctx->nShuntVoltageControlGroups, nullptr, 0);
-    shuntVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->shuntVoltageControlEntryOn,
+    resetInstalledRows(ctx, ctx->shuntVoltageControl.dShuntVoltageControlShuntCompensatorPosition.as<int>(),
+                       static_cast<size_t>(std::max(ctx->shuntVoltageControl.nShuntVoltageControlShuntCompensators, 1)), nullptr, 0);
+    resetInstalledRows(ctx, ctx->shuntVoltageControl.dShuntVoltageControlMemberState.as<int>(), ctx->shuntVoltageControl.nShuntVoltageControlMembers, nullptr, 0);
+    resetInstalledRows(ctx, ctx->shuntVoltageControl.dShuntVoltageControlMemberContinuousB.as<double>(), ctx->shuntVoltageControl.nShuntVoltageControlMembers, nullptr, nan);
+    resetInstalledRows(ctx, ctx->shuntVoltageControl.dShuntVoltageControlSavedDeltaTarget.as<double>(),
+                       static_cast<size_t>(std::max(ctx->shuntVoltageControl.nShuntVoltageControlDeltaRows, 1)), nullptr, nan);
+    resetInstalledRows(ctx, ctx->shuntVoltageControl.dShuntVoltageControlGroupStep.as<int>(), ctx->shuntVoltageControl.nShuntVoltageControlGroups, nullptr, 0);
+    shuntVoltageControlEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(shuntVoltageControlTables(ctx), nS, n, ctx->nElements, ctx->shuntVoltageControl.shuntVoltageControlEntryOn,
             ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), installMaskOrNull(ctx));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }

@@ -78,17 +78,17 @@ __global__ void automationSystemBatch(int nS, int n, int nElements, int nSystems
 void automationSystemCheck(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    if (ctx->nOverloadManagementSystems <= 0) {
+    if (ctx->automationSystem.nOverloadManagementSystems <= 0) {
         return;
     }
-    ctx->dAutomationSystemSwitched.alloc((size_t) nS * ctx->nOverloadManagementSystemTrippings * sizeof(char));
-    automationSystemBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nElements, ctx->nOverloadManagementSystems,
-            ctx->dOverloadManagementSystemMonitoredElement.as<int>(), ctx->dOverloadManagementSystemMonitoredSide.as<int>(),
-            ctx->dOverloadManagementSystemTrippingStart.as<int>(), ctx->dOverloadManagementSystemOperatedMaskSlot.as<int>(),
-            ctx->dOverloadManagementSystemOpenAction.as<char>(), ctx->dOverloadManagementSystemThreshold.as<double>(),
+    ctx->automationSystem.dAutomationSystemSwitched.alloc((size_t) nS * ctx->automationSystem.nOverloadManagementSystemTrippings * sizeof(char));
+    automationSystemBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nElements, ctx->automationSystem.nOverloadManagementSystems,
+            ctx->automationSystem.dOverloadManagementSystemMonitoredElement.as<int>(), ctx->automationSystem.dOverloadManagementSystemMonitoredSide.as<int>(),
+            ctx->automationSystem.dOverloadManagementSystemTrippingStart.as<int>(), ctx->automationSystem.dOverloadManagementSystemOperatedMaskSlot.as<int>(),
+            ctx->automationSystem.dOverloadManagementSystemOpenAction.as<char>(), ctx->automationSystem.dOverloadManagementSystemThreshold.as<double>(),
             ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(),
             closedBranchParameterOverrides(ctx), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->dDisabled.as<char>(),
-            ctx->dAutomationSystemSwitched.as<char>(), ctx->dOuterLoopUnstable.as<char>());
+            ctx->automationSystem.dAutomationSystemSwitched.as<char>(), ctx->dOuterLoopUnstable.as<char>());
     CUDA_CHECK(cudaGetLastError());
 }
 

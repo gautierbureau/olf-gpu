@@ -188,39 +188,39 @@ __global__ void incrementalTransformerVoltageControlApplyRhoBatch(int nIncrement
 // Per-solve reset. Incremental TVC: every scenario starts at the base tap with a fresh ratchet.
 void incrementalTransformerVoltageControlResetSolve(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
-    const size_t nc = static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches);
+    const size_t nc = static_cast<size_t>(ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches);
     const size_t nst = static_cast<size_t>(nS) * nc;
-    const int* baseTap = ctx->hIncrementalTransformerVoltageControlBaseTap.data();
-    ctx->dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
-    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), nc, baseTap);
-    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlAppliedTap.as<int>(), nc, baseTap);
-    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), nc, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
-    resetInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), nc, nullptr, 0);
-    ctx->dIncrementalTransformerVoltageControlOutOfDeadband.ensure(nst * sizeof(char));
-    ctx->dIncrementalTransformerVoltageControlDiffV.ensure(nst * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlSensitivity.ensure(nst * sizeof(double));
+    const int* baseTap = ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap.data();
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
+    resetInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAppliedTap.as<int>(), nc, baseTap);
+    resetInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(), nc, nullptr, 0);
+    resetInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), nc, nullptr, 0);
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlOutOfDeadband.ensure(nst * sizeof(char));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDiffV.ensure(nst * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlSensitivity.ensure(nst * sizeof(double));
 }
 
 void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPass& drv) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     std::vector<char>& active = drv.active;
-    int nIncrementalTransformerVoltageControlControllerBranches = ctx->nIncrementalTransformerVoltageControlControllerBranches;
+    int nIncrementalTransformerVoltageControlControllerBranches = ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches;
     if (nIncrementalTransformerVoltageControlControllerBranches <= 0) return;
-    if (ctx->mode != GpuLinearSolveMode::UBATCH && ctx->mode != GpuLinearSolveMode::ROBUST
-            && ctx->mode != GpuLinearSolveMode::BATCHED_LU) {
+    if (ctx->linearSolver.mode != GpuLinearSolveMode::UBATCH && ctx->linearSolver.mode != GpuLinearSolveMode::ROBUST
+            && ctx->linearSolver.mode != GpuLinearSolveMode::BATCHED_LU) {
         static bool warned = false;
-        if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
+        if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3), robust (6) or batched LU (7) mode; mode %d runs it as stable\n", ctx->linearSolver.mode); warned = true; }
         return;
     }
     size_t nst = static_cast<size_t>(nS) * nIncrementalTransformerVoltageControlControllerBranches;
     incrementalTransformerVoltageControlDeadbandCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nIncrementalTransformerVoltageControlControllerBranches, nS, n, ctx->nElements,
-            ctx->dIncrementalTransformerVoltageControlControlledBusVRow.as<int>(), ctx->dIncrementalTransformerVoltageControlTargetV.as<double>(), ctx->dIncrementalTransformerVoltageControlHalfTargetDeadband.as<double>(),
-            ctx->dIncrementalTransformerVoltageControlElement.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-            ctx->dIncrementalTransformerVoltageControlOutOfDeadband.as<char>(), ctx->dIncrementalTransformerVoltageControlDiffV.as<double>());
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlControlledBusVRow.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTargetV.as<double>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlHalfTargetDeadband.as<double>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlElement.as<int>(), ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlOutOfDeadband.as<char>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDiffV.as<double>());
     std::vector<char> outOfDeadband(nst);
-    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->dIncrementalTransformerVoltageControlOutOfDeadband.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaMemcpyAsync(outOfDeadband.data(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlOutOfDeadband.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     std::vector<char> needC(nIncrementalTransformerVoltageControlControllerBranches, 0);
     bool any = false;
@@ -235,34 +235,34 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
     std::vector<char> ones(nS, 1);
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
     fillActiveBatch(ctx, drv, false);
-    CUDA_CHECK(cudaMemsetAsync(ctx->dIncrementalTransformerVoltageControlSensitivity.p, 0, nst * sizeof(double), ctx->stream));
+    CUDA_CHECK(cudaMemsetAsync(ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlSensitivity.p, 0, nst * sizeof(double), ctx->stream));
     bool first = true;
     for (int c = 0; c < nIncrementalTransformerVoltageControlControllerBranches; c++) {
         if (!needC[c]) continue;
-        int row = ctx->structure->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[c]];
+        int row = ctx->structure->rowMap[ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow[c]];
         if (row < 0) continue;                           // rho row not an active equation: stays insensitive
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
         sensitivitySolve(ctx, drv, first);
-        incrementalTransformerVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalTransformerVoltageControlControllerBranches, ctx->dIncrementalTransformerVoltageControlControlledBusVRow.as<int>(),
-                ctx->dDx.as<double>(), ctx->dIncrementalTransformerVoltageControlSensitivity.as<double>());
+        incrementalTransformerVoltageControlGatherSensitivityBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nIncrementalTransformerVoltageControlControllerBranches, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlControlledBusVRow.as<int>(),
+                ctx->dDx.as<double>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlSensitivity.as<double>());
     }
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
     // Tap decision; a moved scenario is an UNSTABLE verdict (dOuterLoopUnstable), like every device loop.
-    incrementalTransformerVoltageControlGroupDecisionBatch<<<grid(ctx->nIncrementalTransformerVoltageControlGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nIncrementalTransformerVoltageControlGroups, nS, nIncrementalTransformerVoltageControlControllerBranches,
-            ctx->dIncrementalTransformerVoltageControlGroupControllerStart.as<int>(), ctx->dIncrementalTransformerVoltageControlGroupController.as<int>(),
-            ctx->dIncrementalTransformerVoltageControlOutOfDeadband.as<char>(), ctx->dIncrementalTransformerVoltageControlDiffV.as<double>(), ctx->dIncrementalTransformerVoltageControlSensitivity.as<double>(), ctx->dIncrementalTransformerVoltageControlHalfTargetDeadband.as<double>(),
-            ctx->dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->dIncrementalTransformerVoltageControlTapRows.as<double>(),
-            ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(),
-            ctx->dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), ctx->incrementalTransformerVoltageControlMaxTapShift, 0.05, ctx->dOuterLoopUnstable.as<char>());
+    incrementalTransformerVoltageControlGroupDecisionBatch<<<grid(ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlGroups, nS, nIncrementalTransformerVoltageControlControllerBranches,
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupControllerStart.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupController.as<int>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlOutOfDeadband.as<char>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDiffV.as<double>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlSensitivity.as<double>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlHalfTargetDeadband.as<double>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapRows.as<double>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentDirection.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDirectionChangeCount.as<int>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAllowedDirection.as<int>(), ctx->incrementalTransformerVoltageControl.incrementalTransformerVoltageControlMaxTapShift, 0.05, ctx->dOuterLoopUnstable.as<char>());
     // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override tables.
     incrementalTransformerVoltageControlApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nIncrementalTransformerVoltageControlControllerBranches, nS, n,
-            ctx->dIncrementalTransformerVoltageControlRhoRow.as<int>(), ctx->dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->dIncrementalTransformerVoltageControlTapRows.as<double>(),
-            ctx->dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->dIncrementalTransformerVoltageControlAppliedTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlRhoRow.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapStart.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapRows.as<double>(),
+            ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.as<int>(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAppliedTap.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
     publishClosedBranchParameterOverrides(ctx);
     if (traceOn(Trace::BATCH_TRACE)) {
-        std::vector<int> cur(nst), base(ctx->hIncrementalTransformerVoltageControlBaseTap);
-        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dIncrementalTransformerVoltageControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> cur(nst), base(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
         int nOut = 0, nMoved = 0;
         for (size_t k = 0; k < nst; k++) {
             nOut += outOfDeadband[k] ? 1 : 0;
@@ -275,13 +275,13 @@ void incrementalTransformerVoltageControlStep(BatchSolverContext* ctx, DriverPas
         std::fprintf(stderr, "TVC_KERNEL nS=%d nControllers=%d outOfDeadband=%d pairsOffBaseTap=%d\n",
                      nS, nIncrementalTransformerVoltageControlControllerBranches, nOut, nMoved);
         std::vector<double> dv(nst), se(nst);
-        CUDA_CHECK(cudaMemcpy(dv.data(), ctx->dIncrementalTransformerVoltageControlDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(se.data(), ctx->dIncrementalTransformerVoltageControlSensitivity.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dv.data(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDiffV.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(se.data(), ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlSensitivity.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
         for (size_t k = 0; k < nst; k++) {
             if (outOfDeadband[k]) {
                 std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d diffV=%.9e sensitivity=%.9e tap=%d base=%d rhoRowMapped=%d\n",
                              (int) (k / nIncrementalTransformerVoltageControlControllerBranches), (int) (k % nIncrementalTransformerVoltageControlControllerBranches), dv[k], se[k], cur[k], base[k % nIncrementalTransformerVoltageControlControllerBranches],
-                             ctx->structure->rowMap[ctx->hIncrementalTransformerVoltageControlRhoRow[k % nIncrementalTransformerVoltageControlControllerBranches]]);
+                             ctx->structure->rowMap[ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow[k % nIncrementalTransformerVoltageControlControllerBranches]]);
             }
         }
     }

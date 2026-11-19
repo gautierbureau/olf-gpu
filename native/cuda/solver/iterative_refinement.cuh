@@ -152,7 +152,7 @@ void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const doubl
                         const double* b, double* r, const double* delta, const char* active, int internalSteps,
                         SolveFn solve, SolveLanesFn solveLanes) {
     refineLanes(RefinementContext{ctx->stream, ctx->structure->dRowPtr.as<int>(), ctx->structure->dColIdx.as<int>(),
-                                  ctx->dIterativeRefinementScore, ctx->dIterativeRefinementScenarioMask, nullptr,
+                                  ctx->linearSolver.dIterativeRefinementScore, ctx->linearSolver.dIterativeRefinementScenarioMask, nullptr,
                                   ctx->layout},
                 lanes, n, nnz, vals, dx, b, r, delta, active, internalSteps, solve, solveLanes);
 }

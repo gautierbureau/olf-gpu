@@ -50,11 +50,11 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSlackAbsorbed)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->slackOnlyDistribution) {
+    if (ctx == nullptr || !ctx->distributedSlack.slackOnlyDistribution) {
         return nullptr;
     }
     std::vector<double> host;
-    readInstalledRows(ctx, ctx->dSlackOnlyAbsorbed.p, 1, host);
+    readInstalledRows(ctx, ctx->distributedSlack.dSlackOnlyAbsorbed.p, 1, host);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
@@ -64,11 +64,11 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchDistributedSlackGeneratorMove)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nDistributedSlackGenerators <= 0 || !ctx->dDistributedSlackGeneratorMove.p) {
+    if (ctx == nullptr || ctx->distributedSlack.nDistributedSlackGenerators <= 0 || !ctx->distributedSlack.dDistributedSlackGeneratorMove.p) {
         return nullptr;
     }
     std::vector<double> host;
-    readInstalledRows(ctx, ctx->dDistributedSlackGeneratorMove.p, static_cast<size_t>(ctx->nDistributedSlackGenerators), host);
+    readInstalledRows(ctx, ctx->distributedSlack.dDistributedSlackGeneratorMove.p, static_cast<size_t>(ctx->distributedSlack.nDistributedSlackGenerators), host);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
@@ -138,11 +138,11 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_solver_gpu, BatchReadbackNative, readBatchSlackRetainedShare)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->dSlackRetainedShareApplied.p) {
+    if (ctx == nullptr || !ctx->distributedSlack.dSlackRetainedShareApplied.p) {
         return nullptr;
     }
     std::vector<double> host;
-    readInstalledRows(ctx, ctx->dSlackRetainedShareApplied.p, 1, host);
+    readInstalledRows(ctx, ctx->distributedSlack.dSlackRetainedShareApplied.p, 1, host);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(host.size()));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;

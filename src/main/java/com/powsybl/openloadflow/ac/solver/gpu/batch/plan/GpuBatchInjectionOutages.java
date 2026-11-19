@@ -376,16 +376,8 @@ public final class GpuBatchInjectionOutages {
         // would misread as already-distributed slack power unless distributedSlackBusBaseTargetP shifts with it
         // (measured: a +60 MW redispatch cancelled to a no-op before the base-shift fix).
         double preLostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
-        int distributedSlackOverrideBusIndex = -1;
-        if (distributedSlack && (!lost.isEmpty() || preLostLoadP != 0)) {      // the run distributes: its participant reweights
-            int[] distributedSlackBusPhiRow = gpuData.distributedSlack().busPhiRow();
-            for (int i = 0; i < distributedSlackBusPhiRow.length; i++) {
-                if (distributedSlackBusPhiRow[i] == pRow) {
-                    distributedSlackOverrideBusIndex = i;
-                    break;
-                }
-            }
-        }
+        int distributedSlackOverrideBusIndex = distributedSlack && (!lost.isEmpty() || preLostLoadP != 0)   // the run distributes:
+                ? indexOf(gpuData.distributedSlack().busPhiRow(), pRow) : -1;                         // its participant reweights
         boolean lostParticipation = lost.stream().anyMatch(g -> distributedSlackParameters.factor(g) != 0);
         if (distributedSlackParameters.isRemainingMargin() && distributedSlackOverrideBusIndex >= 0 && lostParticipation) {
             return null;       // RM margins reweight per scenario: not modeled — CPU
@@ -398,41 +390,11 @@ public final class GpuBatchInjectionOutages {
         double lostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
         double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
-        boolean busPv = bus.isGeneratorVoltageControlEnabled();
-        // The bus is the CONTROLLED bus of an enabled, non-local generator voltage control: its V row
-        // holds BUS_TARGET_V that some OTHER bus's generators maintain. Same predicate the extraction
-        // uses to decide a pilot's row layout.
-        boolean remotelyControlled = bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
-                .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
-                .isPresent();
-        boolean lostControls = lost.stream()
-                .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
-        boolean otherController = bus.getGenerators().stream()
-                .anyMatch(g -> !lostSet.contains(g) && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
-        // vcSurvives: the group's other controllers still regulate this bus, so it keeps its voltage
-        // target and must NOT be flipped to its own reactive balance (measured: doing so moves the
-        // SURVIVING controllers — rte6515 GEN-1522, 3.157 kV at VL-1525).
-        boolean toPq = busPv && lostControls && !otherController && !vcSurvives;
-        // distrQBus with keepsController: otherController is true by the guard above, so toPq stays
-        // false and qOverride below stays false (busPv true) — the group's distribution re-balances
-        // the lost reactive share on both arms; only the P target drop and DS reweight apply.
-        // The bus Q TARGET must shed the lost gens' targetQ whenever the V row solves the reactive
-        // equation in the scenario: on the PV->PQ flip AND on an ALREADY-PQ bus losing fixed-Q
-        // generation (task #21 — the flip-only version silently kept the lost Q injected; measured
-        // 0.27 kV voltage divergence on ieee14 for a 15-MVAr fixed-Q gen loss).
-        // ...and `!busPv` alone is the WRONG proxy for that. busPv asks "is this bus a CONTROLLER",
-        // but a bus REMOTELY controlled by a generator group elsewhere (a pilot) owns no generators, so
-        // busPv is false while its V row still holds BUS_TARGET_V — it does not solve a reactive
-        // equation at all. Stamping a Q target over that identity leaves FIXED_VARIABLE with target 0 against a
-        // state of 1.111 pu, and the Newton then drives the bus's VOLTAGE toward zero: measured on
-        // rte6515 LOAD-5958, the solve oscillates (1.111 -> 0.995 -> 0.880 -> 0.765 -> 1.598 -> 1.410
-        // ...) and exhausts its iterations instead of converging.
-        // REMOTELY is the operative word, and the narrower test is load-bearing: a LOCALLY controlled
-        // bus that the base switched PV->PQ also has busPv false, and its V row DOES solve the reactive
-        // equation, so it must keep shedding the lost Q. Suppressing it there moves
-        // deviceBusSwitchedToPqLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
-        boolean qOverride = toPq || !busPv && !remotelyControlled;
+        VoltageControlFate vc = voltageControlFate(bus, lost, lostSet, vcSurvives);
+        boolean remotelyControlled = vc.remotelyControlled();
+        boolean otherController = vc.otherController();
+        boolean toPq = vc.toPq();
+        boolean qOverride = vc.qOverride();
         // ...but a remotely controlled bus still HAS a reactive balance - OLF keeps its BUS_TARGET_Q, generation
         // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (alternateQRow =
         // -2-g: the free member's row), whose target the device captures from the BASE targets at solve start
@@ -441,39 +403,13 @@ public final class GpuBatchInjectionOutages {
         // remote-control fixture, a 20 MVar load lost at the pilot stayed in its balance and every controller bus
         // ended 3.7e-2 kV off OLF. The group and the move travel to the carrier's first-solve target and to the
         // device's captured value (setBatchPilotQDeltas).
-        int pilotQGroup = -1;
-        double pilotQDelta = 0;
-        boolean purePilot = remotelyControlled
-                && mainVcOf(bus).map(voltageControl -> !voltageControl.getMergedControllerElements().contains(bus)).orElse(false);
-        if (purePilot) {                                     // a pilot among its controllers has no balance of its
-            double lostGenQ = lost.stream().mapToDouble(LfGenerator::getTargetQ).sum();   // own (DISTR_Q member)
-            if (lostLoadQ != 0 || lostGenQ != 0) {
-                int alt = busRows.length > 3 ? busRows[3][busNum] : -1;
-                if (alt > -2) {                              // the balance is not on a carrier: no channel for it
-                    return null;
-                }
-                pilotQGroup = -2 - alt;
-                pilotQDelta = lostLoadQ - lostGenQ;          // targetQ = generation - load
-            }
+        PilotQChange pilotQ = pilotQChange(bus, remotelyControlled, lost, lostLoadQ, busRows);
+        if (pilotQ == null) {
+            return null;
         }
-        double qTarget = 0;
-        if (qOverride) {
-            // A bus the BASE loadflow switched to PQ at a reactive limit has its generation target Q FROZEN at
-            // that limit, and OLF keeps that value as long as a VOLTAGE-type generator survives:
-            // processLostGenerators calls setGeneratorVoltageControlEnabledAndRecomputeTargetQ only when
-            // none does, and invalidateGenerationTargetP leaves a frozen bus frozen. Summing the
-            // survivors' own targetQ instead hands the first inner solve a target 1.7 pu off the one
-            // OLF solves (measured at rte6515 VL-6003_0: 1.03 vs 2.69 pu) — the reactive-limit pass
-            // then makes its switch decisions along a trajectory the CPU never takes. When the last
-            // VOLTAGE generator goes, OLF unfreezes and recomputes over what is left, which is what the
-            // survivor sum gives (rte6515 GEN-6095/6130/6226/6239, one generator on the bus: keeping the
-            // frozen value there injects the dead generator's reactive limit, ~1 kV).
-            double genQ = bus.isGenerationTargetQFrozen() && otherController
-                    ? bus.getGenerationTargetQ()
-                    : bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
-                            .mapToDouble(LfGenerator::getTargetQ).sum();
-            qTarget = genQ - (bus.getLoadTargetQ() - lostLoadQ);
-        }
+        int pilotQGroup = pilotQ.group();
+        double pilotQDelta = pilotQ.delta();
+        double qTarget = qOverride ? busQTarget(bus, otherController, lostSet, lostLoadQ) : 0;
         // Distributed-slack reweight for the affected bus. The bus's base target P always drops by the lost
         // gen's P. The participation factor / headroom / footroom drop only if the LOST gen itself participated
         // (mirrors the extractor, which sums these over participating gens with a non-zero droop).
@@ -513,18 +449,9 @@ public final class GpuBatchInjectionOutages {
         // target by participation share. The lost generator's entry has to go, the survivors' shares
         // have to renormalize over what is left, and the step the outage itself puts in the row target
         // is not DS power and must not move any curve. All three need per-generator identity.
-        int inactiveDistrQMember = -1;
-        if (vcSurvives) {
-            int[] mBus = gpuData.distrQMembers().busNum();
-            for (int m = 0; mBus != null && m < mBus.length; m++) {
-                if (mBus[m] == busNum) {
-                    inactiveDistrQMember = m;
-                    break;
-                }
-            }
-            if (inactiveDistrQMember < 0) {
-                return null;
-            }
+        int inactiveDistrQMember = vcSurvives ? indexOf(gpuData.distrQMembers().busNum(), busNum) : -1;
+        if (vcSurvives && inactiveDistrQMember < 0) {
+            return null;
         }
         // The group's DISTR_Q row targets, renormalized over the survivors exactly as OLF does
         // (updateReactiveKeys zeroes a non-enabled controller's key and renormalizes; AcTargetVector
@@ -556,21 +483,135 @@ public final class GpuBatchInjectionOutages {
         // bus IS the pilot: that is the case where losing its generators makes the pilot stop being
         // one of its own controllers and ACQUIRE a reactive balance. See
         // GenOutage.flipsPilotRowWithoutEnabledController.
-        int pilotVRowWithoutEnabledController = -1;
-        double pilotQTargetWithoutEnabledController = 0;
-        if (vcSurvives && pilotSurvivorReactiveLimitEntries.length > 0
-                && mainVcOf(bus).orElseThrow().getControlledBus() == bus) {
-            var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
-            if (pilotV != null && pilotV.getRow() >= 0) {
-                pilotVRowWithoutEnabledController = pilotV.getRow();
-                // generationTargetQ - loadTargetQ. A VOLTAGE generator contributes 0 to
-                // generationTargetQ, so losing one leaves this unchanged.
-                pilotQTargetWithoutEnabledController = bus.getTargetQ();
-            }
-        }
+        PilotRow pilotRow = vcSurvives && pilotSurvivorReactiveLimitEntries.length > 0
+                && mainVcOf(bus).orElseThrow().getControlledBus() == bus ? pilotRowWithoutEnabledController(es, bus) : PilotRow.NONE;
+        int pilotVRowWithoutEnabledController = pilotRow.vRow();
+        double pilotQTargetWithoutEnabledController = pilotRow.qTarget();
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         double lostFactorSum = lost.stream().mapToDouble(distributedSlackParameters::factor).sum();
+        int qTargetRow = qTargetRow(gpuData, busRows, busNum, vRow, allGensLost, reactiveLimitEntry);
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
+                distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
+                lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorReactiveLimitEntries,
+                distrQTargetRows, distrQTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
+                deadPilotVRow, deadPilotQTarget, pilotVRowWithoutEnabledController, pilotQTargetWithoutEnabledController,
+                distrQTargetQOverrideMember, distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
+    }
+
+    /**
+     * What the loss does to the bus's voltage control: whether the bus is remotely controlled, keeps another controller,
+     * switches to PQ, and has its Q target written.
+     */
+    private record VoltageControlFate(boolean remotelyControlled, boolean otherController, boolean toPq, boolean qOverride) {
+    }
+
+    private static VoltageControlFate voltageControlFate(LfBus bus, List<LfGenerator> lost, java.util.Set<LfGenerator> lostSet,
+                                                         boolean vcSurvives) {
+        boolean busPv = bus.isGeneratorVoltageControlEnabled();
+        // The bus is the CONTROLLED bus of an enabled, non-local generator voltage control: its V row
+        // holds BUS_TARGET_V that some OTHER bus's generators maintain. Same predicate the extraction
+        // uses to decide a pilot's row layout.
+        boolean remotelyControlled = bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
+                .isPresent();
+        boolean lostControls = lost.stream()
+                .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
+        boolean otherController = bus.getGenerators().stream()
+                .anyMatch(g -> !lostSet.contains(g) && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
+        // vcSurvives: the group's other controllers still regulate this bus, so it keeps its voltage
+        // target and must NOT be flipped to its own reactive balance (measured: doing so moves the
+        // SURVIVING controllers — rte6515 GEN-1522, 3.157 kV at VL-1525).
+        boolean toPq = busPv && lostControls && !otherController && !vcSurvives;
+        // distrQBus with keepsController: otherController is true by the guard above, so toPq stays
+        // false and qOverride below stays false (busPv true) — the group's distribution re-balances
+        // the lost reactive share on both arms; only the P target drop and DS reweight apply.
+        // The bus Q TARGET must shed the lost gens' targetQ whenever the V row solves the reactive
+        // equation in the scenario: on the PV->PQ flip AND on an ALREADY-PQ bus losing fixed-Q
+        // generation (task #21 — the flip-only version silently kept the lost Q injected; measured
+        // 0.27 kV voltage divergence on ieee14 for a 15-MVAr fixed-Q gen loss).
+        // ...and `!busPv` alone is the WRONG proxy for that. busPv asks "is this bus a CONTROLLER",
+        // but a bus REMOTELY controlled by a generator group elsewhere (a pilot) owns no generators, so
+        // busPv is false while its V row still holds BUS_TARGET_V — it does not solve a reactive
+        // equation at all. Stamping a Q target over that identity leaves FIXED_VARIABLE with target 0 against a
+        // state of 1.111 pu, and the Newton then drives the bus's VOLTAGE toward zero: measured on
+        // rte6515 LOAD-5958, the solve oscillates (1.111 -> 0.995 -> 0.880 -> 0.765 -> 1.598 -> 1.410
+        // ...) and exhausts its iterations instead of converging.
+        // REMOTELY is the operative word, and the narrower test is load-bearing: a LOCALLY controlled
+        // bus that the base switched PV->PQ also has busPv false, and its V row DOES solve the reactive
+        // equation, so it must keep shedding the lost Q. Suppressing it there moves
+        // deviceBusSwitchedToPqLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
+        boolean qOverride = toPq || !busPv && !remotelyControlled;
+        return new VoltageControlFate(remotelyControlled, otherController, toPq, qOverride);
+    }
+
+    private static int indexOf(int[] values, int value) {
+        for (int i = 0; values != null && i < values.length; i++) {
+            if (values[i] == value) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** A pure pilot's reactive balance rides its group's carrier: the group and the move of its target. */
+    private record PilotQChange(int group, double delta) {
+        static final PilotQChange NONE = new PilotQChange(-1, 0);
+    }
+
+    /** What a loss of reactive load or fixed-Q generation at a pure pilot moves on its carrier; null: no channel for it. */
+    private static PilotQChange pilotQChange(LfBus bus, boolean remotelyControlled, List<LfGenerator> lost, double lostLoadQ, int[][] busRows) {
+        boolean purePilot = remotelyControlled
+                && mainVcOf(bus).map(voltageControl -> !voltageControl.getMergedControllerElements().contains(bus)).orElse(false);
+        if (purePilot) {                                     // a pilot among its controllers has no balance of its
+            double lostGenQ = lost.stream().mapToDouble(LfGenerator::getTargetQ).sum();   // own (DISTR_Q member)
+            if (lostLoadQ != 0 || lostGenQ != 0) {
+                int alt = busRows.length > 3 ? busRows[3][bus.getNum()] : -1;
+                if (alt > -2) {                              // the balance is not on a carrier: no channel for it
+                    return null;
+                }
+                return new PilotQChange(-2 - alt, lostLoadQ - lostGenQ);   // targetQ = generation - load
+            }
+        }
+        return PilotQChange.NONE;
+    }
+
+    /** The bus's Q target when its V row solves its reactive balance in the scenario: generation - load. */
+    private static double busQTarget(LfBus bus, boolean otherController, java.util.Set<LfGenerator> lostSet, double lostLoadQ) {
+        // A bus the BASE loadflow switched to PQ at a reactive limit has its generation target Q FROZEN at
+        // that limit, and OLF keeps that value as long as a VOLTAGE-type generator survives:
+        // processLostGenerators calls setGeneratorVoltageControlEnabledAndRecomputeTargetQ only when
+        // none does, and invalidateGenerationTargetP leaves a frozen bus frozen. Summing the
+        // survivors' own targetQ instead hands the first inner solve a target 1.7 pu off the one
+        // OLF solves (measured at rte6515 VL-6003_0: 1.03 vs 2.69 pu) — the reactive-limit pass
+        // then makes its switch decisions along a trajectory the CPU never takes. When the last
+        // VOLTAGE generator goes, OLF unfreezes and recomputes over what is left, which is what the
+        // survivor sum gives (rte6515 GEN-6095/6130/6226/6239, one generator on the bus: keeping the
+        // frozen value there injects the dead generator's reactive limit, ~1 kV).
+        double genQ = bus.isGenerationTargetQFrozen() && otherController
+                ? bus.getGenerationTargetQ()
+                : bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
+                        .mapToDouble(LfGenerator::getTargetQ).sum();
+        return genQ - (bus.getLoadTargetQ() - lostLoadQ);
+    }
+
+    /** The pilot's own V row and Q target, for the runtime flip when every survivor switches to PQ. */
+    private record PilotRow(int vRow, double qTarget) {
+        static final PilotRow NONE = new PilotRow(-1, 0);
+    }
+
+    private static PilotRow pilotRowWithoutEnabledController(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus) {
+        var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
+        if (pilotV != null && pilotV.getRow() >= 0) {
+            // generationTargetQ - loadTargetQ. A VOLTAGE generator contributes 0 to
+            // generationTargetQ, so losing one leaves this unchanged.
+            return new PilotRow(pilotV.getRow(), bus.getTargetQ());
+        }
+        return PilotRow.NONE;
+    }
+
+    private static int qTargetRow(GpuAcData gpuData, int[][] busRows, int busNum, int vRow, boolean allGensLost, int reactiveLimitEntry) {
         // Same relocation as pRow, on the reactive side: under a coupler the bus's Q BALANCE sits on the
         // parent's DUMMY_Q column, so an absolute Q target written at the BUS_V row is a no-op and the
         // lost load's REACTIVE power stays in the system. Only when the extraction actually moved it —
@@ -588,12 +629,7 @@ public final class GpuBatchInjectionOutages {
                 && gpuData.switchedPvToPqInBase(reactiveLimitEntry)) {
             qTargetRow = busRows[3][busNum];
         }
-        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, distributedSlackOverrideBusIndex, distributedSlackFactorDelta, distributedSlackBaseTargetPDelta,
-                distributedSlackOverrideMaxDelta, distributedSlackOverrideMinDelta, reactiveLimitEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
-                lostLoadP - lostP, loadQDelta, inactiveDistrQMember, pilotSurvivorReactiveLimitEntries,
-                distrQTargetRows, distrQTargetValues, deadRemoteMember ? GpuRowMode.BUS_TARGET_Q : GpuRowMode.EQUATION,
-                deadPilotVRow, deadPilotQTarget, pilotVRowWithoutEnabledController, pilotQTargetWithoutEnabledController,
-                distrQTargetQOverrideMember, distrQTargetQOverrideValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus, -1, svcBminDelta, svcBmaxDelta);
+        return qTargetRow;
     }
 
     /** Does another controller of the bus's remote voltage-control group keep a VOLTAGE generator after the loss of

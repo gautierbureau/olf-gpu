@@ -122,7 +122,7 @@ final class GpuBatchChunkSolver {
                 // only re-solves what is still missing), so a shrink costs one chunk, not the batch.
                 List<Integer> stillMissing = new ArrayList<>();
                 for (Integer idx : remaining) {
-                    if (resultsByIndex[idx] == null) {
+                    if (resultsByIndex[idx] == null && !in.sinks().notAppliedByIndex()[idx]) {
                         stillMissing.add(idx);
                     }
                 }
@@ -154,647 +154,880 @@ final class GpuBatchChunkSolver {
 
     @SuppressWarnings({"java:S107", "java:S3776"})
     private static void solveQualifiedInChunksAt(int chunkCap, List<Integer> batchedIndices, ChunkInputs in) {
-        List<BatchContingency> contingencies = in.contingencies();
-        GpuAcElementMapper elementMapper = in.base().elementMapper();
-        GpuAcData gpuData = in.base().gpuData();
-        double[] baseState = in.base().baseState();
-        double[] baseTargets = in.base().baseTargets();
-        int[] baseRowMode = in.base().baseRowMode();
-        int n = in.base().n();
-        int nElements = in.base().nElements();
-        int[] varType = in.base().varType();
-        java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex = in.base().hvdcElemIndex();
-        GpuBatchQualification.ScenarioPlan plan = in.plan();
-        int[][] frozenRowsByIndex = plan.frozenRowsByIndex();
-        double[][] frozenTargetsByIndex = plan.frozenTargetsByIndex();
-        GenOutage[][] genOutagesByIndex = plan.genOutagesByIndex();
-        double[] activePowerLossByIndex = plan.activePowerLossByIndex();
-        int[][] distrQWeightOverrideTermByIndex = plan.distrQWeightOverrideTermByIndex();
-        double[][] distrQWeightOverrideWeightByIndex = plan.distrQWeightOverrideWeightByIndex();
-        int[][] distrQKeyOverrideMemberByIndex = plan.distrQKeyOverrideMemberByIndex();
-        double[][] distrQKeyOverrideKeyByIndex = plan.distrQKeyOverrideKeyByIndex();
-        int[][] distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
-        double[][] distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
-        int[][] islandedDistributedSlackByIndex = plan.islandedDistributedSlackByIndex();
-        int[][] islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
-        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = plan.islandedHvdcsByIndex();
-        int[][] distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
-        GpuBatchQualification.SlackRelocations slackRelocations = plan.slackRelocations();
-        NewtonRaphsonParameters parameters = in.settings().parameters();
-        double tol = in.settings().tol();
-        double reactiveLimitTol = in.settings().reactiveLimitTol();
-        double slackDistTol = in.settings().slackDistTol();
-        double convEpsPerEq = in.settings().convEpsPerEq();
-        double[][] rowCriteria = in.settings().rowCriteria();
-        DevicePhases.Built phases = in.phases().phases();
-        List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers = in.phases().hvdcControllers();
-        ReactiveCapabilityCurves.Channel reactiveCapabilityCurves = in.phases().reactiveCapabilityCurves();
-        ForceTargetQInReactiveLimits.Channel forcedTargetQ = in.phases().forcedTargetQ();
-        double[][] resultsByIndex = in.sinks().resultsByIndex();
-        double[] preDistributedByIndex = in.sinks().preDistributedByIndex();
-        double[] distributedByIndex = in.sinks().distributedByIndex();
-        int[][] automationSystemSwitchedByIndex = in.sinks().automationSystemSwitchedByIndex();
-        double[][] deviceTapMovesByIndex = in.sinks().deviceTapMovesByIndex();
-        double[][] distributedSlackGeneratorMovesByIndex = in.sinks().distributedSlackGeneratorMovesByIndex();
-        BatchConfig config = in.config();
-        int nb = batchedIndices.size();
-        int nChunks = (nb + chunkCap - 1) / chunkCap;
-        // BALANCE the chunks over that count instead of filling each to the cap and leaving a ragged
-        // tail. The device context is allocated at the chunk size and every solve is that wide, so a
-        // tail chunk holding 72 of 642 slots still solves a 642-wide batch — 570 of them padding.
-        // Splitting 1998 scenarios as 4 x 500 rather than 3 x 642 + 72 measured 13.7 s vs 15.6 s of
-        // batched time on rte6515, at LOWER device memory (the size only ever goes down from the cap).
-        // The bank has that many slots, refilled from each phase's queue as its scenarios end (below). Balanced still: at the
-        // cap (641 slots on rte6515) or narrower (320 on rte6515, 320, 240 or 160 on network.xiidm) it was no faster, a
-        // narrower bank paying more per lane in the batched factorization than the slots its tail leaves idle (2026-10-29).
-        int bankSize = (nb + nChunks - 1) / nChunks;
-        // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
-        // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
-        // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
-        // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — ROBUST is the single-matrix
-        // per-scenario loop with matching and global column pivoting, which is what rte6515's full
-        // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
-        // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
-        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, bankSize,
-                config.robustSolveMode() ? GpuLinearSolveMode.ROBUST
-                        : GpuBatchContextCache.resolveBatchMode(config.resolvedGpuParameters()), n);
-        // with a state handback the states stay on the device, read there between solve calls (set on every acquire: the
-        // context is cached across runs)
-        BatchSolveNative.setBatchStatesToHost(handle, config.stateHandback() == null);
-        // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
-        // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
-        NewtonSettingsNative.installRowCriteria(handle, rowCriteria);
-        // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in stateVectorScalingMode 1.
-        NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
-                parameters.getLineSearchStateVectorScalingStepFold());
-        // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        DeviceLoopTables.install(handle, gpuData, in.settings().reactiveLimitsOuterLoop(), reactiveCapabilityCurves, forcedTargetQ,
-                config.reactiveLimitsRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
-                config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
+        new ChunkLoop(chunkCap, batchedIndices, in).solveAll();
+    }
 
-        // Which reactive-capability CURVE entries hang off each bus P row. Run-constant, and the
-        // index a generator outage needs to find the entries it disturbs at its own bus.
-        java.util.Map<Integer, int[]> curveEntriesByPRow = new java.util.HashMap<>();
-        if (reactiveCapabilityCurves != null) {
-            java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
-            for (int e = 0; e < reactiveCapabilityCurves.reactiveCapabilityCurveGeneratorId().length; e++) {
-                acc.computeIfAbsent(reactiveCapabilityCurves.reactiveCapabilityCurveIndices()[e * 5 + 1], k -> new ArrayList<>()).add(e);
+    /**
+     * One call of {@link #solveQualifiedInChunksAt}: the run's set-up on the (possibly cached) device context, then for
+     * each phase (contingencies, then strategy pairs) the chunks installed into the bank's free slots, each one seeded,
+     * uploaded, solved and recorded. One instance per call: its fields are that call's state, never shared between threads.
+     */
+    @SuppressWarnings({"java:S107", "java:S3776", "java:S1450"})
+    private static final class ChunkLoop {
+        private final int chunkCap;
+        private final List<Integer> batchedIndices;
+        private final ChunkInputs in;
+        private List<Integer> group;
+        private int chunkStart;
+        private List<BatchContingency> contingencies;
+        private GpuAcElementMapper elementMapper;
+        private GpuAcData gpuData;
+        private double[] baseState;
+        private double[] baseTargets;
+        private int[] baseRowMode;
+        private int n;
+        private int nElements;
+        private int[] varType;
+        private java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex;
+        private GpuBatchQualification.ScenarioPlan plan;
+        private int[][] frozenRowsByIndex;
+        private double[][] frozenTargetsByIndex;
+        private GenOutage[][] genOutagesByIndex;
+        private double[] activePowerLossByIndex;
+        private int[][] distrQWeightOverrideTermByIndex;
+        private double[][] distrQWeightOverrideWeightByIndex;
+        private int[][] distrQKeyOverrideMemberByIndex;
+        private double[][] distrQKeyOverrideKeyByIndex;
+        private int[][] distrRhoOverrideTermByIndex;
+        private double[][] distrRhoOverrideCoefficientByIndex;
+        private int[][] islandedDistributedSlackByIndex;
+        private int[][] islandedReactiveLimitEntriesByIndex;
+        private List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex;
+        private int[][] distrQSubgroupByIndex;
+        private GpuBatchQualification.SlackRelocations slackRelocations;
+        private NewtonRaphsonParameters parameters;
+        private double tol;
+        private double reactiveLimitTol;
+        private double slackDistTol;
+        private double convEpsPerEq;
+        private double[][] rowCriteria;
+        private DevicePhases.Built phases;
+        private List<GpuHvdcAcEmulationLimitsOuterLoop.Controller> hvdcControllers;
+        private ReactiveCapabilityCurves.Channel reactiveCapabilityCurves;
+        private ForceTargetQInReactiveLimits.Channel forcedTargetQ;
+        private double[][] resultsByIndex;
+        private double[] preDistributedByIndex;
+        private double[] distributedByIndex;
+        private int[][] automationSystemSwitchedByIndex;
+        private double[][] deviceTapMovesByIndex;
+        private double[][] distributedSlackGeneratorMovesByIndex;
+        private BatchConfig config;
+        private int nb;
+        private int nChunks;
+        private int bankSize;
+        private long handle;
+        private java.util.Map<Integer, int[]> curveEntriesByPRow;
+        private DevicePhaseInstaller.InstalledPhases installed;
+        private GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVoltageControlControllers;
+        private boolean secondaryVoltageControlActive;
+        private RunScratch rs;
+        private List<Integer> ctgIdxList;
+        private List<Integer> pairIdxList;
+        private java.util.Map<String, Integer> indexById;
+        private java.util.Set<Integer> parentsOfPairs;
+        private int nReactiveLimitEntries;
+        private ParentCaptures captures;
+        private java.util.Map<Integer, int[]> reactiveLimitsStateByIndex;
+        private java.util.Map<Integer, double[]> reactiveLimitTargetQByIndex;
+        private boolean distributedSlackOuterLoop;
+        private boolean reactiveLimitsOuterLoop;
+        private int nDistributedSlackBuses;
+        private java.util.Map<Integer, double[]> distributedSlackTargetsByIndex;
+        private int packedDistributedSlackGenerators;
+        private int nDistributedSlackGenerators;
+        private java.util.Map<Integer, double[]> genMovesByIndex;
+        private java.util.Map<Integer, double[]> exhaustedStartByIndex;
+        private java.util.Map<Integer, Double> slackAbsorbedByIndex;
+        private boolean slackOnlyDistribution;
+        private int[] baseReactiveLimitsState;
+        private RunView run;
+        private long startTime;
+        private long tMainSolveNs;
+        private long tOrchestratorNs;
+        private java.util.Map<String, Long> orchNs;
+        private int[] baseNonSpanningTreeBranches;
+        private Integer refillAtTest;
+        private int refillAt;
+        private boolean pairPhase;
+        private int nbg;
+        private SlotOccupant[] bank;
+        private java.util.TreeSet<Integer> freeSlots;
+        private int lastInstall;
+        private int chunkSize;
+        private int realCount;
+        private int[] installSlots;
+        private ChunkLists cl;
+        private SlotSeeding seeding;
+        private ChunkView chunk;
+        private ChunkSeeds seeds;
+        private int[] targetOverrideIndex;
+        private double[] targetOverrideValue;
+        private double[] distributedSlackBusAnchorShift;
+        private double[] distributedSlackGeneratorAnchor;
+        private double[] distributedSlackGeneratorSeedAnchor;
+        private double[] slackBusAnchorShift;
+        private double[] pairSlackAbsorbedSeed;
+        private boolean[] rejectAfterSolve;
+        private boolean[] pairParentConverged;
+        private double[] reactiveLimitSeedTargetQ;
+        private double[] preSlackSeed;
+        private double[] x0Full;
+        private int[] reactiveLimitsSeedState;
+        private int[] x0SeedIdx;
+        private double[] x0SeedVal;
+        private GpuBatchOverrides.Snapshot preHvdcOverrides;
+        private int[][] hvdcStatus;
+        private double[] hvdcAppliedDelta1;
+        private double[] hvdcAppliedDelta2;
+        private List<double[]> hvdcActionApplied;
+        private boolean monitoringVoltageActive;
+        private boolean readReactiveLimitsFinalState;
+        private boolean hasHvdcDriverLoops;
+        private boolean monitoringVoltageInKernel;
+        private long solveCountBefore;
+        private long tSolve0;
+        private String traceCtg;
+        private int traceSlot;
+        private String chunkDump;
+        private SlotOccupant[] occupants;
+        private int queued;
+        private int pauseAtEnded;
+        private double[][] chunkResults;
+        private int[] handedBack;
+        private SlotOccupant[] harvested;
+        private int harvestedCount;
+        private int[] reactiveLimitsFinalState;
+        private long tOrch0;
+        private boolean[] switchesUnread;
+        private double[][] tapMoves;
+
+        ChunkLoop(int chunkCap, List<Integer> batchedIndices, ChunkInputs in) {
+            this.chunkCap = chunkCap;
+            this.batchedIndices = batchedIndices;
+            this.in = in;
+            contingencies = in.contingencies();
+            elementMapper = in.base().elementMapper();
+            gpuData = in.base().gpuData();
+            baseState = in.base().baseState();
+            baseTargets = in.base().baseTargets();
+            baseRowMode = in.base().baseRowMode();
+            n = in.base().n();
+            nElements = in.base().nElements();
+            varType = in.base().varType();
+            hvdcElemIndex = in.base().hvdcElemIndex();
+            plan = in.plan();
+            frozenRowsByIndex = plan.frozenRowsByIndex();
+            frozenTargetsByIndex = plan.frozenTargetsByIndex();
+            genOutagesByIndex = plan.genOutagesByIndex();
+            activePowerLossByIndex = plan.activePowerLossByIndex();
+            distrQWeightOverrideTermByIndex = plan.distrQWeightOverrideTermByIndex();
+            distrQWeightOverrideWeightByIndex = plan.distrQWeightOverrideWeightByIndex();
+            distrQKeyOverrideMemberByIndex = plan.distrQKeyOverrideMemberByIndex();
+            distrQKeyOverrideKeyByIndex = plan.distrQKeyOverrideKeyByIndex();
+            distrRhoOverrideTermByIndex = plan.distrRhoOverrideTermByIndex();
+            distrRhoOverrideCoefficientByIndex = plan.distrRhoOverrideCoefficientByIndex();
+            islandedDistributedSlackByIndex = plan.islandedDistributedSlackByIndex();
+            islandedReactiveLimitEntriesByIndex = plan.islandedReactiveLimitEntriesByIndex();
+            islandedHvdcsByIndex = plan.islandedHvdcsByIndex();
+            distrQSubgroupByIndex = plan.distrQSubgroupByIndex();
+            slackRelocations = plan.slackRelocations();
+            parameters = in.settings().parameters();
+            tol = in.settings().tol();
+            reactiveLimitTol = in.settings().reactiveLimitTol();
+            slackDistTol = in.settings().slackDistTol();
+            convEpsPerEq = in.settings().convEpsPerEq();
+            rowCriteria = in.settings().rowCriteria();
+            phases = in.phases().phases();
+            hvdcControllers = in.phases().hvdcControllers();
+            reactiveCapabilityCurves = in.phases().reactiveCapabilityCurves();
+            forcedTargetQ = in.phases().forcedTargetQ();
+            resultsByIndex = in.sinks().resultsByIndex();
+            preDistributedByIndex = in.sinks().preDistributedByIndex();
+            distributedByIndex = in.sinks().distributedByIndex();
+            automationSystemSwitchedByIndex = in.sinks().automationSystemSwitchedByIndex();
+            deviceTapMovesByIndex = in.sinks().deviceTapMovesByIndex();
+            distributedSlackGeneratorMovesByIndex = in.sinks().distributedSlackGeneratorMovesByIndex();
+            config = in.config();
+            nb = batchedIndices.size();
+            nChunks = (nb + chunkCap - 1) / chunkCap;
+            // BALANCE the chunks over that count instead of filling each to the cap and leaving a ragged
+            // tail. The device context is allocated at the chunk size and every solve is that wide, so a
+            // tail chunk holding 72 of 642 slots still solves a 642-wide batch — 570 of them padding.
+            // Splitting 1998 scenarios as 4 x 500 rather than 3 x 642 + 72 measured 13.7 s vs 15.6 s of
+            // batched time on rte6515, at LOWER device memory (the size only ever goes down from the cap).
+            // The bank has that many slots, refilled from each phase's queue as its scenarios end (below). Balanced still: at the
+            // cap (641 slots on rte6515) or narrower (320 on rte6515, 320, 240 or 160 on network.xiidm) it was no faster, a
+            // narrower bank paying more per lane in the batched factorization than the slots its tail leaves idle (2026-10-29).
+            bankSize = (nb + nChunks - 1) / nChunks;
+        }
+
+        void solveAll() {
+            if (!installRun()) {
+                return;
             }
-            acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
-        }
-
-        // A control loop the kernel REFUSES must never fall back to an after-the-sweep host orchestrator.
-        // Such an orchestrator runs out of OLF's order — after the loops OLF puts at orders 7 to 10 — and
-        // two of them in a chain discard each other's target moves (measured 2.4e-1 kV). Un-accelerated is
-        // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
-        // null is exactly how the caller routes a contingency to the stock per-contingency path.
-        DevicePhaseInstaller.InstalledPhases installed = DevicePhaseInstaller.install(handle, new DevicePhaseInstaller.Request(
-                phases.incrementalTransformerVoltageControllers(), config.incrementalTransformerVoltageControlMaxTapShift(), phases.flow(), phases.continuousPhase(),
-                phases.incrementalShunt(), config.incrementalShuntVoltageControlMaxSectionShift(),
-                config.transformerControl() || config.simpleTransformerControl() ? phases.discreteTransformerVoltageControl() : null,
-                config.simpleTransformerControl(), config.transformerControl(), phases.freeze(),
-                config.simpleShuntControl() ? phases.simpleShunt() : null, false));
-        if (!installed.refused().isEmpty()) {
-            LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
-                    + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", installed.refused());
-            return;
-        }
-        // SecondaryVoltageControl (OLF order 4), the whole check on the device, by the same rule: a zone set the kernel
-        // refuses (wider than its dense system, or an observable on an unpacked element) sends the run to the CPU. An
-        // empty table clears a cached context's.
-        GpuSecondaryVoltageControlOuterLoop.Controllers secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
-        boolean secondaryVoltageControlActive = secondaryVoltageControlControllers != null && !secondaryVoltageControlControllers.controllerBuses().isEmpty();
-        if (!GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, secondaryVoltageControlActive ? secondaryVoltageControlControllers : null)
-                && secondaryVoltageControlActive) {
-            LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own SecondaryVoltageControl — every contingency "
-                    + "runs on the CPU");
-            return;
-        }
-
-        RunScratch rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
-        // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
-        // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
-        // solved state (x0PerScenario) and PV/PQ states (reactiveLimitsSeedState), so the strategy
-        // solve continues the contingency's outer-loop trajectory exactly like the CPU's
-        // per-contingency action solve. Pair whose parent did not converge is dropped (CPU path).
-        List<Integer> ctgIdxList = new ArrayList<>();
-        List<Integer> pairIdxList = new ArrayList<>();
-        for (int idx : batchedIndices) {
-            (contingencies.get(idx).contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
-        }
-        java.util.Map<String, Integer> indexById = new java.util.HashMap<>();
-        for (int i = 0; i < contingencies.size(); i++) {
-            indexById.put(contingencies.get(i).contingencyId(), i);
-        }
-        // the contingencies whose strategy pairs this call solves: the host reads their generator targets
-        java.util.Set<Integer> parentsOfPairs = new java.util.HashSet<>();
-        for (int idx : pairIdxList) {
-            String pairId = contingencies.get(idx).contingencyId();
-            Integer parent = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
-            if (parent != null) {
-                parentsOfPairs.add(parent);
-            }
-        }
-        int nReactiveLimitEntries = gpuData.reactiveLimits().voltageRow().length;
-        ParentCaptures captures = new ParentCaptures();
-        java.util.Map<Integer, int[]> reactiveLimitsStateByIndex = captures.reactiveLimitsStateByIndex;    // ctg index -> its nReactiveLimitEntries RL-state slice
-        java.util.Map<Integer, double[]> reactiveLimitTargetQByIndex = captures.reactiveLimitTargetQByIndex;   // ctg index -> its final frozen target Q
-        // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
-        // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
-        // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
-        // The run's DistributedSlackOuterLoop decides whether anything distributes, not the pack (packed either way):
-        // without the loop no participant, no loss pre-distribution, the slack bus absorbs, as OLF.
-        boolean distributedSlackOuterLoop = in.settings().distributedSlackOuterLoop();
-        boolean reactiveLimitsOuterLoop = in.settings().reactiveLimitsOuterLoop();
-        int nDistributedSlackBuses = distributedSlackOuterLoop ? gpuData.distributedSlack().busPhiRow().length : 0;
-        java.util.Map<Integer, double[]> distributedSlackTargetsByIndex = captures.distributedSlackTargetsByIndex;
-        // ctg index -> each participating generator's final move from its base target (the device's distributedSlackGeneratorMove, or the
-        // loss pre-distribution alone when no slack pass fired): its pairs' per-generator anchors
-        int packedDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
-        int nDistributedSlackGenerators = distributedSlackOuterLoop ? packedDistributedSlackGenerators : 0;
-        java.util.Map<Integer, double[]> genMovesByIndex = captures.genMovesByIndex;
-        // ctg index -> the state its pairs start from when it ran out of Newton iterations (see the capture)
-        java.util.Map<Integer, double[]> exhaustedStartByIndex = captures.exhaustedStartByIndex;
-        java.util.Map<Integer, Double> slackAbsorbedByIndex = captures.slackAbsorbedByIndex;   // slack-only DS parents
-        boolean slackOnlyDistribution = distributedSlackOuterLoop && gpuData.distributedSlack().busPhiRow().length == 0
-                && gpuData.distributedSlack().slackPhiRow() >= 0;
-        // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks: all NONE
-        // (all PV) without the run's ReactiveLimitsOuterLoop, as the device seeds it.
-        int[] baseReactiveLimitsState = baseReactiveLimitsState(gpuData, baseTargets, baseRowMode, baseState, reactiveLimitsOuterLoop);
-        RunView run = new RunView(in, n, gpuData, baseState, baseTargets, contingencies, config, nDistributedSlackBuses,
-                nDistributedSlackGenerators, nReactiveLimitEntries, slackOnlyDistribution, reactiveLimitsOuterLoop, baseReactiveLimitsState,
-                indexById, captures, frozenRowsByIndex, islandedDistributedSlackByIndex, islandedHvdcsByIndex, hvdcControllers, hvdcElemIndex,
-                resultsByIndex, preDistributedByIndex);
-        try {
-            long startTime = System.currentTimeMillis();
-            // PHASE TIMING (OLF_GPU_BATCH_TRACE): the batched main solve vs the per-scenario host-side
-            // outer-loop orchestrators — on a control-heavy network the orchestrators, not the solve,
-            // are where the wall time goes, and that is invisible without splitting the two.
-            long tMainSolveNs = 0;
-            long tOrchestratorNs = 0;
-            java.util.Map<String, Long> orchNs = new java.util.LinkedHashMap<>();
-            // The zero-impedance elements OUT of the base tree, once: a scenario with sticky non-tree couplers puts
-            // every one of them back except its still-out set, and scanning all zeroImpedanceBranchNumbers per scenario with a
-            // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
-            int[] baseNonSpanningTreeBranches = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
-            Integer refillAtTest = refillAtForTests;
-            int refillAt = refillAtTest != null ? refillAtTest : Math.max(1, bankSize / REFILL_SHARE);
-            for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
-                boolean pairPhase = group == pairIdxList;
-                int nbg = group.size();
-                // The phase's scenarios queue for the bank's slots: the first ones fill it, and as scenarios end the solve
-                // hands their slots back, refilled with the next ones while the others go on solving - one tail per phase
-                // instead of one per chunk. Each install is a chunk: the scenarios that go into the free slots.
-                SlotOccupant[] bank = new SlotOccupant[bankSize];
-                java.util.TreeSet<Integer> freeSlots = new java.util.TreeSet<>();
-                for (int b = 0; b < bankSize; b++) {
-                    freeSlots.add(b);
+            prepareRun();
+            try {
+                startTime = System.currentTimeMillis();
+                // PHASE TIMING (OLF_GPU_BATCH_TRACE): the batched main solve vs the per-scenario host-side
+                // outer-loop orchestrators — on a control-heavy network the orchestrators, not the solve,
+                // are where the wall time goes, and that is invisible without splitting the two.
+                tMainSolveNs = 0;
+                tOrchestratorNs = 0;
+                orchNs = new java.util.LinkedHashMap<>();
+                // The zero-impedance elements OUT of the base tree, once: a scenario with sticky non-tree couplers puts
+                // every one of them back except its still-out set, and scanning all zeroImpedanceBranchNumbers per scenario with a
+                // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
+                baseNonSpanningTreeBranches = ZeroImpedanceClusters.baseNonTreeElements(gpuData);
+                refillAtTest = refillAtForTests;
+                refillAt = refillAtTest != null ? refillAtTest : Math.max(1, bankSize / REFILL_SHARE);
+                for (List<Integer> phaseGroup : List.of(ctgIdxList, pairIdxList)) {
+                    if (phaseGroup == pairIdxList) {
+                        dropPairsThatCannotApply();
+                    }
+                    group = phaseGroup;
+                    solvePhase();
                 }
-                int lastInstall = 0;
-                for (int chunkStart = 0; chunkStart < nbg; chunkStart += lastInstall) {
-                    int chunkSize = Math.min(freeSlots.size(), nbg - chunkStart);
-                    int realCount = chunkSize;
-                    lastInstall = chunkSize;
-                    if (freeSlots.size() < bankSize) {
-                        REFILLS_FOR_TESTS.incrementAndGet();
+                report();
+            } catch (RuntimeException e) {
+                GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time
+                throw e;
+            }
+        }
+
+        // The run-constant set-up of the device context. False: the device cannot own one of the run's control loops,
+        // and every contingency runs on the CPU.
+        private boolean installRun() {
+            // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
+            // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
+            // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
+            // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — ROBUST is the single-matrix
+            // per-scenario loop with matching and global column pivoting, which is what rte6515's full
+            // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
+            // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
+            handle = GpuBatchContextCache.acquireBatchContext(gpuData, bankSize,
+                    config.robustSolveMode() ? GpuLinearSolveMode.ROBUST
+                            : GpuBatchContextCache.resolveBatchMode(config.resolvedGpuParameters()), n);
+            // with a state handback the states stay on the device, read there between solve calls (set on every acquire: the
+            // context is cached across runs)
+            BatchSolveNative.setBatchStatesToHost(handle, config.stateHandback() == null);
+            // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
+            // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
+            NewtonSettingsNative.installRowCriteria(handle, rowCriteria);
+            // LINE_SEARCH: OLF's backtracking budget and step fold, on the (possibly cached) context; read only in stateVectorScalingMode 1.
+            NewtonSettingsNative.setBatchLineSearch(handle, parameters.getLineSearchStateVectorScalingMaxIteration(),
+                    parameters.getLineSearchStateVectorScalingStepFold());
+            // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
+            DeviceLoopTables.install(handle, gpuData, in.settings().reactiveLimitsOuterLoop(), reactiveCapabilityCurves, forcedTargetQ,
+                    config.reactiveLimitsRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
+                    config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
+
+            // Which reactive-capability CURVE entries hang off each bus P row. Run-constant, and the
+            // index a generator outage needs to find the entries it disturbs at its own bus.
+            curveEntriesByPRow = new java.util.HashMap<>();
+            if (reactiveCapabilityCurves != null) {
+                java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
+                for (int e = 0; e < reactiveCapabilityCurves.reactiveCapabilityCurveGeneratorId().length; e++) {
+                    acc.computeIfAbsent(reactiveCapabilityCurves.reactiveCapabilityCurveIndices()[e * 5 + 1], k -> new ArrayList<>()).add(e);
+                }
+                acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
+            }
+
+            // A control loop the kernel REFUSES must never fall back to an after-the-sweep host orchestrator.
+            // Such an orchestrator runs out of OLF's order — after the loops OLF puts at orders 7 to 10 — and
+            // two of them in a chain discard each other's target moves (measured 2.4e-1 kV). Un-accelerated is
+            // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
+            // null is exactly how the caller routes a contingency to the stock per-contingency path.
+            installed = DevicePhaseInstaller.install(handle, new DevicePhaseInstaller.Request(
+                    phases.incrementalTransformerVoltageControllers(), config.incrementalTransformerVoltageControlMaxTapShift(), phases.flow(), phases.continuousPhase(),
+                    phases.incrementalShunt(), config.incrementalShuntVoltageControlMaxSectionShift(),
+                    config.transformerControl() || config.simpleTransformerControl() ? phases.discreteTransformerVoltageControl() : null,
+                    config.simpleTransformerControl(), config.transformerControl(), phases.freeze(),
+                    config.simpleShuntControl() ? phases.simpleShunt() : null, false));
+            if (!installed.refused().isEmpty()) {
+                LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
+                        + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", installed.refused());
+                return false;
+            }
+            // SecondaryVoltageControl (OLF order 4), the whole check on the device, by the same rule: a zone set the kernel
+            // refuses (wider than its dense system, or an observable on an unpacked element) sends the run to the CPU. An
+            // empty table clears a cached context's.
+            secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
+            secondaryVoltageControlActive = secondaryVoltageControlControllers != null && !secondaryVoltageControlControllers.controllerBuses().isEmpty();
+            if (!GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle, secondaryVoltageControlActive ? secondaryVoltageControlControllers : null)
+                    && secondaryVoltageControlActive) {
+                LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own SecondaryVoltageControl — every contingency "
+                        + "runs on the CPU");
+                return false;
+            }
+            return true;
+        }
+
+        // The two phases' scenario lists and what the pair phase reads of the contingency phase.
+        private void prepareRun() {
+            rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
+            // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
+            // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
+            // solved state (x0PerScenario) and PV/PQ states (reactiveLimitsSeedState), so the strategy
+            // solve continues the contingency's outer-loop trajectory exactly like the CPU's
+            // per-contingency action solve. Pair whose parent did not converge is dropped (CPU path).
+            ctgIdxList = new ArrayList<>();
+            pairIdxList = new ArrayList<>();
+            for (int idx : batchedIndices) {
+                (contingencies.get(idx).contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
+            }
+            indexById = new java.util.HashMap<>();
+            for (int i = 0; i < contingencies.size(); i++) {
+                indexById.put(contingencies.get(i).contingencyId(), i);
+            }
+            // the contingencies whose strategy pairs this call solves: the host reads their generator targets
+            parentsOfPairs = new java.util.HashSet<>();
+            for (int idx : pairIdxList) {
+                String pairId = contingencies.get(idx).contingencyId();
+                Integer parent = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
+                if (parent != null) {
+                    parentsOfPairs.add(parent);
+                }
+            }
+            nReactiveLimitEntries = gpuData.reactiveLimits().voltageRow().length;
+            captures = new ParentCaptures();
+            reactiveLimitsStateByIndex = captures.reactiveLimitsStateByIndex;    // ctg index -> its nReactiveLimitEntries RL-state slice
+            reactiveLimitTargetQByIndex = captures.reactiveLimitTargetQByIndex;   // ctg index -> its final frozen target Q
+            // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
+            // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
+            // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
+            // The run's DistributedSlackOuterLoop decides whether anything distributes, not the pack (packed either way):
+            // without the loop no participant, no loss pre-distribution, the slack bus absorbs, as OLF.
+            distributedSlackOuterLoop = in.settings().distributedSlackOuterLoop();
+            reactiveLimitsOuterLoop = in.settings().reactiveLimitsOuterLoop();
+            nDistributedSlackBuses = distributedSlackOuterLoop ? gpuData.distributedSlack().busPhiRow().length : 0;
+            distributedSlackTargetsByIndex = captures.distributedSlackTargetsByIndex;
+            // ctg index -> each participating generator's final move from its base target (the device's distributedSlackGeneratorMove, or the
+            // loss pre-distribution alone when no slack pass fired): its pairs' per-generator anchors
+            packedDistributedSlackGenerators = gpuData.distributedSlack().generatorBus() == null ? 0 : gpuData.distributedSlack().generatorBus().length;
+            nDistributedSlackGenerators = distributedSlackOuterLoop ? packedDistributedSlackGenerators : 0;
+            genMovesByIndex = captures.genMovesByIndex;
+            // ctg index -> the state its pairs start from when it ran out of Newton iterations (see the capture)
+            exhaustedStartByIndex = captures.exhaustedStartByIndex;
+            slackAbsorbedByIndex = captures.slackAbsorbedByIndex;   // slack-only DS parents
+            slackOnlyDistribution = distributedSlackOuterLoop && gpuData.distributedSlack().busPhiRow().length == 0
+                    && gpuData.distributedSlack().slackPhiRow() >= 0;
+            // Host-side base RL seed (mirrors initReactiveLimitQLimitTypeBatch) for PADDING slots of pair chunks: all NONE
+            // (all PV) without the run's ReactiveLimitsOuterLoop, as the device seeds it.
+            baseReactiveLimitsState = baseReactiveLimitsState(gpuData, baseTargets, baseRowMode, baseState, reactiveLimitsOuterLoop);
+            run = new RunView(in, n, gpuData, baseState, baseTargets, contingencies, config, nDistributedSlackBuses,
+                    nDistributedSlackGenerators, nReactiveLimitEntries, slackOnlyDistribution, reactiveLimitsOuterLoop, baseReactiveLimitsState,
+                    indexById, captures, frozenRowsByIndex, islandedDistributedSlackByIndex, islandedHvdcsByIndex, hvdcControllers, hvdcElemIndex,
+                    resultsByIndex, preDistributedByIndex);
+        }
+
+        // The pairs OLF never applies, known once their contingencies were handed back (StateHandback#pairMayApply): a
+        // contingency without a violation selects no action a violation conditions. They are not solved, and the results
+        // leave them out.
+        private void dropPairsThatCannotApply() {
+            StateHandback handback = config.stateHandback();
+            if (handback == null) {
+                return;
+            }
+            boolean[] notApplied = in.sinks().notAppliedByIndex();
+            pairIdxList.removeIf(idx -> {
+                if (handback.pairMayApply(contingencies.get(idx).contingencyId())) {
+                    return false;
+                }
+                notApplied[idx] = true;
+                return true;
+            });
+        }
+
+        // One phase: its scenarios queue for the bank's slots, each install a chunk.
+        private void solvePhase() {
+            pairPhase = group == pairIdxList;
+            nbg = group.size();
+            // The phase's scenarios queue for the bank's slots: the first ones fill it, and as scenarios end the solve
+            // hands their slots back, refilled with the next ones while the others go on solving - one tail per phase
+            // instead of one per chunk. Each install is a chunk: the scenarios that go into the free slots.
+            bank = new SlotOccupant[bankSize];
+            freeSlots = new java.util.TreeSet<>();
+            for (int b = 0; b < bankSize; b++) {
+                freeSlots.add(b);
+            }
+            lastInstall = 0;
+            for (chunkStart = 0; chunkStart < nbg; chunkStart += lastInstall) {
+                installChunk();
+                seedChunk();
+                uploadChunk();
+                installOccupants();
+                solveChunk();
+                recordChunk();
+            }
+        }
+
+        // The free slots the chunk's scenarios go into, and each scenario's outages, islands, couplers, actions and
+        // generator losses seeded into its slot.
+        private void installChunk() {
+            chunkSize = Math.min(freeSlots.size(), nbg - chunkStart);
+            realCount = chunkSize;
+            lastInstall = chunkSize;
+            if (freeSlots.size() < bankSize) {
+                REFILLS_FOR_TESTS.incrementAndGet();
+            }
+            installSlots = new int[chunkSize];
+            for (int j = 0; j < chunkSize; j++) {
+                installSlots[j] = freeSlots.pollFirst();
+            }
+            // before anything per scenario: the bank slots the chunk's scenarios go into (the whole bank, in order, at a
+            // phase's start)
+            BatchSolveNative.beginBatchInstall(handle, chunkSize == bankSize ? null : installSlots);
+            rs.overrides.clear();
+            // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
+            // connectivity masks are per scenario and belong to the chunk, not to the run.
+            if (installed.discreteTransformerVoltageControl() && config.transformerControl() && phases.freeze() != null && phases.freeze().hasFix()) {
+                List<List<LfBranch>> slotOutaged = new ArrayList<>(realCount);
+                for (int s = 0; s < realCount; s++) {
+                    BatchContingency ctg = contingencies.get(group.get(chunkStart + s));
+                    List<LfBranch> outaged = new ArrayList<>(ctg.outagedBranches());
+                    outaged.addAll(ctg.outagedZeroImpedanceBranches());
+                    slotOutaged.add(outaged);
+                }
+                GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotOutaged, chunkSize);
+            }
+            cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
+            seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
+                    plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
+                    curveEntriesByPRow, rs, cl);
+            rs.resetChunk();
+            for (int s = 0; s < chunkSize; s++) {
+                rs.resetSlot(s);
+                if (s < realCount) {                 // real scenario: disable its outaged branch(es)
+                    int ci = group.get(chunkStart + s);
+                    PlanOverrideSeed.seed(seeding, s, ci);
+                    List<LfBranch> branches = contingencies.get(ci).outagedBranches();
+                    List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
+                    List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
+                    if (islandedHvdcsByIndex != null && islandedHvdcsByIndex[ci] != null) {
+                        // An AC-emulation HVDC whose endpoint this contingency islanded: OLF
+                        // zeroes both stations' targetP, which in AC emulation they already
+                        // are, so masking the element is the whole of it.
+                        hvdcs = new ArrayList<>(hvdcs);
+                        hvdcs.addAll(islandedHvdcsByIndex[ci]);
                     }
-                    int[] installSlots = new int[chunkSize];
-                    for (int j = 0; j < chunkSize; j++) {
-                        installSlots[j] = freeSlots.pollFirst();
-                    }
-                    // before anything per scenario: the bank slots the chunk's scenarios go into (the whole bank, in order, at a
-                    // phase's start)
-                    BatchSolveNative.beginBatchInstall(handle, chunkSize == bankSize ? null : installSlots);
-                    rs.overrides.clear();
-                    // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
-                    // connectivity masks are per scenario and belong to the chunk, not to the run.
-                    if (installed.discreteTransformerVoltageControl() && config.transformerControl() && phases.freeze() != null && phases.freeze().hasFix()) {
-                        List<List<LfBranch>> slotOutaged = new ArrayList<>(realCount);
-                        for (int s = 0; s < realCount; s++) {
-                            BatchContingency ctg = contingencies.get(group.get(chunkStart + s));
-                            List<LfBranch> outaged = new ArrayList<>(ctg.outagedBranches());
-                            outaged.addAll(ctg.outagedZeroImpedanceBranches());
-                            slotOutaged.add(outaged);
-                        }
-                        GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotOutaged, chunkSize);
-                    }
-                    ChunkLists cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
-                    SlotSeeding seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
-                            plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
-                            curveEntriesByPRow, rs, cl);
-                    rs.resetChunk();
-                    for (int s = 0; s < chunkSize; s++) {
-                        rs.resetSlot(s);
-                        if (s < realCount) {                 // real scenario: disable its outaged branch(es)
-                            int ci = group.get(chunkStart + s);
-                            PlanOverrideSeed.seed(seeding, s, ci);
-                            List<LfBranch> branches = contingencies.get(ci).outagedBranches();
-                            List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
-                            List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
-                            if (islandedHvdcsByIndex != null && islandedHvdcsByIndex[ci] != null) {
-                                // An AC-emulation HVDC whose endpoint this contingency islanded: OLF
-                                // zeroes both stations' targetP, which in AC emulation they already
-                                // are, so masking the element is the whole of it.
-                                hvdcs = new ArrayList<>(hvdcs);
-                                hvdcs.addAll(islandedHvdcsByIndex[ci]);
-                            }
-                            List<BatchContingency.SideOpen> sideOpens = contingencies.get(ci).sideOpenBranches();
-                            OutageMaskSeed.seed(seeding, s, ci, branches, shunts, hvdcs, sideOpens);
-                            // Rows that host a PILOT'S relocated reactive balance this scenario (the carrier a frozen base
-                            // carrier handed it to): a DISTR_Q target seed must not land on them, see GenOutageSeed.
-                            gnu.trove.set.hash.TIntHashSet pilotBalanceRows = new gnu.trove.set.hash.TIntHashSet();
-                            IslandSeed.seed(seeding, s, ci, branches, sideOpens, pilotBalanceRows);
-                            SlackRelocationSeed.seed(seeding, s, ci);
-                            // This scenario's plan entries, with the rows of every bus whose balances the structure
-                            // moves HOME here (a relocated child whose coupler opens or leaves the tree) rewritten:
-                            // the plan wrote them at the base's relocated rows, which turn into identities below.
-                            GenOutage[] slotGos = genOutagesByIndex[ci];
-                            slotGos = CouplerSeed.seed(seeding, s, ci, slotGos);
-                            ActionSeed.seed(seeding, s, ci);
-                            GenOutageSeed.seed(seeding, s, slotGos, pilotBalanceRows);
-                        }
-                        // else: padding scenario = base case (no element disabled), discarded below
-                    }
-                    ChunkView chunk = new ChunkView(group, chunkStart, chunkSize, realCount, pairPhase);
-                    ChunkSeeds seeds = new ChunkSeeds(chunkSize);
-                    if (!pairPhase && (rs.hasDistributedSlack || slackOnlyDistribution) && config.contingencyLossPreDistribution()) {
-                        preDistributeContingencyLosses(run, chunk, cl, rs, seeds);
-                    }
-                    // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
-                    // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
-                    // in-kernel phase expects the activation to already carry it.
-                    if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
-                        GpuPhaseControlOuterLoop.applyPhaseOn(realCount, n, phases.continuousPhase(),
-                                rs.rowModes, rs.disabledMask, rs.overrides);
-                    }
-                    int[] targetOverrideIndex = rs.overrides.indexArray();
-                    double[] targetOverrideValue = rs.overrides.valueArray();
-                    if (rs.overrides.conflictingAddCount() > 0) {
-                        // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
-                        // later one (no row reaches the device twice), but a sound plan has NO such row:
-                        // every one so far was a write that should not exist (a DISTR_Q seed on a FIXED_VARIABLE/BUS_TARGET_Q
-                        // row). Name it.
-                        LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
-                                + " writer)", rs.overrides.conflictingAddCount(), chunkStart);
-                        GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
-                    }
-                    // the warm starts: frozen rows, and each operator strategy's parent contingency state
-                    seedWarmStarts(run, chunk, cl, rs, seeds);
-                    if (pairPhase) {
-                        targetOverrideIndex = rs.overrides.indexArray();
-                        targetOverrideValue = rs.overrides.valueArray();
-                    }
-                    double[] distributedSlackBusAnchorShift = seeds.distributedSlackBusAnchorShift;
-                    double[] distributedSlackGeneratorAnchor = seeds.distributedSlackGeneratorAnchor;
-                    double[] distributedSlackGeneratorSeedAnchor = seeds.distributedSlackGeneratorSeedAnchor;
-                    double[] slackBusAnchorShift = seeds.slackBusAnchorShift;
-                    double[] pairSlackAbsorbedSeed = seeds.pairSlackAbsorbedSeed;
-                    boolean[] rejectAfterSolve = seeds.rejectAfterSolve;
-                    boolean[] pairParentConverged = seeds.pairParentConverged;
-                    double[] reactiveLimitSeedTargetQ = seeds.reactiveLimitSeedTargetQ;
-                    double[] preSlackSeed = seeds.preSlackSeed;
-                    double[] x0Full = seeds.x0Full;
-                    int[] reactiveLimitsSeedState = seeds.reactiveLimitsSeedState;
-                    int[] x0SeedIdx = seeds.x0SeedIdx;
-                    double[] x0SeedVal = seeds.x0SeedVal;
-                    // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
-                    // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
-                    // WARM-START flows BEFORE the first solve.
-                    GpuBatchOverrides.Snapshot preHvdcOverrides = null;
-                    int[][] hvdcStatus = null;
-                    double[] hvdcAppliedDelta1 = null;
-                    double[] hvdcAppliedDelta2 = null;
-                    // HvdcAction (AC emulation off): OLF sets each station's target to the link's flow at the state the
-                    // strategy starts from - the parent's converged solution, which is this pair's warm start - unclamped,
-                    // and takes the link out of its equations. On the device: the element masked, the two set points as
-                    // converter-bus target overrides, the status left LINEAR so the HVDC loops treat the link as the
-                    // scenario's own (never frozen, unfrozen or saturated by them). A station on the slack bus has no row:
-                    // its set point reaches the slack mismatch through the applied delta (hvdcSlackBalanceBatch), which
-                    // the VSC curve channel reads too - set below, once the HVDC arrays exist.
-                    List<double[]> hvdcActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
-                    rejectAfterSolve = applyHvdcActions(run, chunk, rs, x0Full, pairParentConverged, rejectAfterSolve, hvdcActionApplied);
-                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
-                        hvdcAppliedDelta1 = new double[chunkSize * hvdcControllers.size()];
-                        hvdcAppliedDelta2 = new double[chunkSize * hvdcControllers.size()];
-                        preHvdcOverrides = rs.overrides.snapshot();
-                        if (GpuTrace.HVDC_TRACE.isOn()) {
-                            for (int s = 0; s < realCount; s++) {
-                                System.err.println("HVDC_SLOT s=" + s + " ctg="
-                                        + contingencies.get(group.get(chunkStart + s)).contingencyId());
-                                // the PRE-freeze override entries on this slot's converter-bus P rows: the freeze
-                                // composes on top of them, so a stale one here is a double count downstream
-                                for (GpuHvdcAcEmulationLimitsOuterLoop.Controller c : hvdcControllers) {
-                                    for (int k = 0; k < preHvdcOverrides.index().length; k++) {
-                                        int r = preHvdcOverrides.index()[k] - s * n;
-                                        if (r == c.bus1PRow() || r == c.bus2PRow()) {
-                                            System.err.printf("HVDC_PREOV s=%d row=%d value=%.9f base=%.9f%n", s, r,
-                                                    preHvdcOverrides.value()[k], baseTargets[r]);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (config.hvdcFreezing()) {
-                            hvdcStatus = GpuFreezingHvdcACEmulationOuterloop.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
-                                    rs.disabledMask, baseTargets, rs.overrides, hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModes);
-                            targetOverrideIndex = rs.overrides.indexArray();
-                            targetOverrideValue = rs.overrides.valueArray();
-                        } else {
-                            hvdcStatus = new int[chunkSize][hvdcControllers.size()];
-                        }
-                        // A NON-LINEAR-at-base hvdc (saturated/frozen base — no longer a whole-run
-                        // gate): entries the freeze did not claim keep the base status + hv bit
-                        // (no override, baseTargets already carry the base injections); padding
-                        // slots get the base bits so they converge at iteration 0.
-                        GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
-                                hvdcStatus, rs.disabledMask);
-                    }
-                    boolean monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
-                    boolean readReactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
-                            || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0;
-                    cl.upload(handle, gpuData);
-                    // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
-                    // between DistributedSlack and ReactiveLimits. Running them instead as host
-                    // orchestrators after the whole solve put them out of OLF's order and left one
-                    // differing violation line over 2000 rte6515 branch contingencies.
-                    for (double[] e : hvdcActionApplied) {           // the HvdcAction set points, as applied deltas
-                        int k = (int) e[0] * hvdcControllers.size() + (int) e[1];
-                        hvdcAppliedDelta1[k] = e[2];
-                        hvdcAppliedDelta2[k] = e[3];
-                    }
-                    boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
-                    GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle,
-                            hasHvdcDriverLoops ? hvdcControllers : null, chunkSize, hvdcStatus, rs.disabledMask,
-                            hvdcAppliedDelta1, hvdcAppliedDelta2, config.hvdcLimits());
-                    // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
-                    // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
-                    // solve. Run-constant table, but the context is per chunk.
-                    boolean monitoringVoltageInKernel = monitoringVoltageActive;
-                    GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageInKernel ? phases.monitoring() : null);
-                    // the run's own loops
-                    DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
-                    // AreaInterchangeControl (in DistributedSlack's place), or cleared on a cached context
-                    GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, in.phases().areaInterchangeControl());
-                    // AutomationSystem (the last loop), or cleared on a cached context
-                    GpuAutomationSystemOuterLoop.uploadToDevice(handle, in.phases().automationSystem());
-                    long solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
-                    // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
-                    NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
-                    long tSolve0 = System.nanoTime();
-                    // OLF_GPU_LOOP_TRACE_CTG=<id>: trace that contingency's slot in THIS chunk (a fixed slot number
-                    // follows the chunk composition, which moves with the resolved chunk size).
-                    // OLF's tree for the scenarios of this chunk, where it has moved from the one the
-                    // structure was extracted on (empty clears the previous chunk's list).
-                    ZeroImpedanceNative.setBatchSpanningTreeOverrides(handle,
-                            rs.spanningTreeOverrideScenarioElementValueList.stream().mapToInt(Integer::intValue).toArray());
-                    String traceCtg = GpuTrace.LOOP_TRACE_CTG.value();
-                    int traceSlot = -1;
-                    if (traceCtg != null) {
-                        for (int s = 0; s < realCount; s++) {
-                            if (traceCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
-                                traceSlot = s;
-                            }
-                        }
-                        if (traceSlot >= 0) {
-                            System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
-                        }
-                    }
-                    if (traceSlot >= 0 || chunkStart == 0) {
-                        NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
-                    }
-                    // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
-                    // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
-                    // its chunk mates can only be reproduced in the chunk it was solved in.
-                    String chunkDump = GpuTrace.CHUNK_DUMP.value();
-                    if (chunkDump != null) {
-                        StringBuilder line = new StringBuilder().append(pairPhase).append(' ').append(chunkStart)
-                                .append(' ').append(chunkSize);
-                        for (int s = 0; s < realCount; s++) {
-                            line.append(' ').append(contingencies.get(group.get(chunkStart + s)).contingencyId());
-                        }
-                        try {
-                            java.nio.file.Files.writeString(java.nio.file.Path.of(chunkDump), line.append('\n'),
-                                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-                        } catch (java.io.IOException e) {
-                            throw new java.io.UncheckedIOException(e);
-                        }
-                    }
-                    if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
-                        // a pair starts each generator at its anchor, a contingency at its pre-distributed target
-                        ReactiveLimitsNative.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
-                                pairPhase && distributedSlackGeneratorAnchor != null ? ChunkArrays.perSlot(distributedSlackGeneratorAnchor,
-                                        chunkSize, nDistributedSlackGenerators) : cl.genPreMovesBySlot));
-                    }
-                    if (cl.outageSlackShift != null && rs.hasDistributedSlack) {     // on top of whatever the pre-distribution or the pair's
-                        if (slackBusAnchorShift == null) {               // parent put there: both are slack-target moves
-                            slackBusAnchorShift = new double[chunkSize];
-                        }
-                        for (int s = 0; s < chunkSize; s++) {
-                            slackBusAnchorShift[s] += cl.outageSlackShift[s];
-                        }
-                    }
-                    if (slackOnlyDistribution) {
-                        DistributedSlackNative.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
-                    }
-                    if (nReactiveLimitEntries > 0) {
-                        ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
-                    }
-                    if (packedDistributedSlackGenerators > 0) {         // set, or cleared on a cached context, whatever the run's loops
-                        double[] start = pairPhase || nDistributedSlackGenerators == 0 ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators);
-                        if (start != null && in.phases().areaInterchangeControlWithAreas()) {
-                            // the area phase keeps the moves from the INITIAL targets: every scenario starts at the base's
-                            for (int s = 0; s < chunkSize; s++) {
-                                for (int g = 0; g < nDistributedSlackGenerators; g++) {
-                                    start[s * nDistributedSlackGenerators + g] += in.phases().areaInterchangeControlBaseMoves()[g];
-                                }
-                            }
-                        }
-                        DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, pairPhase ? distributedSlackGeneratorAnchor : null,
-                                start, pairPhase ? distributedSlackGeneratorSeedAnchor : null);
-                    }
-                    // What the harvest of each slot needs from the scenario installed into it (null: a padding slot)
-                    SlotOccupant[] occupants = new SlotOccupant[chunkSize];
+                    List<BatchContingency.SideOpen> sideOpens = contingencies.get(ci).sideOpenBranches();
+                    OutageMaskSeed.seed(seeding, s, ci, branches, shunts, hvdcs, sideOpens);
+                    // Rows that host a PILOT'S relocated reactive balance this scenario (the carrier a frozen base
+                    // carrier handed it to): a DISTR_Q target seed must not land on them, see GenOutageSeed.
+                    gnu.trove.set.hash.TIntHashSet pilotBalanceRows = new gnu.trove.set.hash.TIntHashSet();
+                    IslandSeed.seed(seeding, s, ci, branches, sideOpens, pilotBalanceRows);
+                    SlackRelocationSeed.seed(seeding, s, ci);
+                    // This scenario's plan entries, with the rows of every bus whose balances the structure
+                    // moves HOME here (a relocated child whose coupler opens or leaves the tree) rewritten:
+                    // the plan wrote them at the base's relocated rows, which turn into identities below.
+                    GenOutage[] slotGos = genOutagesByIndex[ci];
+                    slotGos = CouplerSeed.seed(seeding, s, ci, slotGos);
+                    ActionSeed.seed(seeding, s, ci);
+                    GenOutageSeed.seed(seeding, s, slotGos, pilotBalanceRows);
+                }
+                // else: padding scenario = base case (no element disabled), discarded below
+            }
+        }
+
+        // The loss pre-distribution, the initial phase control, the warm starts and the HVDC actions and freeze.
+        private void seedChunk() {
+            chunk = new ChunkView(group, chunkStart, chunkSize, realCount, pairPhase);
+            seeds = new ChunkSeeds(chunkSize);
+            if (!pairPhase && (rs.hasDistributedSlack || slackOnlyDistribution) && config.contingencyLossPreDistribution()) {
+                preDistributeContingencyLosses(run, chunk, cl, rs, seeds);
+            }
+            // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
+            // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
+            // in-kernel phase expects the activation to already carry it.
+            if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
+                GpuPhaseControlOuterLoop.applyPhaseOn(realCount, n, phases.continuousPhase(),
+                        rs.rowModes, rs.disabledMask, rs.overrides);
+            }
+            targetOverrideIndex = rs.overrides.indexArray();
+            targetOverrideValue = rs.overrides.valueArray();
+            if (rs.overrides.conflictingAddCount() > 0) {
+                // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
+                // later one (no row reaches the device twice), but a sound plan has NO such row:
+                // every one so far was a write that should not exist (a DISTR_Q seed on a FIXED_VARIABLE/BUS_TARGET_Q
+                // row). Name it.
+                LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
+                        + " writer)", rs.overrides.conflictingAddCount(), chunkStart);
+                GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
+            }
+            // the warm starts: frozen rows, and each operator strategy's parent contingency state
+            seedWarmStarts(run, chunk, cl, rs, seeds);
+            if (pairPhase) {
+                targetOverrideIndex = rs.overrides.indexArray();
+                targetOverrideValue = rs.overrides.valueArray();
+            }
+            distributedSlackBusAnchorShift = seeds.distributedSlackBusAnchorShift;
+            distributedSlackGeneratorAnchor = seeds.distributedSlackGeneratorAnchor;
+            distributedSlackGeneratorSeedAnchor = seeds.distributedSlackGeneratorSeedAnchor;
+            slackBusAnchorShift = seeds.slackBusAnchorShift;
+            pairSlackAbsorbedSeed = seeds.pairSlackAbsorbedSeed;
+            rejectAfterSolve = seeds.rejectAfterSolve;
+            pairParentConverged = seeds.pairParentConverged;
+            reactiveLimitSeedTargetQ = seeds.reactiveLimitSeedTargetQ;
+            preSlackSeed = seeds.preSlackSeed;
+            x0Full = seeds.x0Full;
+            reactiveLimitsSeedState = seeds.reactiveLimitsSeedState;
+            x0SeedIdx = seeds.x0SeedIdx;
+            x0SeedVal = seeds.x0SeedVal;
+            // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
+            // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
+            // WARM-START flows BEFORE the first solve.
+            preHvdcOverrides = null;
+            hvdcStatus = null;
+            hvdcAppliedDelta1 = null;
+            hvdcAppliedDelta2 = null;
+            // HvdcAction (AC emulation off): OLF sets each station's target to the link's flow at the state the
+            // strategy starts from - the parent's converged solution, which is this pair's warm start - unclamped,
+            // and takes the link out of its equations. On the device: the element masked, the two set points as
+            // converter-bus target overrides, the status left LINEAR so the HVDC loops treat the link as the
+            // scenario's own (never frozen, unfrozen or saturated by them). A station on the slack bus has no row:
+            // its set point reaches the slack mismatch through the applied delta (hvdcSlackBalanceBatch), which
+            // the VSC curve channel reads too - set below, once the HVDC arrays exist.
+            hvdcActionApplied = new ArrayList<>();   // {slot, ctl, d1 - baseD1, d2 - baseD2}
+            rejectAfterSolve = applyHvdcActions(run, chunk, rs, x0Full, pairParentConverged, rejectAfterSolve, hvdcActionApplied);
+            if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                hvdcAppliedDelta1 = new double[chunkSize * hvdcControllers.size()];
+                hvdcAppliedDelta2 = new double[chunkSize * hvdcControllers.size()];
+                preHvdcOverrides = rs.overrides.snapshot();
+                if (GpuTrace.HVDC_TRACE.isOn()) {
                     for (int s = 0; s < realCount; s++) {
-                        occupants[s] = new SlotOccupant(group.get(chunkStart + s), cl.preLossBySlot[s], cl.preAbsorbedBySlot[s],
-                                cl.distributedSlackBusRowOverrideByScenario[s],
-                                rs.distributedSlackOverrideBus.length > 0 ? rs.distributedSlackOverrideBus[s] : -1,
-                                rs.distributedSlackOverrideBaseTargetPDelta.length > 0 ? rs.distributedSlackOverrideBaseTargetPDelta[s] : 0.0,
-                                rs.distributedSlackOverrideFactorDelta.length > 0 ? rs.distributedSlackOverrideFactorDelta[s] : 0.0,
-                                cl.genPreMovesBySlot != null ? cl.genPreMovesBySlot[s] : null,
-                                pairPhase && distributedSlackBusAnchorShift != null
-                                        ? java.util.Arrays.copyOfRange(distributedSlackBusAnchorShift, s * nDistributedSlackBuses, (s + 1) * nDistributedSlackBuses) : null,
-                                pairPhase && pairSlackAbsorbedSeed != null ? pairSlackAbsorbedSeed[s] : 0.0,
-                                !pairPhase && preSlackSeed != null ? preSlackSeed[s] : 0.0,
-                                pairPhase && (distributedSlackBusAnchorShift != null || pairSlackAbsorbedSeed != null),
-                                pairPhase && distributedSlackGeneratorAnchor != null,
-                                rejectAfterSolve != null && rejectAfterSolve[s]);
-                        bank[installSlots[s]] = occupants[s];
-                    }
-                    // more scenarios queue: the solve returns once refillAt of them can go in, the others still solving
-                    int queued = nbg - chunkStart - chunkSize;
-                    int pauseAtEnded = queued > 0 ? Math.min(queued, refillAt) : 0;
-                    double[][] chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
-                            rs.rowModes.entries(chunkSize), baseRowMode,
-                            java.util.Arrays.copyOf(rs.disabledMask, chunkSize), targetOverrideIndex, targetOverrideValue,
-                            rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
-                            rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
-                            rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift, slackBusAnchorShift,
-                            ChunkArrays.intsOrNull(cl.reactiveLimitTargetVOverrideScenarioEntryList),
-                            cl.reactiveLimitTargetVOverrideScenarioEntryList.isEmpty() ? null : cl.reactiveLimitTargetVOverrideValue.stream().mapToDouble(Double::doubleValue).toArray(),
-                            cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
-                            cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
-                            cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
-                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                            config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
-                            config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
-                            rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            reactiveLimitsSeedState,
-                            rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(),
-                            // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
-                            // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
-                            // and finishes with the full RL-enabled solves.
-                            0,
-                            rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
-                            pauseAtEnded);
-                    // the scenarios the solve handed back, in the order of its rows: their occupants, whose slots go back to the bank
-                    int[] handedBack = BatchSolveNative.readBatchHandedBackSlots(handle);
-                    SlotOccupant[] harvested = new SlotOccupant[handedBack.length];
-                    for (int j = 0; j < handedBack.length; j++) {
-                        harvested[j] = bank[handedBack[j]];
-                        bank[handedBack[j]] = null;
-                        freeSlots.add(handedBack[j]);
-                    }
-                    int harvestedCount = handedBack.length;
-                    // each scenario's PV/PQ states as its solve ended: what its pairs continue from, and the traces
-                    int[] reactiveLimitsFinalState = readReactiveLimitsFinalState ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(handle) : null;
-                    if (GpuTrace.REJECT_TRACE.isOn()) {
-                        // slot -> contingency for every scenario the device rejected in this chunk: the native
-                        // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
-                        for (int s = 0; s < harvestedCount; s++) {
-                            int status = ChunkArrays.rowStatus(chunkResults[s], n);
-                            if (status <= GpuAcSolverStatus.REJECTED) {
-                                System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(harvested[s].index()).contingencyId()
-                                        + " status=" + status);
-                            }
-                        }
-                    }
-                    tMainSolveNs += System.nanoTime() - tSolve0;
-                    recordAfterSolve(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState,
-                            hasHvdcDriverLoops, monitoringVoltageInKernel);
-                    long tOrch0 = System.nanoTime();
-                    captureForStrategies(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState, pairIdxList);
-                    if (!chunk.pairPhase()) {
-                        // ...and the generator moves of a contingency with strategy pairs for the host too: a strategy
-                        // condition on a generator's active power reads the target OLF's post-contingency load flow leaves
-                        for (int s = 0; s < harvestedCount; s++) {
-                            double[] moves = run.captures().genMovesByIndex.get(harvested[s].index());
-                            if (moves != null && parentsOfPairs.contains(harvested[s].index())) {
-                                distributedSlackGeneratorMovesByIndex[harvested[s].index()] = moves;
-                            }
-                        }
-                    }
-                    // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
-                    // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
-                    // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
-
-                    tOrchestratorNs += System.nanoTime() - tOrch0;
-                    if (GpuTrace.RL_TRACE.isOn() && reactiveLimitsFinalState != null) {
-                        // The FINAL reactive-limits state, after every orchestrator re-solve. The
-                        // per-solve trace above only sees the main solve, and OLF switches PV -> PQ late in its
-                        // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
-                        // comparing the main solve's count against the CPU's compares two different
-                        // points in the trajectory.
-                        for (int s = 0; s < harvestedCount; s++) {
-                            int switchedToPq = 0;
-                            for (int i = 0; i < nReactiveLimitEntries; i++) {
-                                if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
-                                    switchedToPq++;
+                        System.err.println("HVDC_SLOT s=" + s + " ctg="
+                                + contingencies.get(group.get(chunkStart + s)).contingencyId());
+                        // the PRE-freeze override entries on this slot's converter-bus P rows: the freeze
+                        // composes on top of them, so a stale one here is a double count downstream
+                        for (GpuHvdcAcEmulationLimitsOuterLoop.Controller c : hvdcControllers) {
+                            for (int k = 0; k < preHvdcOverrides.index().length; k++) {
+                                int r = preHvdcOverrides.index()[k] - s * n;
+                                if (r == c.bus1PRow() || r == c.bus2PRow()) {
+                                    System.err.printf("HVDC_PREOV s=%d row=%d value=%.9f base=%.9f%n", s, r,
+                                            preHvdcOverrides.value()[k], baseTargets[r]);
                                 }
                             }
-                            StringBuilder ids = new StringBuilder();
-                            for (int i = 0; i < nReactiveLimitEntries; i++) {
-                                if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
-                                    ids.append(' ').append(i).append("(vRow=").append(gpuData.reactiveLimits().voltageRow()[i])
-                                       .append(",lt=").append(GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i])).append(')');
-                                }
-                            }
-                            System.err.printf("GPU_RL_FINAL ctg=%s switchedToPqTotal=%d%s%n",
-                                    contingencies.get(harvested[s].index()).contingencyId(), switchedToPq, ids);
-                        }
-                    }
-                    boolean[] switchesUnread = new boolean[harvestedCount];
-                    if (in.phases().automationSystem() != null) {
-                        // the branches each scenario's AutomationSystem phase left switched: in the mask the solve ended with,
-                        // which a second solve of this chunk would have re-uploaded from the host's (none runs: then reject)
-                        byte[] operatedDisabled = BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1
-                                ? AutomationSystemNative.readBatchAutomationSystemOperatedDisabled(handle) : null;
-                        for (int s = 0; s < harvestedCount; s++) {
-                            if (operatedDisabled == null) {
-                                switchesUnread[s] = true;
-                                GpuBatchScopeCensus.record("RUNTIME:AUTOMATION_SYSTEM_SWITCHES_UNREAD");
-                            } else {
-                                int[] switched = GpuAutomationSystemOuterLoop.switchedBranchNums(in.phases().automationSystem(), operatedDisabled, s);
-                                automationSystemSwitchedByIndex[harvested[s].index()] = switched.length > 0 ? switched : null;
-                            }
-                        }
-                    }
-                    // the taps the outer loops left on each scenario's transformers: the host evaluates its flows with them
-                    double[][] tapMoves = DeviceTapMoves.read(in.phases().phases(), handle, harvestedCount);
-                    if (tapMoves != null) {
-                        for (int s = 0; s < harvestedCount; s++) {
-                            deviceTapMovesByIndex[harvested[s].index()] = tapMoves[s];
-                        }
-                    }
-                    if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
-                        // what the area phase's checks distributed (its scenarios lose no active power: nothing pre-distributed)
-                        double[] distributed = AreaInterchangeControlNative.readBatchAreaInterchangeControlDistributedActivePower(handle);
-                        for (int s = 0; s < harvestedCount && distributed != null; s++) {
-                            distributedByIndex[harvested[s].index()] = distributed[s];
-                        }
-                    } else if ((rs.hasDistributedSlack || slackOnlyDistribution)
-                            && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
-                        recordDistributedActivePower(handle, gpuData, harvested, harvestedCount, n, slackOnlyDistribution,
-                                preDistributedByIndex, distributedByIndex);
-                    }
-                    if (config.stateHandback() != null) {
-                        readHandback(config.stateHandback(), handle, harvested, harvestedCount, chunkResults, switchesUnread, n,
-                                automationSystemSwitchedByIndex, deviceTapMovesByIndex, contingencies, pairPhase, parentsOfPairs);
-                    }
-                    for (int s = 0; s < harvestedCount; s++) {
-                        double[] row = chunkResults[s];
-                        if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
-                            ChunkArrays.setRowStatus(row, GpuAcSolverStatus.REJECTED);   // the census names the reason where it is decided
-                        } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED) {
-                            // a pair the device solved and did not converge: a device failure wherever OLF converges it
-                            GpuBatchScopeCensus.pairDeviceFailed(
-                                    contingencies.get(harvested[s].index()).contingencyId());
-                        }
-                        if (config.stateSink() != null && row.length == n + 3 && ChunkArrays.rowStatus(row, n) == GpuAcSolverStatus.CONVERGED) {
-                            // the state leaves the heap now, as its chunk completes; the result keeps the tail
-                            // (iterations, norm, status) - see sunkTail / fullRow
-                            config.stateSink().put(contingencies.get(harvested[s].index()).contingencyId(),
-                                    java.util.Arrays.copyOf(row, n));
-                            row = new double[] {row[n], row[n + 1], row[n + 2]};
-                        }
-                        resultsByIndex[harvested[s].index()] = row;
-                        // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
-                        // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
-                        // "precomputed on device: N / M" says how many, never which.
-                        if (GpuTrace.CPU_ROUTED.isOn() && chunkResults[s] != null
-                                && ChunkArrays.rowStatus(chunkResults[s], n) != GpuAcSolverStatus.CONVERGED) {
-                            System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
-                                    contingencies.get(harvested[s].index()).contingencyId(),
-                                    ChunkArrays.rowStatus(chunkResults[s], n));
                         }
                     }
                 }
+                if (config.hvdcFreezing()) {
+                    hvdcStatus = GpuFreezingHvdcACEmulationOuterloop.applyFreeze(chunkSize, realCount, n, hvdcControllers,
+                            baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
+                            rs.disabledMask, baseTargets, rs.overrides, hvdcAppliedDelta1, hvdcAppliedDelta2, rs.rowModes);
+                    targetOverrideIndex = rs.overrides.indexArray();
+                    targetOverrideValue = rs.overrides.valueArray();
+                } else {
+                    hvdcStatus = new int[chunkSize][hvdcControllers.size()];
+                }
+                // A NON-LINEAR-at-base hvdc (saturated/frozen base — no longer a whole-run
+                // gate): entries the freeze did not claim keep the base status + hv bit
+                // (no override, baseTargets already carry the base injections); padding
+                // slots get the base bits so they converge at iteration 0.
+                GpuHvdcAcEmulationLimitsOuterLoop.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
+                        hvdcStatus, rs.disabledMask);
             }
+        }
+
+        // The chunk's per-slot tables and the run's loops on the device, the anchors of the slack distribution.
+        private void uploadChunk() {
+            monitoringVoltageActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
+            readReactiveLimitsFinalState = (!pairPhase && !pairIdxList.isEmpty() || monitoringVoltageActive
+                    || GpuTrace.RL_TRACE.isOn()) && nReactiveLimitEntries > 0;
+            cl.upload(handle, gpuData);
+            // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
+            // between DistributedSlack and ReactiveLimits. Running them instead as host
+            // orchestrators after the whole solve put them out of OLF's order and left one
+            // differing violation line over 2000 rte6515 branch contingencies.
+            for (double[] e : hvdcActionApplied) {           // the HvdcAction set points, as applied deltas
+                int k = (int) e[0] * hvdcControllers.size() + (int) e[1];
+                hvdcAppliedDelta1[k] = e[2];
+                hvdcAppliedDelta2[k] = e[3];
+            }
+            hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
+            GpuHvdcAcEmulationLimitsOuterLoop.installDriverLoops(handle,
+                    hasHvdcDriverLoops ? hvdcControllers : null, chunkSize, hvdcStatus, rs.disabledMask,
+                    hvdcAppliedDelta1, hvdcAppliedDelta2, config.hvdcLimits());
+            // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
+            // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
+            // solve. Run-constant table, but the context is per chunk.
+            monitoringVoltageInKernel = monitoringVoltageActive;
+            GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageInKernel ? phases.monitoring() : null);
+            // the run's own loops
+            DriverNative.setBatchOuterLoops(handle, in.settings().distributedSlackOuterLoop(), in.settings().reactiveLimitsOuterLoop());
+            // AreaInterchangeControl (in DistributedSlack's place), or cleared on a cached context
+            GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, in.phases().areaInterchangeControl());
+            // AutomationSystem (the last loop), or cleared on a cached context
+            GpuAutomationSystemOuterLoop.uploadToDevice(handle, in.phases().automationSystem());
+            solveCountBefore = BatchReadbackNative.readBatchSolveCount(handle);
+            // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
+            NewtonSettingsNative.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
+            tSolve0 = System.nanoTime();
+            // OLF_GPU_LOOP_TRACE_CTG=<id>: trace that contingency's slot in THIS chunk (a fixed slot number
+            // follows the chunk composition, which moves with the resolved chunk size).
+            // OLF's tree for the scenarios of this chunk, where it has moved from the one the
+            // structure was extracted on (empty clears the previous chunk's list).
+            ZeroImpedanceNative.setBatchSpanningTreeOverrides(handle,
+                    rs.spanningTreeOverrideScenarioElementValueList.stream().mapToInt(Integer::intValue).toArray());
+            traceCtg = GpuTrace.LOOP_TRACE_CTG.value();
+            traceSlot = -1;
+            if (traceCtg != null) {
+                for (int s = 0; s < realCount; s++) {
+                    if (traceCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
+                        traceSlot = s;
+                    }
+                }
+                if (traceSlot >= 0) {
+                    System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
+                }
+            }
+            if (traceSlot >= 0 || chunkStart == 0) {
+                NewtonSettingsNative.setBatchLoopTraceSlot(handle, traceSlot);
+            }
+            // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
+            // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
+            // its chunk mates can only be reproduced in the chunk it was solved in.
+            chunkDump = GpuTrace.CHUNK_DUMP.value();
+            if (chunkDump != null) {
+                StringBuilder line = new StringBuilder().append(pairPhase).append(' ').append(chunkStart)
+                        .append(' ').append(chunkSize);
+                for (int s = 0; s < realCount; s++) {
+                    line.append(' ').append(contingencies.get(group.get(chunkStart + s)).contingencyId());
+                }
+                try {
+                    java.nio.file.Files.writeString(java.nio.file.Path.of(chunkDump), line.append('\n'),
+                            java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
+                // a pair starts each generator at its anchor, a contingency at its pre-distributed target
+                ReactiveLimitsNative.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(
+                        pairPhase && distributedSlackGeneratorAnchor != null ? ChunkArrays.perSlot(distributedSlackGeneratorAnchor,
+                                chunkSize, nDistributedSlackGenerators) : cl.genPreMovesBySlot));
+            }
+            if (cl.outageSlackShift != null && rs.hasDistributedSlack) {     // on top of whatever the pre-distribution or the pair's
+                if (slackBusAnchorShift == null) {               // parent put there: both are slack-target moves
+                    slackBusAnchorShift = new double[chunkSize];
+                }
+                for (int s = 0; s < chunkSize; s++) {
+                    slackBusAnchorShift[s] += cl.outageSlackShift[s];
+                }
+            }
+            if (slackOnlyDistribution) {
+                DistributedSlackNative.setBatchSlackOnlyAnchor(handle, pairPhase ? pairSlackAbsorbedSeed : null);
+            }
+            if (nReactiveLimitEntries > 0) {
+                ReactiveLimitsNative.setBatchReactiveLimitSeedTargetQ(handle, pairPhase ? reactiveLimitSeedTargetQ : null);
+            }
+            if (packedDistributedSlackGenerators > 0) {         // set, or cleared on a cached context, whatever the run's loops
+                double[] start = pairPhase || nDistributedSlackGenerators == 0 ? null : ChunkArrays.flat(cl.genPreMovesBySlot, chunkSize, nDistributedSlackGenerators);
+                if (start != null && in.phases().areaInterchangeControlWithAreas()) {
+                    // the area phase keeps the moves from the INITIAL targets: every scenario starts at the base's
+                    for (int s = 0; s < chunkSize; s++) {
+                        for (int g = 0; g < nDistributedSlackGenerators; g++) {
+                            start[s * nDistributedSlackGenerators + g] += in.phases().areaInterchangeControlBaseMoves()[g];
+                        }
+                    }
+                }
+                DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, pairPhase ? distributedSlackGeneratorAnchor : null,
+                        start, pairPhase ? distributedSlackGeneratorSeedAnchor : null);
+            }
+        }
+
+        // What the harvest of each slot needs from the scenario installed into it.
+        private void installOccupants() {
+            // What the harvest of each slot needs from the scenario installed into it (null: a padding slot)
+            occupants = new SlotOccupant[chunkSize];
+            for (int s = 0; s < realCount; s++) {
+                occupants[s] = new SlotOccupant(group.get(chunkStart + s), cl.preLossBySlot[s], cl.preAbsorbedBySlot[s],
+                        cl.distributedSlackBusRowOverrideByScenario[s],
+                        rs.distributedSlackOverrideBus.length > 0 ? rs.distributedSlackOverrideBus[s] : -1,
+                        rs.distributedSlackOverrideBaseTargetPDelta.length > 0 ? rs.distributedSlackOverrideBaseTargetPDelta[s] : 0.0,
+                        rs.distributedSlackOverrideFactorDelta.length > 0 ? rs.distributedSlackOverrideFactorDelta[s] : 0.0,
+                        cl.genPreMovesBySlot != null ? cl.genPreMovesBySlot[s] : null,
+                        pairPhase && distributedSlackBusAnchorShift != null
+                                ? java.util.Arrays.copyOfRange(distributedSlackBusAnchorShift, s * nDistributedSlackBuses, (s + 1) * nDistributedSlackBuses) : null,
+                        pairPhase && pairSlackAbsorbedSeed != null ? pairSlackAbsorbedSeed[s] : 0.0,
+                        !pairPhase && preSlackSeed != null ? preSlackSeed[s] : 0.0,
+                        pairPhase && (distributedSlackBusAnchorShift != null || pairSlackAbsorbedSeed != null),
+                        pairPhase && distributedSlackGeneratorAnchor != null,
+                        rejectAfterSolve != null && rejectAfterSolve[s]);
+                bank[installSlots[s]] = occupants[s];
+            }
+        }
+
+        // The batched solve, until refillAt scenarios have ended (or all of them), and the slots it hands back.
+        private void solveChunk() {
+            // more scenarios queue: the solve returns once refillAt of them can go in, the others still solving
+            queued = nbg - chunkStart - chunkSize;
+            pauseAtEnded = queued > 0 ? Math.min(queued, refillAt) : 0;
+            chunkResults = BatchSolveNative.solveBatchContext(handle, baseState, baseTargets,
+                    rs.rowModes.entries(chunkSize), baseRowMode,
+                    java.util.Arrays.copyOf(rs.disabledMask, chunkSize), targetOverrideIndex, targetOverrideValue,
+                    rs.distributedSlackOverrideBus, rs.distributedSlackOverrideFactorDelta,
+                    rs.distributedSlackOverrideBaseTargetPDelta, rs.distributedSlackOverrideMaxDelta,
+                    rs.distributedSlackOverrideMinDelta, distributedSlackBusAnchorShift, slackBusAnchorShift,
+                    ChunkArrays.intsOrNull(cl.reactiveLimitTargetVOverrideScenarioEntryList),
+                    cl.reactiveLimitTargetVOverrideScenarioEntryList.isEmpty() ? null : cl.reactiveLimitTargetVOverrideValue.stream().mapToDouble(Double::doubleValue).toArray(),
+                    cl.reactiveLimitDeltaOverrideScenarioEntryList.stream().mapToInt(Integer::intValue).toArray(),
+                    cl.reactiveLimitDeltaOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
+                    cl.reactiveCapabilityCurveOverrideScenarioCurve.stream().mapToInt(Integer::intValue).toArray(),
+                    cl.reactiveCapabilityCurveOverrideStepScale.stream().mapToDouble(Double::doubleValue).toArray(),
+                                                parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                    config.stateVectorScalingMode(), config.maxDv(), config.maxDphi(),
+                    config.stateVectorScalingMode() == GpuStateVectorScalingMode.MAX_VOLTAGE_CHANGE ? varType : null, x0Full,
+                    rs.shuntAdmittanceOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                    rs.shuntAdmittanceOverrideDeltaList.stream().mapToDouble(Double::doubleValue).toArray(),
+                    reactiveLimitsSeedState,
+                    rs.closedBranchParameterOverrideScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                    rs.closedBranchParameterOverrideValueList.stream().mapToDouble(Double::doubleValue).toArray(),
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.rejectSlackDistributionFailureFlag(),
+                    // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
+                    // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
+                    // and finishes with the full RL-enabled solves.
+                    0,
+                    rs.nBaseClosedZeroImpedanceBranches, rs.zeroImpedanceBranchCloseScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                    rs.zeroImpedanceBranchOpenScenarioElementList.stream().mapToInt(Integer::intValue).toArray(),
+                    pauseAtEnded);
+            // the scenarios the solve handed back, in the order of its rows: their occupants, whose slots go back to the bank
+            handedBack = BatchSolveNative.readBatchHandedBackSlots(handle);
+            harvested = new SlotOccupant[handedBack.length];
+            for (int j = 0; j < handedBack.length; j++) {
+                harvested[j] = bank[handedBack[j]];
+                bank[handedBack[j]] = null;
+                freeSlots.add(handedBack[j]);
+            }
+            harvestedCount = handedBack.length;
+        }
+
+        // The results of the scenarios the solve handed back, and what their strategies and the host read of them.
+        private void recordChunk() {
+            // each scenario's PV/PQ states as its solve ended: what its pairs continue from, and the traces
+            reactiveLimitsFinalState = readReactiveLimitsFinalState ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(handle) : null;
+            if (GpuTrace.REJECT_TRACE.isOn()) {
+                // slot -> contingency for every scenario the device rejected in this chunk: the native
+                // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
+                for (int s = 0; s < harvestedCount; s++) {
+                    int status = ChunkArrays.rowStatus(chunkResults[s], n);
+                    if (status <= GpuAcSolverStatus.REJECTED) {
+                        System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(harvested[s].index()).contingencyId()
+                                + " status=" + status);
+                    }
+                }
+            }
+            tMainSolveNs += System.nanoTime() - tSolve0;
+            recordAfterSolve(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState,
+                    hasHvdcDriverLoops, monitoringVoltageInKernel);
+            tOrch0 = System.nanoTime();
+            captureForStrategies(run, chunk, handle, chunkResults, harvested, harvestedCount, reactiveLimitsFinalState, pairIdxList);
+            if (!chunk.pairPhase()) {
+                // ...and the generator moves of a contingency with strategy pairs for the host too: a strategy
+                // condition on a generator's active power reads the target OLF's post-contingency load flow leaves
+                for (int s = 0; s < harvestedCount; s++) {
+                    double[] moves = run.captures().genMovesByIndex.get(harvested[s].index());
+                    if (moves != null && parentsOfPairs.contains(harvested[s].index())) {
+                        distributedSlackGeneratorMovesByIndex[harvested[s].index()] = moves;
+                    }
+                }
+            }
+            // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
+            // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
+            // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
+
+            tOrchestratorNs += System.nanoTime() - tOrch0;
+            if (GpuTrace.RL_TRACE.isOn() && reactiveLimitsFinalState != null) {
+                // The FINAL reactive-limits state, after every orchestrator re-solve. The
+                // per-solve trace above only sees the main solve, and OLF switches PV -> PQ late in its
+                // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
+                // comparing the main solve's count against the CPU's compares two different
+                // points in the trajectory.
+                for (int s = 0; s < harvestedCount; s++) {
+                    int switchedToPq = 0;
+                    for (int i = 0; i < nReactiveLimitEntries; i++) {
+                        if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
+                            switchedToPq++;
+                        }
+                    }
+                    StringBuilder ids = new StringBuilder();
+                    for (int i = 0; i < nReactiveLimitEntries; i++) {
+                        if (GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i]) != GpuQLimitType.NONE) {
+                            ids.append(' ').append(i).append("(vRow=").append(gpuData.reactiveLimits().voltageRow()[i])
+                               .append(",lt=").append(GpuReactiveLimitsState.limitType(reactiveLimitsFinalState[s * nReactiveLimitEntries + i])).append(')');
+                        }
+                    }
+                    System.err.printf("GPU_RL_FINAL ctg=%s switchedToPqTotal=%d%s%n",
+                            contingencies.get(harvested[s].index()).contingencyId(), switchedToPq, ids);
+                }
+            }
+            switchesUnread = new boolean[harvestedCount];
+            if (in.phases().automationSystem() != null) {
+                // the branches each scenario's AutomationSystem phase left switched: in the mask the solve ended with,
+                // which a second solve of this chunk would have re-uploaded from the host's (none runs: then reject)
+                byte[] operatedDisabled = BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1
+                        ? AutomationSystemNative.readBatchAutomationSystemOperatedDisabled(handle) : null;
+                for (int s = 0; s < harvestedCount; s++) {
+                    if (operatedDisabled == null) {
+                        switchesUnread[s] = true;
+                        GpuBatchScopeCensus.record("RUNTIME:AUTOMATION_SYSTEM_SWITCHES_UNREAD");
+                    } else {
+                        int[] switched = GpuAutomationSystemOuterLoop.switchedBranchNums(in.phases().automationSystem(), operatedDisabled, s);
+                        automationSystemSwitchedByIndex[harvested[s].index()] = switched.length > 0 ? switched : null;
+                    }
+                }
+            }
+            // the taps the outer loops left on each scenario's transformers: the host evaluates its flows with them
+            tapMoves = DeviceTapMoves.read(in.phases().phases(), handle, harvestedCount);
+            if (tapMoves != null) {
+                for (int s = 0; s < harvestedCount; s++) {
+                    deviceTapMovesByIndex[harvested[s].index()] = tapMoves[s];
+                }
+            }
+            if (in.phases().areaInterchangeControlWithAreas() && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                // what the area phase's checks distributed (its scenarios lose no active power: nothing pre-distributed)
+                double[] distributed = AreaInterchangeControlNative.readBatchAreaInterchangeControlDistributedActivePower(handle);
+                for (int s = 0; s < harvestedCount && distributed != null; s++) {
+                    distributedByIndex[harvested[s].index()] = distributed[s];
+                }
+            } else if ((rs.hasDistributedSlack || slackOnlyDistribution)
+                    && BatchReadbackNative.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                recordDistributedActivePower(handle, gpuData, harvested, harvestedCount, n, slackOnlyDistribution,
+                        preDistributedByIndex, distributedByIndex);
+            }
+            if (config.stateHandback() != null) {
+                readHandback(config.stateHandback(), handle, harvested, harvestedCount, chunkResults, switchesUnread, n,
+                        automationSystemSwitchedByIndex, deviceTapMovesByIndex, contingencies, pairPhase, parentsOfPairs);
+            }
+            for (int s = 0; s < harvestedCount; s++) {
+                double[] row = chunkResults[s];
+                if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
+                    ChunkArrays.setRowStatus(row, GpuAcSolverStatus.REJECTED);   // the census names the reason where it is decided
+                } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED) {
+                    // a pair the device solved and did not converge: a device failure wherever OLF converges it
+                    GpuBatchScopeCensus.pairDeviceFailed(
+                            contingencies.get(harvested[s].index()).contingencyId());
+                }
+                if (config.stateSink() != null && row.length == n + 3 && ChunkArrays.rowStatus(row, n) == GpuAcSolverStatus.CONVERGED) {
+                    // the state leaves the heap now, as its chunk completes; the result keeps the tail
+                    // (iterations, norm, status) - see sunkTail / fullRow
+                    config.stateSink().put(contingencies.get(harvested[s].index()).contingencyId(),
+                            java.util.Arrays.copyOf(row, n));
+                    row = new double[] {row[n], row[n + 1], row[n + 2]};
+                }
+                resultsByIndex[harvested[s].index()] = row;
+                // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
+                // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
+                // "precomputed on device: N / M" says how many, never which.
+                if (GpuTrace.CPU_ROUTED.isOn() && chunkResults[s] != null
+                        && ChunkArrays.rowStatus(chunkResults[s], n) != GpuAcSolverStatus.CONVERGED) {
+                    System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
+                            contingencies.get(harvested[s].index()).contingencyId(),
+                            ChunkArrays.rowStatus(chunkResults[s], n));
+                }
+            }
+        }
+
+        private void report() {
             long elapsed = System.currentTimeMillis() - startTime;
             LOGGER.info("Batched N-1: {} GPU scenarios in a bank of {} slots solved in {} ms ({} ms/scenario)",
                     nb, bankSize, elapsed, (double) elapsed / nb);
@@ -808,9 +1041,6 @@ final class GpuBatchChunkSolver {
                 GpuBatchPhaseStats.snapshotMs().forEach((k, v) ->
                         System.err.printf("BATCH_PHASE_TIME    %-38s %6d ms%n", k, v));
             }
-        } catch (RuntimeException e) {
-            GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time
-            throw e;
         }
     }
 
@@ -1104,35 +1334,8 @@ final class GpuBatchChunkSolver {
             // mismatch during the solve, at a different point inside the slack band).
             int ci = group.get(chunkStart + s);
             int[] frozen = frozenRowsByIndex[ci];
-            boolean[] islandedDistributedSlackMask = null;
-            // The PLAN's mask first (islandedDistributedSlackParticipants): it matches a participant on its BUS
-            // as well as on its row, which the row test below cannot do for a participant whose P
-            // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
-            // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
-            // alone repeated exactly the defect that comment describes: measured on the
-            // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
-            // share of -0.894 pu, and the device's slack loop then chased its own tail for five
-            // passes and retired 0.837 pu away from OLF.
-            if (islandedDistributedSlackByIndex != null && islandedDistributedSlackByIndex[ci] != null) {
-                for (int participant : islandedDistributedSlackByIndex[ci]) {
-                    if (participant >= 0 && participant < nDistributedSlackBuses) {
-                        if (islandedDistributedSlackMask == null) {
-                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
-                        }
-                        islandedDistributedSlackMask[participant] = true;
-                    }
-                }
-            }
-            for (int i = 0; i < nDistributedSlackBuses; i++) {
-                for (int fr : frozen) {
-                    if (fr == gpuData.distributedSlack().busPhiRow()[i]) {
-                        if (islandedDistributedSlackMask == null) {
-                            islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
-                        }
-                        islandedDistributedSlackMask[i] = true;
-                    }
-                }
-            }
+            boolean[] islandedDistributedSlackMask = islandedParticipants(gpuData, nDistributedSlackBuses,
+                    islandedDistributedSlackByIndex == null ? null : islandedDistributedSlackByIndex[ci], frozen);
             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, cl.preLossBySlot[s],
                     rs.distributedSlackOverrideBus.length > 0 ? rs.distributedSlackOverrideBus[s] : -1,
                     rs.distributedSlackOverrideFactorDelta.length > 0 ? rs.distributedSlackOverrideFactorDelta[s] : 0,
@@ -1147,45 +1350,11 @@ final class GpuBatchChunkSolver {
             // split is what the first solve sees — so the mismatch the DS loop then
             // measures, and everything after it, inherits the difference.
             if (GpuTrace.SEED_DUMP.isOn() && shares != null) {
-                try (java.io.PrintWriter w = new java.io.PrintWriter(
-                        new java.io.FileWriter(GpuTrace.SEED_DUMP.value(), true))) {
-                    w.printf("# SEED ctg=%s%n",
-                            contingencies.get(group.get(chunkStart + s)).contingencyId());
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        if (shares[i] != 0) {
-                            w.printf("%d %.12f%n", i, shares[i]);
-                        }
-                    }
-                } catch (java.io.IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
+                dumpSeed(contingencies.get(group.get(chunkStart + s)).contingencyId(), shares, nDistributedSlackBuses);
             }
             if (GpuTrace.PRELOSS_TRACE.isOn()) {
-                double absorbed = 0;
-                if (shares != null) {
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        absorbed += shares[i];
-                    }
-                }
-                double fsAll = 0;
-                double fsIslanded = 0;
-                for (int i = 0; i < nDistributedSlackBuses; i++) {
-                    fsAll += gpuData.distributedSlack().busFactor()[i];
-                    if (islandedDistributedSlackMask != null && islandedDistributedSlackMask[i]) {
-                        fsIslanded += gpuData.distributedSlack().busFactor()[i];
-                    }
-                }
-                System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
-                        contingencies.get(ci).contingencyId(), ChunkArrays.countTrue(islandedDistributedSlackMask));
-                System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
-                        + "(%.2f%% of the participation is in the island)%n",
-                        contingencies.get(ci).contingencyId(), fsAll, fsIslanded,
-                        fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
-                System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
-                        + "islandedDistributedSlackParticipants=%d%n",
-                        contingencies.get(ci).contingencyId(), cl.preLossBySlot[s], absorbed,
-                        shares == null ? 0.0 : shares[nDistributedSlackBuses],
-                        ChunkArrays.countTrue(islandedDistributedSlackMask));
+                tracePreLoss(gpuData, contingencies.get(ci).contingencyId(), cl.preLossBySlot[s], shares, islandedDistributedSlackMask,
+                        nDistributedSlackBuses);
             }
             if (shares == null) {
                 preDistributedByIndex[preIdx] = 0.0;
@@ -1223,24 +1392,126 @@ final class GpuBatchChunkSolver {
             // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
             // starts at the same operating point) while leaving the anchor alone is what
             // makes the kernel's reset pick the shares back up as absorbedNow.
-            for (int i = 0; i < nDistributedSlackBuses; i++) {
-                if (shares[i] == 0) {
-                    continue;
-                }
-                // The row this scenario actually solves the bus's P balance on: the
-                // coupler-tree relocation's dummy row unless this scenario opened that
-                // coupler, in which case the balance — and so the share — is on the bus's
-                // own phi row. The ANCHOR stays the participant's own distributedSlackBusBaseTargetP, which
-                // the device carried to the new row with the equation.
-                int distributedSlackBusRow = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
-                        ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
-                int flat = s * n + distributedSlackBusRow;
-                // compose with a gen-outage override on the same row
-                rs.overrides.compose(flat, baseTargets[gpuData.distributedSlack().busPhiRow()[i]], shares[i]);
-            }
+            composeShareOverrides(n, gpuData, baseTargets, cl, rs, s, shares, nDistributedSlackBuses);
         }
         seeds.slackBusAnchorShift = slackBusAnchorShift;
         seeds.preSlackSeed = preSlackSeed;
+    }
+
+    /**
+     * The participants a fragmenting contingency puts in another synchronous component: OLF distributes over
+     * getSynchronousNetworks().getFirst(), so they take no share (null: none).
+     */
+    private static boolean[] islandedParticipants(GpuAcData gpuData, int nDistributedSlackBuses, int[] planIslanded, int[] frozen) {
+        boolean[] islandedDistributedSlackMask = null;
+        // The PLAN's mask first (islandedDistributedSlackParticipants): it matches a participant on its BUS
+        // as well as on its row, which the row test below cannot do for a participant whose P
+        // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
+        // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
+        // alone repeated exactly the defect that comment describes: measured on the
+        // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
+        // share of -0.894 pu, and the device's slack loop then chased its own tail for five
+        // passes and retired 0.837 pu away from OLF.
+        if (planIslanded != null) {
+            for (int participant : planIslanded) {
+                if (participant >= 0 && participant < nDistributedSlackBuses) {
+                    if (islandedDistributedSlackMask == null) {
+                        islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
+                    }
+                    islandedDistributedSlackMask[participant] = true;
+                }
+            }
+        }
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            for (int fr : frozen) {
+                if (fr == gpuData.distributedSlack().busPhiRow()[i]) {
+                    if (islandedDistributedSlackMask == null) {
+                        islandedDistributedSlackMask = new boolean[nDistributedSlackBuses];
+                    }
+                    islandedDistributedSlackMask[i] = true;
+                }
+            }
+        }
+        return islandedDistributedSlackMask;
+    }
+
+    // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
+    // pre-distribution seeds, against OLF's own pre-distribution section in
+    // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
+    // split is what the first solve sees — so the mismatch the DS loop then
+    // measures, and everything after it, inherits the difference.
+    private static void dumpSeed(String contingencyId, double[] shares, int nDistributedSlackBuses) {
+        try (java.io.PrintWriter w = new java.io.PrintWriter(
+                new java.io.FileWriter(GpuTrace.SEED_DUMP.value(), true))) {
+            w.printf("# SEED ctg=%s%n",
+                    contingencyId);
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                if (shares[i] != 0) {
+                    w.printf("%d %.12f%n", i, shares[i]);
+                }
+            }
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private static void tracePreLoss(GpuAcData gpuData, String contingencyId, double preLoss, double[] shares,
+                                     boolean[] islandedDistributedSlackMask, int nDistributedSlackBuses) {
+        double absorbed = 0;
+        if (shares != null) {
+            for (int i = 0; i < nDistributedSlackBuses; i++) {
+                absorbed += shares[i];
+            }
+        }
+        double fsAll = 0;
+        double fsIslanded = 0;
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            fsAll += gpuData.distributedSlack().busFactor()[i];
+            if (islandedDistributedSlackMask != null && islandedDistributedSlackMask[i]) {
+                fsIslanded += gpuData.distributedSlack().busFactor()[i];
+            }
+        }
+        System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
+                contingencyId, ChunkArrays.countTrue(islandedDistributedSlackMask));
+        System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
+                + "(%.2f%% of the participation is in the island)%n",
+                contingencyId, fsAll, fsIslanded,
+                fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
+        System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
+                + "islandedDistributedSlackParticipants=%d%n",
+                contingencyId, preLoss, absorbed,
+                shares == null ? 0.0 : shares[nDistributedSlackBuses],
+                ChunkArrays.countTrue(islandedDistributedSlackMask));
+    }
+
+    /** Each participant's share of a scenario's pre-distribution, composed into the target of the row it solves its balance on. */
+    private static void composeShareOverrides(int n, GpuAcData gpuData, double[] baseTargets, ChunkLists cl, RunScratch rs, int s,
+                                              double[] shares, int nDistributedSlackBuses) {
+        // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
+        // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
+        // returns it as previousMismatch, then water-fills
+        // (preLoss + slackMismatch) ONCE from the anchor. Moving the anchor here
+        // instead made the device fill only the slack mismatch, and a clamped
+        // water-fill does not compose: on rte6515/LINE-6180-6074 OLF fills +4.639661
+        // in one pass and saturates 10 generators at max, while the device filled
+        // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
+        // starts at the same operating point) while leaving the anchor alone is what
+        // makes the kernel's reset pick the shares back up as absorbedNow.
+        for (int i = 0; i < nDistributedSlackBuses; i++) {
+            if (shares[i] == 0) {
+                continue;
+            }
+            // The row this scenario actually solves the bus's P balance on: the
+            // coupler-tree relocation's dummy row unless this scenario opened that
+            // coupler, in which case the balance — and so the share — is on the bus's
+            // own phi row. The ANCHOR stays the participant's own distributedSlackBusBaseTargetP, which
+            // the device carried to the new row with the equation.
+            int distributedSlackBusRow = cl.distributedSlackBusRowOverrideByScenario[s] != null && cl.distributedSlackBusRowOverrideByScenario[s][i] >= 0
+                    ? cl.distributedSlackBusRowOverrideByScenario[s][i] : gpuData.distributedSlack().busPhiRow()[i];
+            int flat = s * n + distributedSlackBusRow;
+            // compose with a gen-outage override on the same row
+            rs.overrides.compose(flat, baseTargets[gpuData.distributedSlack().busPhiRow()[i]], shares[i]);
+        }
     }
 
     /**
@@ -1249,70 +1520,159 @@ final class GpuBatchChunkSolver {
      * starts a strategy's load flow from the network the contingency's left.
      */
     private static void seedWarmStarts(RunView run, ChunkView chunk, ChunkLists cl, RunScratch rs, ChunkSeeds seeds) {
-        int n = run.n();
-        GpuAcData gpuData = run.gpuData();
-        double[] baseState = run.baseState();
-        double[] baseTargets = run.baseTargets();
-        List<BatchContingency> contingencies = run.contingencies();
-        BatchConfig config = run.config();
-        int nDistributedSlackBuses = run.nDistributedSlackBuses();
-        int nDistributedSlackGenerators = run.nDistributedSlackGenerators();
-        int nReactiveLimitEntries = run.nReactiveLimitEntries();
-        boolean slackOnlyDistribution = run.slackOnlyDistribution();
-        boolean reactiveLimitsOuterLoop = run.reactiveLimitsOuterLoop();
-        int[] baseReactiveLimitsState = run.baseReactiveLimitsState();
-        java.util.Map<String, Integer> indexById = run.indexById();
-        int[][] frozenRowsByIndex = run.frozenRowsByIndex();
-        double[][] resultsByIndex = run.resultsByIndex();
-        java.util.Map<Integer, int[]> reactiveLimitsStateByIndex = run.captures().reactiveLimitsStateByIndex;
-        java.util.Map<Integer, double[]> reactiveLimitTargetQByIndex = run.captures().reactiveLimitTargetQByIndex;
-        java.util.Map<Integer, double[]> distributedSlackTargetsByIndex = run.captures().distributedSlackTargetsByIndex;
-        java.util.Map<Integer, double[]> genMovesByIndex = run.captures().genMovesByIndex;
-        java.util.Map<Integer, double[]> exhaustedStartByIndex = run.captures().exhaustedStartByIndex;
-        java.util.Map<Integer, Double> slackAbsorbedByIndex = run.captures().slackAbsorbedByIndex;
-        List<Integer> group = chunk.group();
-        int chunkStart = chunk.chunkStart();
-        int chunkSize = chunk.chunkSize();
-        int realCount = chunk.realCount();
-        boolean pairPhase = chunk.pairPhase();
-        double[] distributedSlackBusAnchorShift = seeds.distributedSlackBusAnchorShift;
-        double[] distributedSlackGeneratorAnchor = seeds.distributedSlackGeneratorAnchor;
-        double[] distributedSlackGeneratorSeedAnchor = seeds.distributedSlackGeneratorSeedAnchor;
-        double[] slackBusAnchorShift = seeds.slackBusAnchorShift;
-        double[] pairSlackAbsorbedSeed = seeds.pairSlackAbsorbedSeed;
-        boolean[] rejectAfterSolve = seeds.rejectAfterSolve;
-        boolean[] pairParentConverged = seeds.pairParentConverged;
-        double[] reactiveLimitSeedTargetQ = seeds.reactiveLimitSeedTargetQ;
-        double[] x0Full = seeds.x0Full;
-        int[] reactiveLimitsSeedState = seeds.reactiveLimitsSeedState;
-        int[] x0SeedIdx = seeds.x0SeedIdx;
-        double[] x0SeedVal = seeds.x0SeedVal;
-        // Pair phase: warm continuation from each parent contingency's state + its PV/PQ states.
-        if (!cl.frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
-            // Only the frozen rows differ from the base state: send them as seeds the device writes over
-            // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515,
-            // 1.5 GB for a single 14,260-scenario chunk). The HVDC freeze reads its warm start from the
-            // same seeds.
-            x0SeedIdx = new int[cl.frozenSeedSlot.size()];
-            x0SeedVal = new double[cl.frozenSeedSlot.size()];
-            for (int k = 0; k < cl.frozenSeedSlot.size(); k++) {
-                x0SeedIdx[k] = cl.frozenSeedSlot.get(k) * n + cl.frozenSeedRow.get(k);
-                x0SeedVal[k] = cl.frozenSeedValue.get(k);
+        new WarmStartSeeder(run, chunk, cl, rs, seeds).seed();
+    }
+
+    /** One call of {@link #seedWarmStarts}, one method per kind of seed. Its fields are that call's state. */
+    @SuppressWarnings("java:S1450")
+    private static final class WarmStartSeeder {
+        private final ChunkLists cl;
+        private final RunScratch rs;
+        private final ChunkSeeds seeds;
+        private int n;
+        private GpuAcData gpuData;
+        private double[] baseState;
+        private double[] baseTargets;
+        private List<BatchContingency> contingencies;
+        private BatchConfig config;
+        private int nDistributedSlackBuses;
+        private int nDistributedSlackGenerators;
+        private int nReactiveLimitEntries;
+        private boolean slackOnlyDistribution;
+        private boolean reactiveLimitsOuterLoop;
+        private int[] baseReactiveLimitsState;
+        private java.util.Map<String, Integer> indexById;
+        private int[][] frozenRowsByIndex;
+        private double[][] resultsByIndex;
+        private java.util.Map<Integer, int[]> reactiveLimitsStateByIndex;
+        private java.util.Map<Integer, double[]> reactiveLimitTargetQByIndex;
+        private java.util.Map<Integer, double[]> distributedSlackTargetsByIndex;
+        private java.util.Map<Integer, double[]> genMovesByIndex;
+        private java.util.Map<Integer, double[]> exhaustedStartByIndex;
+        private java.util.Map<Integer, Double> slackAbsorbedByIndex;
+        private List<Integer> group;
+        private int chunkStart;
+        private int chunkSize;
+        private int realCount;
+        private boolean pairPhase;
+        private double[] distributedSlackBusAnchorShift;
+        private double[] distributedSlackGeneratorAnchor;
+        private double[] distributedSlackGeneratorSeedAnchor;
+        private double[] slackBusAnchorShift;
+        private double[] pairSlackAbsorbedSeed;
+        private boolean[] rejectAfterSolve;
+        private boolean[] pairParentConverged;
+        private double[] reactiveLimitSeedTargetQ;
+        private double[] x0Full;
+        private int[] reactiveLimitsSeedState;
+        private int[] x0SeedIdx;
+        private double[] x0SeedVal;
+        private double distributedSlackFactorSum;
+        private double[] parent;
+        private int[] parentReactiveLimitsState;
+        private double[] parentDistributedSlackTargets;
+        private Double parentSlackAbs;
+        private int parentIdx;
+
+        WarmStartSeeder(RunView run, ChunkView chunk, ChunkLists cl, RunScratch rs, ChunkSeeds seeds) {
+            this.cl = cl;
+            this.rs = rs;
+            this.seeds = seeds;
+            n = run.n();
+            gpuData = run.gpuData();
+            baseState = run.baseState();
+            baseTargets = run.baseTargets();
+            contingencies = run.contingencies();
+            config = run.config();
+            nDistributedSlackBuses = run.nDistributedSlackBuses();
+            nDistributedSlackGenerators = run.nDistributedSlackGenerators();
+            nReactiveLimitEntries = run.nReactiveLimitEntries();
+            slackOnlyDistribution = run.slackOnlyDistribution();
+            reactiveLimitsOuterLoop = run.reactiveLimitsOuterLoop();
+            baseReactiveLimitsState = run.baseReactiveLimitsState();
+            indexById = run.indexById();
+            frozenRowsByIndex = run.frozenRowsByIndex();
+            resultsByIndex = run.resultsByIndex();
+            reactiveLimitsStateByIndex = run.captures().reactiveLimitsStateByIndex;
+            reactiveLimitTargetQByIndex = run.captures().reactiveLimitTargetQByIndex;
+            distributedSlackTargetsByIndex = run.captures().distributedSlackTargetsByIndex;
+            genMovesByIndex = run.captures().genMovesByIndex;
+            exhaustedStartByIndex = run.captures().exhaustedStartByIndex;
+            slackAbsorbedByIndex = run.captures().slackAbsorbedByIndex;
+            group = chunk.group();
+            chunkStart = chunk.chunkStart();
+            chunkSize = chunk.chunkSize();
+            realCount = chunk.realCount();
+            pairPhase = chunk.pairPhase();
+            distributedSlackBusAnchorShift = seeds.distributedSlackBusAnchorShift;
+            distributedSlackGeneratorAnchor = seeds.distributedSlackGeneratorAnchor;
+            distributedSlackGeneratorSeedAnchor = seeds.distributedSlackGeneratorSeedAnchor;
+            slackBusAnchorShift = seeds.slackBusAnchorShift;
+            pairSlackAbsorbedSeed = seeds.pairSlackAbsorbedSeed;
+            rejectAfterSolve = seeds.rejectAfterSolve;
+            pairParentConverged = seeds.pairParentConverged;
+            reactiveLimitSeedTargetQ = seeds.reactiveLimitSeedTargetQ;
+            x0Full = seeds.x0Full;
+            reactiveLimitsSeedState = seeds.reactiveLimitsSeedState;
+            x0SeedIdx = seeds.x0SeedIdx;
+            x0SeedVal = seeds.x0SeedVal;
+        }
+
+        void seed() {
+            seedFrozenRows();
+            // Strategy-leg DS re-anchoring: OLF's processContingency calls
+            // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
+            // leg distributes only the INCREMENT from the parent contingency's already-distributed
+            // targets. The device mirrors this with three coupled pieces (each alone is wrong —
+            // participant shifts without the slack shift leave the band check measured against the
+            // pre-distribution slack target, which kills the distribution):
+            //  - distributedSlackBusAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
+            //  - slackBusAnchorShift: the slack bus's own absorbed share of the parent's distribution
+            //    ((1-fs)/fs x the participants' absorbed sum), so the mismatch/band is measured against
+            //    the parent's slack target exactly as the CPU leg measures it;
+            //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
+            //    leg's starting operating point (losses are nonlinear along the path).
+            if (pairPhase) {
+                allocatePairSeeds();
+                for (int s = 0; s < chunkSize; s++) {
+                    findParent(s);
+                    seedPairState(s);
+                    seedPairReactiveLimits(s);
+                    seedPairSlackAnchors(s);
+                    seedPairGeneratorAnchors(s);
+                }
+            }
+            seeds.distributedSlackBusAnchorShift = distributedSlackBusAnchorShift;
+            seeds.distributedSlackGeneratorAnchor = distributedSlackGeneratorAnchor;
+            seeds.distributedSlackGeneratorSeedAnchor = distributedSlackGeneratorSeedAnchor;
+            seeds.slackBusAnchorShift = slackBusAnchorShift;
+            seeds.pairSlackAbsorbedSeed = pairSlackAbsorbedSeed;
+            seeds.rejectAfterSolve = rejectAfterSolve;
+            seeds.reactiveLimitSeedTargetQ = reactiveLimitSeedTargetQ;
+            seeds.x0Full = x0Full;
+            seeds.reactiveLimitsSeedState = reactiveLimitsSeedState;
+            seeds.x0SeedIdx = x0SeedIdx;
+            seeds.x0SeedVal = x0SeedVal;
+        }
+
+        private void seedFrozenRows() {
+            // Pair phase: warm continuation from each parent contingency's state + its PV/PQ states.
+            if (!cl.frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
+                // Only the frozen rows differ from the base state: send them as seeds the device writes over
+                // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515,
+                // 1.5 GB for a single 14,260-scenario chunk). The HVDC freeze reads its warm start from the
+                // same seeds.
+                x0SeedIdx = new int[cl.frozenSeedSlot.size()];
+                x0SeedVal = new double[cl.frozenSeedSlot.size()];
+                for (int k = 0; k < cl.frozenSeedSlot.size(); k++) {
+                    x0SeedIdx[k] = cl.frozenSeedSlot.get(k) * n + cl.frozenSeedRow.get(k);
+                    x0SeedVal[k] = cl.frozenSeedValue.get(k);
+                }
             }
         }
-        // Strategy-leg DS re-anchoring: OLF's processContingency calls
-        // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
-        // leg distributes only the INCREMENT from the parent contingency's already-distributed
-        // targets. The device mirrors this with three coupled pieces (each alone is wrong —
-        // participant shifts without the slack shift leave the band check measured against the
-        // pre-distribution slack target, which kills the distribution):
-        //  - distributedSlackBusAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
-        //  - slackBusAnchorShift: the slack bus's own absorbed share of the parent's distribution
-        //    ((1-fs)/fs x the participants' absorbed sum), so the mismatch/band is measured against
-        //    the parent's slack target exactly as the CPU leg measures it;
-        //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
-        //    leg's starting operating point (losses are nonlinear along the path).
-        if (pairPhase) {
+
+        // The pair phase's per-slot arrays.
+        private void allocatePairSeeds() {
             x0Full = new double[chunkSize * n];
             reactiveLimitsSeedState = reactiveLimitsOuterLoop && nReactiveLimitEntries > 0 ? new int[chunkSize * nReactiveLimitEntries] : null;
             if (nDistributedSlackBuses > 0) {
@@ -1324,193 +1684,200 @@ final class GpuBatchChunkSolver {
                 slackBusAnchorShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
                 pairSlackAbsorbedSeed = new double[chunkSize];
             }
-            double distributedSlackFactorSum = 0;
+            distributedSlackFactorSum = 0;
             for (double fv : gpuData.distributedSlack().busFactor()) {
                 distributedSlackFactorSum += fv;
             }
-            for (int s = 0; s < chunkSize; s++) {
-                double[] parent = null;
-                int[] parentReactiveLimitsState = null;
-                double[] parentDistributedSlackTargets = null;
-                Double parentSlackAbs = null;
-                if (s < realCount) {
-                    String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                    Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
-                    int parentStatus = pIdx != null && resultsByIndex[pIdx] != null
-                            ? ChunkArrays.rowStatus(resultsByIndex[pIdx], n) : GpuAcSolverStatus.REJECTED;
-                    if (parentStatus == GpuAcSolverStatus.CONVERGED) {
-                        parent = ChunkArrays.fullRow(resultsByIndex[pIdx], n, config.stateSink(),
-                                contingencies.get(pIdx).contingencyId());
-                        pairParentConverged[s] = true;
-                    } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
-                        parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
-                    }
-                    if (parent != null) {
-                        parentReactiveLimitsState = reactiveLimitsStateByIndex.get(pIdx);
-                        parentDistributedSlackTargets = distributedSlackTargetsByIndex.get(pIdx);
-                        parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
-                    } else {
-                        // The device has no answer for the parent (the CPU replays it): OLF starts the strategy
-                        // from the state that replay leaves, which only the CPU has. CPU.
-                        if (rejectAfterSolve == null) {
-                            rejectAfterSolve = new boolean[chunkSize];
-                        }
-                        rejectAfterSolve[s] = true;
-                        if (s < realCount) {
-                            GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
-                        }
-                    }
+        }
+
+        // The pair's parent contingency and what its solve left: its state, PV/PQ states, distributed-slack targets.
+        private void findParent(int s) {
+            parent = null;
+            parentReactiveLimitsState = null;
+            parentDistributedSlackTargets = null;
+            parentSlackAbs = null;
+            if (s < realCount) {
+                String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
+                int parentStatus = pIdx != null && resultsByIndex[pIdx] != null
+                        ? ChunkArrays.rowStatus(resultsByIndex[pIdx], n) : GpuAcSolverStatus.REJECTED;
+                if (parentStatus == GpuAcSolverStatus.CONVERGED) {
+                    parent = ChunkArrays.fullRow(resultsByIndex[pIdx], n, config.stateSink(),
+                            contingencies.get(pIdx).contingencyId());
+                    pairParentConverged[s] = true;
+                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                    parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                 }
-                System.arraycopy(parent != null ? parent : baseState, 0, x0Full, s * n, n);
-                int parentIdx = ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount);
-                if (parent != null && parentIdx >= 0 && frozenRowsByIndex[parentIdx] != null) {
-                    // A bus the parent islanded and this pair re-energizes (a reclose) starts where OLF starts it:
-                    // its stored voltage, which a disabled bus keeps at the base solution - not the parent's frozen
-                    // identity (1 pu at angle 0), from which Newton found the collapsed root (rte6515 LINE-1404-389
-                    // reclosed: VL-1404 at 0.02 kV where OLF has 65.26 kV)
-                    java.util.Set<Integer> stillFrozen = new java.util.HashSet<>();
-                    int[] pf = s < realCount ? frozenRowsByIndex[group.get(chunkStart + s)] : null;
-                    for (int r : pf == null ? new int[0] : pf) {
-                        stillFrozen.add(r);
+                if (parent != null) {
+                    parentReactiveLimitsState = reactiveLimitsStateByIndex.get(pIdx);
+                    parentDistributedSlackTargets = distributedSlackTargetsByIndex.get(pIdx);
+                    parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
+                } else {
+                    // The device has no answer for the parent (the CPU replays it): OLF starts the strategy
+                    // from the state that replay leaves, which only the CPU has. CPU.
+                    if (rejectAfterSolve == null) {
+                        rejectAfterSolve = new boolean[chunkSize];
                     }
-                    for (int r : frozenRowsByIndex[parentIdx]) {
-                        if (!stillFrozen.contains(r)) {
-                            x0Full[s * n + r] = baseState[r];
-                        }
-                    }
-                }
-                for (int k = 0; k < cl.frozenSeedSlot.size(); k++) {
-                    if (cl.frozenSeedSlot.get(k) == s) {   // a frozen row stays AT its frozen state
-                        x0Full[s * n + cl.frozenSeedRow.get(k)] = cl.frozenSeedValue.get(k);
-                    }
-                }
-                if (reactiveLimitsSeedState != null) {
-                    // the parent's PV/PQ states, not its switch counts: OLF runs the strategy as a new load flow,
-                    // whose reactive-limit loop counts PV -> PQ switches afresh
-                    int[] seedFrom = parentReactiveLimitsState != null ? parentReactiveLimitsState : baseReactiveLimitsState;
-                    for (int i = 0; i < nReactiveLimitEntries; i++) {
-                        reactiveLimitsSeedState[s * nReactiveLimitEntries + i] = GpuReactiveLimitsState.limitType(seedFrom[i]);
-                    }
-                    double[] parentTargetQ = parentReactiveLimitsState != null
-                            ? reactiveLimitTargetQByIndex.get(ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
-                    if (parentTargetQ != null) {
-                        if (reactiveLimitSeedTargetQ == null) {
-                            reactiveLimitSeedTargetQ = new double[chunkSize * nReactiveLimitEntries];
-                            java.util.Arrays.fill(reactiveLimitSeedTargetQ, Double.NaN);
-                        }
-                        System.arraycopy(parentTargetQ, 0, reactiveLimitSeedTargetQ, s * nReactiveLimitEntries, nReactiveLimitEntries);
-                    }
-                }
-                if (slackOnlyDistribution && slackBusAnchorShift != null && parentSlackAbs != null) {
-                    slackBusAnchorShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
-                    pairSlackAbsorbedSeed[s] = parentSlackAbs;
-                }
-                if (parentDistributedSlackTargets != null && distributedSlackBusAnchorShift != null && distributedSlackFactorSum > 0) {
-                    // parentDistributedSlackTargets = [absorption per DS row..., parent factor sum] (captured after the
-                    // parent's solve). The anchor shift is the parent's PURE ABSORPTION — the part
-                    // of the parent's final DS target that its distribution added on top of the
-                    // parent's own effective base — which composes with the pair's own distributedSlackOverrideBaseTargetPDelta
-                    // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
-                    // action deltas are both handled without double counting.
-                    double absorbedSum = 0;
-                    // An absolute GeneratorAction on a participant sets its target (and OLF's initial
-                    // target) to the value: its bus is not re-anchored on the parent's share, the
-                    // action's own delta (base-referenced, on the override bus) is the whole move.
-                    // The precomputer only batches it when that generator is its bus's only participant.
-                    int absoluteBus = -1;
-                    if (rs.distributedSlackOverrideBus.length > 0 && rs.distributedSlackOverrideBus[s] >= 0) {
-                        for (com.powsybl.openloadflow.network.LfGenerator g : contingencies.get(group.get(chunkStart + s)).absoluteTargetGenerators()) {
-                            if (config.distributedSlackParameters().factor(g) != 0) {
-                                absoluteBus = rs.distributedSlackOverrideBus[s];
-                            }
-                        }
-                    }
-                    for (int i = 0; i < nDistributedSlackBuses; i++) {
-                        int row = gpuData.distributedSlack().busPhiRow()[i];
-                        double shift = i == absoluteBus ? 0.0 : parentDistributedSlackTargets[i];
-                        distributedSlackBusAnchorShift[s * nDistributedSlackBuses + i] = shift;
-                        absorbedSum += parentDistributedSlackTargets[i];      // the slack's share of the parent counts it all
-                        // Seed the DS-row target at the CPU strategy leg's starting value — the
-                        // parent-absorbed target plus the pair's own composed delta — so the first
-                        // inner solve runs at the CPU leg's starting operating point (losses are
-                        // nonlinear along the path). A pair override on the row (gen action /
-                        // gen-outage pTarget) is base-referenced: add the parent absorption to it. On the row
-                        // this pair solves the balance on (its own coupler openings), from the participant's
-                        // own base target, as the loss pre-distribution composes its shares.
-                        int[] rowOverrides = cl.distributedSlackBusRowOverrideByScenario[s];
-                        int pairRow = rowOverrides != null && rowOverrides[i] >= 0 ? rowOverrides[i] : row;
-                        rs.overrides.compose(s * n + pairRow, baseTargets[row], shift);
-                    }
-                    // the slack's own absorption in the parent's distribution: its own factor's share
-                    // against the participants that distribution renormalized over (the kernel's retain),
-                    // not one minus their sum - a lost or islanded participant's factor is not the
-                    // slack's (pilotSelfCurveNetwork losing g3, the slack out of the distribution:
-                    // 0.2234 pu of slack target where OLF has none, 2.1 MW distributed against 20.2)
-                    double parentFs = parentDistributedSlackTargets[nDistributedSlackBuses];
-                    slackBusAnchorShift[s] = parentFs > 0 ? (1.0 - distributedSlackFactorSum) / parentFs * absorbedSum : 0.0;
-                }
-                if (distributedSlackGeneratorAnchor != null && s < realCount) {
-                    // Each generator's own anchor: where the parent's distribution left it, and for a
-                    // GeneratorAction the action's value (LfGeneratorAction sets the target AND the initial
-                    // target): the parent's target plus the change, or the value itself.
-                    String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                    Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
-                    double[] parentMoves = parentDistributedSlackTargets != null && pIdx != null ? genMovesByIndex.get(pIdx) : null;
-                    if (parentMoves != null) {
-                        System.arraycopy(parentMoves, 0, distributedSlackGeneratorAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
-                        System.arraycopy(parentMoves, 0, distributedSlackGeneratorSeedAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
-                        if (slackBusAnchorShift != null && GpuBatchLossPreDistribution.slackInPack(gpuData)) {
-                            // the slack's generators are listed: the parent left them at their own moves,
-                            // except one an absolute action restarts from its value (the action's own
-                            // move of the slack target carries that)
-                            java.util.Set<String> absolute = new java.util.HashSet<>();
-                            for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
-                                if (m.absolute()) {
-                                    absolute.add(m.generator().getId());
-                                }
-                            }
-                            double slackMoves = 0;
-                            for (int g = 0; g < nDistributedSlackGenerators; g++) {
-                                if (gpuData.distributedSlack().generatorBus()[g] < 0 && !absolute.contains(gpuData.distributedSlack().generatorId()[g])) {
-                                    slackMoves += parentMoves[g];
-                                }
-                            }
-                            slackBusAnchorShift[s] = slackMoves;
-                        }
-                    }
-                    // OLF re-checks each moved generator's participation at its new target
-                    // (reApplyActivePowerControlChecks); the last action on a generator decides
-                    java.util.Map<Integer, Boolean> staysBySlot = new java.util.TreeMap<>();
-                    for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
-                        int g = ChunkArrays.distributedSlackGeneratorIndexOf(gpuData, m.generator().getId());
-                        if (g >= 0) {
-                            // its target before the action: its anchor plus where the parent left it
-                            double before = config.distributedSlackParameters().anchorTargetP(m.generator()) + distributedSlackGeneratorAnchor[s * nDistributedSlackGenerators + g];
-                            staysBySlot.put(g, m.participatesAt() == null || m.participatesAt().test(m.newTargetP(before)));
-                            int k = s * nDistributedSlackGenerators + g;
-                            distributedSlackGeneratorAnchor[k] = m.absolute() ? m.deltaP() : distributedSlackGeneratorAnchor[k] + m.deltaP();
-                        }
-                    }
-                    for (var e : staysBySlot.entrySet()) {
-                        if (!e.getValue()) {             // out of the distribution: it keeps the action's target
-                            cl.distributedSlackRemovedGeneratorList.add(s);
-                            cl.distributedSlackRemovedGeneratorList.add(e.getKey());
-                        }
+                    rejectAfterSolve[s] = true;
+                    if (s < realCount) {
+                        GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
                     }
                 }
             }
         }
-        seeds.distributedSlackBusAnchorShift = distributedSlackBusAnchorShift;
-        seeds.distributedSlackGeneratorAnchor = distributedSlackGeneratorAnchor;
-        seeds.distributedSlackGeneratorSeedAnchor = distributedSlackGeneratorSeedAnchor;
-        seeds.slackBusAnchorShift = slackBusAnchorShift;
-        seeds.pairSlackAbsorbedSeed = pairSlackAbsorbedSeed;
-        seeds.rejectAfterSolve = rejectAfterSolve;
-        seeds.reactiveLimitSeedTargetQ = reactiveLimitSeedTargetQ;
-        seeds.x0Full = x0Full;
-        seeds.reactiveLimitsSeedState = reactiveLimitsSeedState;
-        seeds.x0SeedIdx = x0SeedIdx;
-        seeds.x0SeedVal = x0SeedVal;
+
+        // The pair's starting state: the parent's, with the buses it re-energizes at their stored voltage.
+        private void seedPairState(int s) {
+            System.arraycopy(parent != null ? parent : baseState, 0, x0Full, s * n, n);
+            parentIdx = ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount);
+            if (parent != null && parentIdx >= 0 && frozenRowsByIndex[parentIdx] != null) {
+                // A bus the parent islanded and this pair re-energizes (a reclose) starts where OLF starts it:
+                // its stored voltage, which a disabled bus keeps at the base solution - not the parent's frozen
+                // identity (1 pu at angle 0), from which Newton found the collapsed root (rte6515 LINE-1404-389
+                // reclosed: VL-1404 at 0.02 kV where OLF has 65.26 kV)
+                java.util.Set<Integer> stillFrozen = new java.util.HashSet<>();
+                int[] pf = s < realCount ? frozenRowsByIndex[group.get(chunkStart + s)] : null;
+                for (int r : pf == null ? new int[0] : pf) {
+                    stillFrozen.add(r);
+                }
+                for (int r : frozenRowsByIndex[parentIdx]) {
+                    if (!stillFrozen.contains(r)) {
+                        x0Full[s * n + r] = baseState[r];
+                    }
+                }
+            }
+            for (int k = 0; k < cl.frozenSeedSlot.size(); k++) {
+                if (cl.frozenSeedSlot.get(k) == s) {   // a frozen row stays AT its frozen state
+                    x0Full[s * n + cl.frozenSeedRow.get(k)] = cl.frozenSeedValue.get(k);
+                }
+            }
+        }
+
+        // The parent's PV/PQ states and frozen target Q.
+        private void seedPairReactiveLimits(int s) {
+            if (reactiveLimitsSeedState != null) {
+                // the parent's PV/PQ states, not its switch counts: OLF runs the strategy as a new load flow,
+                // whose reactive-limit loop counts PV -> PQ switches afresh
+                int[] seedFrom = parentReactiveLimitsState != null ? parentReactiveLimitsState : baseReactiveLimitsState;
+                for (int i = 0; i < nReactiveLimitEntries; i++) {
+                    reactiveLimitsSeedState[s * nReactiveLimitEntries + i] = GpuReactiveLimitsState.limitType(seedFrom[i]);
+                }
+                double[] parentTargetQ = parentReactiveLimitsState != null
+                        ? reactiveLimitTargetQByIndex.get(ChunkArrays.pIdxOf(contingencies, group, chunkStart, s, indexById, realCount)) : null;
+                if (parentTargetQ != null) {
+                    if (reactiveLimitSeedTargetQ == null) {
+                        reactiveLimitSeedTargetQ = new double[chunkSize * nReactiveLimitEntries];
+                        java.util.Arrays.fill(reactiveLimitSeedTargetQ, Double.NaN);
+                    }
+                    System.arraycopy(parentTargetQ, 0, reactiveLimitSeedTargetQ, s * nReactiveLimitEntries, nReactiveLimitEntries);
+                }
+            }
+        }
+
+        // The slack's and the participants' anchors at the parent's distribution.
+        private void seedPairSlackAnchors(int s) {
+            if (slackOnlyDistribution && slackBusAnchorShift != null && parentSlackAbs != null) {
+                slackBusAnchorShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
+                pairSlackAbsorbedSeed[s] = parentSlackAbs;
+            }
+            if (parentDistributedSlackTargets != null && distributedSlackBusAnchorShift != null && distributedSlackFactorSum > 0) {
+                // parentDistributedSlackTargets = [absorption per DS row..., parent factor sum] (captured after the
+                // parent's solve). The anchor shift is the parent's PURE ABSORPTION — the part
+                // of the parent's final DS target that its distribution added on top of the
+                // parent's own effective base — which composes with the pair's own distributedSlackOverrideBaseTargetPDelta
+                // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
+                // action deltas are both handled without double counting.
+                double absorbedSum = 0;
+                // An absolute GeneratorAction on a participant sets its target (and OLF's initial
+                // target) to the value: its bus is not re-anchored on the parent's share, the
+                // action's own delta (base-referenced, on the override bus) is the whole move.
+                // The precomputer only batches it when that generator is its bus's only participant.
+                int absoluteBus = -1;
+                if (rs.distributedSlackOverrideBus.length > 0 && rs.distributedSlackOverrideBus[s] >= 0) {
+                    for (com.powsybl.openloadflow.network.LfGenerator g : contingencies.get(group.get(chunkStart + s)).absoluteTargetGenerators()) {
+                        if (config.distributedSlackParameters().factor(g) != 0) {
+                            absoluteBus = rs.distributedSlackOverrideBus[s];
+                        }
+                    }
+                }
+                for (int i = 0; i < nDistributedSlackBuses; i++) {
+                    int row = gpuData.distributedSlack().busPhiRow()[i];
+                    double shift = i == absoluteBus ? 0.0 : parentDistributedSlackTargets[i];
+                    distributedSlackBusAnchorShift[s * nDistributedSlackBuses + i] = shift;
+                    absorbedSum += parentDistributedSlackTargets[i];      // the slack's share of the parent counts it all
+                    // Seed the DS-row target at the CPU strategy leg's starting value — the
+                    // parent-absorbed target plus the pair's own composed delta — so the first
+                    // inner solve runs at the CPU leg's starting operating point (losses are
+                    // nonlinear along the path). A pair override on the row (gen action /
+                    // gen-outage pTarget) is base-referenced: add the parent absorption to it. On the row
+                    // this pair solves the balance on (its own coupler openings), from the participant's
+                    // own base target, as the loss pre-distribution composes its shares.
+                    int[] rowOverrides = cl.distributedSlackBusRowOverrideByScenario[s];
+                    int pairRow = rowOverrides != null && rowOverrides[i] >= 0 ? rowOverrides[i] : row;
+                    rs.overrides.compose(s * n + pairRow, baseTargets[row], shift);
+                }
+                // the slack's own absorption in the parent's distribution: its own factor's share
+                // against the participants that distribution renormalized over (the kernel's retain),
+                // not one minus their sum - a lost or islanded participant's factor is not the
+                // slack's (pilotSelfCurveNetwork losing g3, the slack out of the distribution:
+                // 0.2234 pu of slack target where OLF has none, 2.1 MW distributed against 20.2)
+                double parentFs = parentDistributedSlackTargets[nDistributedSlackBuses];
+                slackBusAnchorShift[s] = parentFs > 0 ? (1.0 - distributedSlackFactorSum) / parentFs * absorbedSum : 0.0;
+            }
+        }
+
+        // Each generator's anchor where the parent left it, and the strategy's generator actions on it.
+        private void seedPairGeneratorAnchors(int s) {
+            if (distributedSlackGeneratorAnchor != null && s < realCount) {
+                // Each generator's own anchor: where the parent's distribution left it, and for a
+                // GeneratorAction the action's value (LfGeneratorAction sets the target AND the initial
+                // target): the parent's target plus the change, or the value itself.
+                String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP)));
+                double[] parentMoves = parentDistributedSlackTargets != null && pIdx != null ? genMovesByIndex.get(pIdx) : null;
+                if (parentMoves != null) {
+                    System.arraycopy(parentMoves, 0, distributedSlackGeneratorAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
+                    System.arraycopy(parentMoves, 0, distributedSlackGeneratorSeedAnchor, s * nDistributedSlackGenerators, nDistributedSlackGenerators);
+                    if (slackBusAnchorShift != null && GpuBatchLossPreDistribution.slackInPack(gpuData)) {
+                        // the slack's generators are listed: the parent left them at their own moves,
+                        // except one an absolute action restarts from its value (the action's own
+                        // move of the slack target carries that)
+                        java.util.Set<String> absolute = new java.util.HashSet<>();
+                        for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
+                            if (m.absolute()) {
+                                absolute.add(m.generator().getId());
+                            }
+                        }
+                        double slackMoves = 0;
+                        for (int g = 0; g < nDistributedSlackGenerators; g++) {
+                            if (gpuData.distributedSlack().generatorBus()[g] < 0 && !absolute.contains(gpuData.distributedSlack().generatorId()[g])) {
+                                slackMoves += parentMoves[g];
+                            }
+                        }
+                        slackBusAnchorShift[s] = slackMoves;
+                    }
+                }
+                // OLF re-checks each moved generator's participation at its new target
+                // (reApplyActivePowerControlChecks); the last action on a generator decides
+                java.util.Map<Integer, Boolean> staysBySlot = new java.util.TreeMap<>();
+                for (BatchContingency.GeneratorMove m : contingencies.get(group.get(chunkStart + s)).generatorActions()) {
+                    int g = ChunkArrays.distributedSlackGeneratorIndexOf(gpuData, m.generator().getId());
+                    if (g >= 0) {
+                        // its target before the action: its anchor plus where the parent left it
+                        double before = config.distributedSlackParameters().anchorTargetP(m.generator()) + distributedSlackGeneratorAnchor[s * nDistributedSlackGenerators + g];
+                        staysBySlot.put(g, m.participatesAt() == null || m.participatesAt().test(m.newTargetP(before)));
+                        int k = s * nDistributedSlackGenerators + g;
+                        distributedSlackGeneratorAnchor[k] = m.absolute() ? m.deltaP() : distributedSlackGeneratorAnchor[k] + m.deltaP();
+                    }
+                }
+                for (var e : staysBySlot.entrySet()) {
+                    if (!e.getValue()) {             // out of the distribution: it keeps the action's target
+                        cl.distributedSlackRemovedGeneratorList.add(s);
+                        cl.distributedSlackRemovedGeneratorList.add(e.getKey());
+                    }
+                }
+            }
+        }
     }
 
     /**

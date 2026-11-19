@@ -14,40 +14,43 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         jintArray jDistrRhoRow, jintArray jDistrRhoColumn, jdoubleArray jDistrRhoCoefficient,
         jintArray jDistrShuntBRow, jintArray jDistrShuntBColumn, jdoubleArray jDistrShuntBCoefficient, jintArray jClosedBranchPhaseControlSide,
         jdoubleArray jLoadModelParameters, jintArray jLoadModelIndices, jintArray jReactiveRelocationGroupStart, jintArray jReactiveRelocationCandidateRows,
-        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jReactiveRelocationDependentBaseGroup, jintArray jReactiveRelocationBaseTargetRow, jintArray jReactiveRelocationDependentGroupOfRow) {
-    jdouble* closedBranchParameters = env->GetDoubleArrayElements(jClosedBranchParameters, nullptr);
-    jint* closedBranchIndices = env->GetIntArrayElements(jClosedBranchIndices, nullptr);
-    jdouble* openBranchParameters = env->GetDoubleArrayElements(jOpenBranchParameters, nullptr);
-    jint* openBranchIndices = env->GetIntArrayElements(jOpenBranchIndices, nullptr);
-    jdouble* shuntParameters = env->GetDoubleArrayElements(jShuntParameters, nullptr);
-    jint* shuntIndices = env->GetIntArrayElements(jShuntIndices, nullptr);
-    jdouble* hvdcAcEmulationParameters = env->GetDoubleArrayElements(jHvdcAcEmulationParameters, nullptr);
-    jint* hvdcAcEmulationIndices = env->GetIntArrayElements(jHvdcAcEmulationIndices, nullptr);
-    jint* distrQElement = env->GetIntArrayElements(jDistrQElement, nullptr);
-    jint* distrQSide = env->GetIntArrayElements(jDistrQSide, nullptr);
-    jdouble* distrQWeight = env->GetDoubleArrayElements(jDistrQWeight, nullptr);
-    jint* distrQRow = env->GetIntArrayElements(jDistrQRow, nullptr);
-    jint* distrQKind = env->GetIntArrayElements(jDistrQKind, nullptr);
-    jdouble* zeroImpedanceBranchParameters = env->GetDoubleArrayElements(jZeroImpedanceBranchParameters, nullptr);
-    jint* zeroImpedanceBranchIndices = env->GetIntArrayElements(jZeroImpedanceBranchIndices, nullptr);
-    jint* distrRhoRow = env->GetIntArrayElements(jDistrRhoRow, nullptr);
-    jint* distrRhoColumn = env->GetIntArrayElements(jDistrRhoColumn, nullptr);
-    jdouble* distrRhoCoefficient = env->GetDoubleArrayElements(jDistrRhoCoefficient, nullptr);
-    jint* distrShuntBRow = env->GetIntArrayElements(jDistrShuntBRow, nullptr);
-    jint* distrShuntBColumn = env->GetIntArrayElements(jDistrShuntBColumn, nullptr);
-    jdouble* distrShuntBCoefficient = env->GetDoubleArrayElements(jDistrShuntBCoefficient, nullptr);
-    jint* closedBranchPhaseControlSide = env->GetIntArrayElements(jClosedBranchPhaseControlSide, nullptr);
-    jint* reactiveRelocationGroupStart = env->GetIntArrayElements(jReactiveRelocationGroupStart, nullptr);
-    jint* reactiveRelocationCandidateRows = env->GetIntArrayElements(jReactiveRelocationCandidateRows, nullptr);
+        jintArray jOpenBranchAlternateReactiveDestination, jintArray jZeroImpedanceBranchAlternateReactiveDestination, jintArray jReactiveRelocationDependentBaseGroup, jintArray jReactiveRelocationBaseTargetRow, jintArray jReactiveRelocationDependentGroupOfRow,
+        jintArray jIdentityRows) {
+    const JniDoubles closedBranchParameters(env, jClosedBranchParameters);
+    const JniInts closedBranchIndices(env, jClosedBranchIndices);
+    const JniDoubles openBranchParameters(env, jOpenBranchParameters);
+    const JniInts openBranchIndices(env, jOpenBranchIndices);
+    const JniDoubles shuntParameters(env, jShuntParameters);
+    const JniInts shuntIndices(env, jShuntIndices);
+    const JniDoubles hvdcAcEmulationParameters(env, jHvdcAcEmulationParameters);
+    const JniInts hvdcAcEmulationIndices(env, jHvdcAcEmulationIndices);
+    const JniInts distrQElement(env, jDistrQElement);
+    const JniInts distrQSide(env, jDistrQSide);
+    const JniDoubles distrQWeight(env, jDistrQWeight);
+    const JniInts distrQRow(env, jDistrQRow);
+    const JniInts distrQKind(env, jDistrQKind);
+    const JniDoubles zeroImpedanceBranchParameters(env, jZeroImpedanceBranchParameters);
+    const JniInts zeroImpedanceBranchIndices(env, jZeroImpedanceBranchIndices);
+    const JniInts distrRhoRow(env, jDistrRhoRow);
+    const JniInts distrRhoColumn(env, jDistrRhoColumn);
+    const JniDoubles distrRhoCoefficient(env, jDistrRhoCoefficient);
+    const JniInts distrShuntBRow(env, jDistrShuntBRow);
+    const JniInts distrShuntBColumn(env, jDistrShuntBColumn);
+    const JniDoubles distrShuntBCoefficient(env, jDistrShuntBCoefficient);
+    const JniInts closedBranchPhaseControlSide(env, jClosedBranchPhaseControlSide);
+    const JniInts reactiveRelocationGroupStart(env, jReactiveRelocationGroupStart);
+    const JniInts reactiveRelocationCandidateRows(env, jReactiveRelocationCandidateRows);
     int nReactiveRelocationGroups = env->GetArrayLength(jReactiveRelocationGroupStart) - 1;               // groups; reactiveRelocationGroupStart = [0] when none
     int nReactiveRelocationCandidateRows = env->GetArrayLength(jReactiveRelocationCandidateRows);
-    jdouble* loadModelParameters = env->GetDoubleArrayElements(jLoadModelParameters, nullptr);
-    jint* loadModelIndices = env->GetIntArrayElements(jLoadModelIndices, nullptr);
-    jint* openBranchAlternateReactiveDestination = env->GetIntArrayElements(jOpenBranchAlternateReactiveDestination, nullptr);
-    jint* zeroImpedanceBranchAlternateReactiveDestination = env->GetIntArrayElements(jZeroImpedanceBranchAlternateReactiveDestination, nullptr);
-    jint* reactiveRelocationDependentBaseGroup = env->GetIntArrayElements(jReactiveRelocationDependentBaseGroup, nullptr);
-    jint* reactiveRelocationBaseTargetRow = env->GetIntArrayElements(jReactiveRelocationBaseTargetRow, nullptr);
-    jint* reactiveRelocationDependentGroupOfRow = env->GetIntArrayElements(jReactiveRelocationDependentGroupOfRow, nullptr);
+    const JniDoubles loadModelParameters(env, jLoadModelParameters);
+    const JniInts loadModelIndices(env, jLoadModelIndices);
+    const JniInts openBranchAlternateReactiveDestination(env, jOpenBranchAlternateReactiveDestination);
+    const JniInts zeroImpedanceBranchAlternateReactiveDestination(env, jZeroImpedanceBranchAlternateReactiveDestination);
+    const JniInts reactiveRelocationDependentBaseGroup(env, jReactiveRelocationDependentBaseGroup);
+    const JniInts reactiveRelocationBaseTargetRow(env, jReactiveRelocationBaseTargetRow);
+    const JniInts reactiveRelocationDependentGroupOfRow(env, jReactiveRelocationDependentGroupOfRow);
+    const JniInts identityRows(env, jIdentityRows);
+    int nIdentityRows = env->GetArrayLength(jIdentityRows);
 
     int nClosedBranch = env->GetArrayLength(jClosedBranchIndices) / 12;             // closedBranchIndices stride 12 (…a1col r1col alternateQRow1 alternateQRow2)
     int nOpenBranch = env->GetArrayLength(jOpenBranchIndices) / 6;
@@ -106,6 +109,7 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
         checkRange("distrShuntBRow", distrShuntBRow, nDistrShuntB, 1, {0}, 0, n);
         checkRange("distrShuntBColumn", distrShuntBColumn, nDistrShuntB, 1, {0}, 0, n);
         checkRange("loadModelIndices", loadModelIndices, nLoadModelTerms, 2, {0, 1}, 0, n);
+        checkRange("identityRows", identityRows, nIdentityRows, 1, {0}, 0, n);
         for (int e = 0; e < nClosedBranch; e++) {                      // encoded (a1Col << 1) | side, or -1
             if (closedBranchPhaseControlSide[e] >= 0 && (closedBranchPhaseControlSide[e] >> 1) >= n) {
                 throw std::runtime_error("bad closedBranchPhaseControlSide at elem " + std::to_string(e)
@@ -119,44 +123,14 @@ OLF_JNI(ac_equations_vector_gpu, StructureNative, createStructure)(
                                                    nDistrRho, distrRhoRow, distrRhoColumn, distrRhoCoefficient,
                                                    nDistrShuntB, distrShuntBRow, distrShuntBColumn, distrShuntBCoefficient, closedBranchPhaseControlSide,
                                                    nLoadModelTerms, loadModelParameters, loadModelIndices, nReactiveRelocationGroups, reactiveRelocationGroupStart, reactiveRelocationCandidateRows,
-                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow));
+                                                   openBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, reactiveRelocationDependentBaseGroup, reactiveRelocationBaseTargetRow, reactiveRelocationDependentGroupOfRow,
+                                                   nIdentityRows, identityRows));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
         error = "unknown native error";
     }
 
-    env->ReleaseDoubleArrayElements(jClosedBranchParameters, closedBranchParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jClosedBranchIndices, closedBranchIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jClosedBranchPhaseControlSide, closedBranchPhaseControlSide, JNI_ABORT);
-    env->ReleaseIntArrayElements(jReactiveRelocationGroupStart, reactiveRelocationGroupStart, JNI_ABORT);
-    env->ReleaseIntArrayElements(jReactiveRelocationCandidateRows, reactiveRelocationCandidateRows, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jOpenBranchParameters, openBranchParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jOpenBranchIndices, openBranchIndices, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jShuntParameters, shuntParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jShuntIndices, shuntIndices, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jHvdcAcEmulationParameters, hvdcAcEmulationParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jHvdcAcEmulationIndices, hvdcAcEmulationIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrQElement, distrQElement, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrQSide, distrQSide, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistrQWeight, distrQWeight, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrQRow, distrQRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrQKind, distrQKind, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jZeroImpedanceBranchParameters, zeroImpedanceBranchParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jZeroImpedanceBranchIndices, zeroImpedanceBranchIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrRhoRow, distrRhoRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrRhoColumn, distrRhoColumn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistrRhoCoefficient, distrRhoCoefficient, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrShuntBRow, distrShuntBRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jDistrShuntBColumn, distrShuntBColumn, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jDistrShuntBCoefficient, distrShuntBCoefficient, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jLoadModelParameters, loadModelParameters, JNI_ABORT);
-    env->ReleaseIntArrayElements(jLoadModelIndices, loadModelIndices, JNI_ABORT);
-    env->ReleaseIntArrayElements(jOpenBranchAlternateReactiveDestination, openBranchAlternateReactiveDestination, JNI_ABORT);
-    env->ReleaseIntArrayElements(jZeroImpedanceBranchAlternateReactiveDestination, zeroImpedanceBranchAlternateReactiveDestination, JNI_ABORT);
-    env->ReleaseIntArrayElements(jReactiveRelocationDependentBaseGroup, reactiveRelocationDependentBaseGroup, JNI_ABORT);
-    env->ReleaseIntArrayElements(jReactiveRelocationBaseTargetRow, reactiveRelocationBaseTargetRow, JNI_ABORT);
-    env->ReleaseIntArrayElements(jReactiveRelocationDependentGroupOfRow, reactiveRelocationDependentGroupOfRow, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),

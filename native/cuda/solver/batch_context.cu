@@ -36,53 +36,53 @@ void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
     //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE. ----
     {
         int ub = nScenarios;
-        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->uniformBatchSystemMatrix, n, n, ctx->nnz,
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.solver.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.uniformBatchSystemMatrix, n, n, ctx->nnz,
                 ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                 OLF_CUDSS_CSR_TYPES,
                 CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchSolutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchRightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchSolutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         // adaptive refinement: the residual and the correction, the same single-block dense shape as B and X
-        if (!ctx->dR.p) {
-            ctx->dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
-            ctx->dDelta.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+        if (!ctx->linearSolver.dR.p) {
+            ctx->linearSolver.dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+            ctx->linearSolver.dDelta.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
             // zeroed: a solve covers UBATCH_SIZE = nScenarios lanes while a short last chunk fills nS < nScenarios
             // of them - the padding lanes' residual must be a clean 0, not whatever the allocation held
-            CUDA_CHECK(cudaMemset(ctx->dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
-            CUDA_CHECK(cudaMemset(ctx->dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->linearSolver.dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->linearSolver.dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
         }
-        if (!ctx->dIterativeRefinementScore.p) {
-            ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+        if (!ctx->linearSolver.dIterativeRefinementScore.p) {
+            ctx->linearSolver.dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
         }
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchResidualMatrix, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->uniformBatchDeltaMatrix, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchResidualMatrix, n, 1, n, ctx->linearSolver.dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.uniformBatchDeltaMatrix, n, 1, n, ctx->linearSolver.dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
     }
 }
 
 // BATCHED_LU: our batched LU's factors for every slot, and the refinement buffers the cuDSS batch has.
 void setupBatchedLu(BatchSolverContext* ctx) {
-    ctx->batchedLu = std::make_unique<BatchedLu>();
-    createBatchedLu(*ctx->batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
+    ctx->linearSolver.batchedLu = std::make_unique<BatchedLu>();
+    createBatchedLu(*ctx->linearSolver.batchedLu, luPlanOf(*ctx->structure), ctx->nScenarios);
     const size_t vectorBytes = static_cast<size_t>(ctx->n) * ctx->nScenarios * sizeof(double);
-    ctx->dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
-    ctx->dDelta.alloc(vectorBytes);
-    ctx->dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+    ctx->linearSolver.dR.alloc(vectorBytes);                              // zeroed: a lane that never solves keeps a clean 0
+    ctx->linearSolver.dDelta.alloc(vectorBytes);
+    ctx->linearSolver.dIterativeRefinementScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
     if (ctx->structure->nZeroImpedanceBranch > 0) {
-        ctx->dInternalRefinementResidual.alloc(vectorBytes);
-        ctx->dInternalRefinementCorrection.alloc(vectorBytes);
+        ctx->linearSolver.dInternalRefinementResidual.alloc(vectorBytes);
+        ctx->linearSolver.dInternalRefinementCorrection.alloc(vectorBytes);
     }
 }
 
 void setupBatchMatricesFallback(BatchSolverContext* ctx) {
     int n = ctx->n;
     // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->solver.systemMatrix, n, n, ctx->nnz,
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.solver.systemMatrix, n, n, ctx->nnz,
                                      ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(),
                                      OLF_CUDSS_CSR_TYPES,
                                      CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.solver.rightHandSideMatrix, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.solver.solutionMatrix, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int nScenarios, int mode,
@@ -100,7 +100,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     ctx->n = n;
     ctx->nnz = structure->nnz;
     ctx->nScenarios = nScenarios;
-    ctx->mode = mode;
+    ctx->linearSolver.mode = mode;
     ctx->nElements = structure->nElements;
     ctx->closedBranchOffset = structure->closedBranchOffset;
     ctx->openBranchOffset = structure->openBranchOffset;
@@ -128,7 +128,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
     if (ctx->layout.interleaved) {
         ctx->dFillMismatch.alloc(static_cast<size_t>(n) * ctx->layout.stride * sizeof(double));
     }
-    ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
+    ctx->newtonRaphson.dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
     ctx->dActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
@@ -137,7 +137,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
 
     // ---- reactive-limits pack: the controller BUS_V rows mapped through the diagonal-pairing
     //      permutation (= identity in the batch path, no families, but mapped for correctness) ----
-    ctx->nReactiveLimitEntries = nReactiveLimitEntries;
+    ctx->reactiveLimits.nReactiveLimitEntries = nReactiveLimitEntries;
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
     ctx->dQbufClosed.alloc(static_cast<size_t>(n) * ctx->layout.stride * sizeof(double));
     ctx->dOuterLoopCheckActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
@@ -180,7 +180,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
             // DISTR_Q terms it feeds: with reactive limits disabled on rte6515 the base started at
             // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
             pilotSelfReactiveLimitEntry[g] = PILOT_SELF_NO_REACTIVE_LIMIT_ENTRY;
-            ctx->hasPilotSelf = true;
+            ctx->remoteVoltageControl.hasPilotSelf = true;
             for (int i = 0; i < nReactiveLimitEntries; i++) {
                 if (rowMap[reactiveLimitVoltageRow[i]] == fallbackRow) {
                     pilotSelfReactiveLimitEntry[g] = i;
@@ -188,9 +188,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                 }
             }
         }
-        if (ctx->hasPilotSelf) {
-            ctx->dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
-            ctx->dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
+        if (ctx->remoteVoltageControl.hasPilotSelf) {
+            ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.upload(pilotSelfReactiveLimitEntry.data(), pilotSelfReactiveLimitEntry.size() * sizeof(int));
+            ctx->remoteVoltageControl.dPilotSelfCarrierSkip.alloc(static_cast<size_t>(nRelocationGroups) * ctx->nScenarios * sizeof(char));
             if (traceOn(Trace::RL_TRACE)) {
                 int count = 0, noEntry = 0;
                 for (int g = 0; g < nRelocationGroups; g++) {
@@ -207,7 +207,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
         for (int i = 0; i < nReactiveLimitEntries; i++) {
             reactiveLimitVoltageRowMapped[i] = rowMap[reactiveLimitVoltageRow[i]];
         }
-        ctx->dReactiveLimitVoltageRow.upload(reactiveLimitVoltageRowMapped.data(), nReactiveLimitEntries * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitVoltageRow.upload(reactiveLimitVoltageRowMapped.data(), nReactiveLimitEntries * sizeof(int));
         // A bus whose power equations the COUPLER-TREE relocation moved onto its parent coupler's dummy columns has
         // its reactive balance — and its BUS_TARGET_Q, which GpuAcActivationExtractor already puts there — at that
         // coupler's DUMMY_Q row, while its OWN V row carries the coupler's ZERO_V. The reactive-limit pass must read
@@ -241,83 +241,83 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& structure, int 
                 std::fprintf(stderr, "RL_QROW %d of %d entries follow the coupler relocation\n", moved, nReactiveLimitEntries);
             }
         }
-        ctx->dReactiveLimitReactivePowerRow.upload(reactiveLimitReactivePowerRowMapped.data(), nReactiveLimitEntries * sizeof(int));
-        ctx->dReactiveLimitMinQ.upload(reactiveLimitMinQ, nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitMaxQ.upload(reactiveLimitMaxQ, nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitLoadQ.upload(reactiveLimitLoadQ, nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitTargetV.upload(reactiveLimitTargetV, nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitFlags.upload(reactiveLimitFlags, nReactiveLimitEntries * sizeof(char));
-        ctx->dReactiveLimitSavedTarget.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(double));
-        ctx->dReactiveLimitCheckDecision.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->reactiveLimits.dReactiveLimitReactivePowerRow.upload(reactiveLimitReactivePowerRowMapped.data(), nReactiveLimitEntries * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitMinQ.upload(reactiveLimitMinQ, nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitMaxQ.upload(reactiveLimitMaxQ, nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitLoadQ.upload(reactiveLimitLoadQ, nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitTargetV.upload(reactiveLimitTargetV, nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitFlags.upload(reactiveLimitFlags, nReactiveLimitEntries * sizeof(char));
+        ctx->reactiveLimits.dReactiveLimitSavedTarget.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitCheckDecision.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         // OLF_GPU_SW_LOG=<slot>: record one scenario's reactive-limit decisions ON THE DEVICE (one
         // atomicAdd per decision, copied out once at the end) instead of reading the whole batch's
         // buffers over PCIe every pass. The host-side traces cost hundreds of MB per pass, which
         // serializes the stream and changes the very kernel scheduling whose effect is being traced:
         // a run-to-run flip disappears while you watch it.
         if (traceOn(Trace::SW_LOG)) {
-            ctx->dReactiveLimitsDecisionLog.alloc(REACTIVE_LIMITS_DECISION_LOG_CAPACITY * REACTIVE_LIMITS_DECISION_LOG_WIDTH * sizeof(double));
-            ctx->dReactiveLimitsDecisionLogCount.alloc(sizeof(int));
-            CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
+            ctx->reactiveLimits.dReactiveLimitsDecisionLog.alloc(REACTIVE_LIMITS_DECISION_LOG_CAPACITY * REACTIVE_LIMITS_DECISION_LOG_WIDTH * sizeof(double));
+            ctx->reactiveLimits.dReactiveLimitsDecisionLogCount.alloc(sizeof(int));
+            CUDA_CHECK(cudaMemset(ctx->reactiveLimits.dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
         }
-        ctx->dReactiveLimitSavedRowMode.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
-        ctx->dReactiveLimitSwitchedRow.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(int));
-        ctx->dReactiveLimitRemainingPvBusCount.alloc(static_cast<size_t>(nScenarios) * sizeof(int));
-        ctx->dReactiveLimitQLimitType.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
-        ctx->dReactiveLimitPvPqSwitchCount.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->reactiveLimits.dReactiveLimitSavedRowMode.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->reactiveLimits.dReactiveLimitSwitchedRow.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitRemainingPvBusCount.alloc(static_cast<size_t>(nScenarios) * sizeof(int));
+        ctx->reactiveLimits.dReactiveLimitQLimitType.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
+        ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.alloc(static_cast<size_t>(nReactiveLimitEntries) * nScenarios * sizeof(char));
         std::vector<double> svcZero(nReactiveLimitEntries, 0.0);              // neutral until setBatchReactiveLimitSvcSusceptanceLimits installs
-        ctx->dReactiveLimitSvcMinB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitSvcMaxB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
-        ctx->dReactiveLimitBaseVSquared.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitSvcMinB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitSvcMaxB.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
+        ctx->reactiveLimits.dReactiveLimitBaseVSquared.upload(svcZero.data(), nReactiveLimitEntries * sizeof(double));
     }
     ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
-    ctx->nDistributedSlackBuses = nDistributedSlackBuses;
-    ctx->slackBusTargetP = slackBusTargetP;
-    ctx->distributedSlackFactorMode = distributedSlackFactorMode;
-    ctx->slackBusMarginUp = slackBusMarginUp;
-    ctx->slackBusMarginDown = slackBusMarginDown;
+    ctx->distributedSlack.nDistributedSlackBuses = nDistributedSlackBuses;
+    ctx->distributedSlack.slackBusTargetP = slackBusTargetP;
+    ctx->distributedSlack.distributedSlackFactorMode = distributedSlackFactorMode;
+    ctx->distributedSlack.slackBusMarginUp = slackBusMarginUp;
+    ctx->distributedSlack.slackBusMarginDown = slackBusMarginDown;
     if (distributedSlackFactorMode == GpuDistributedSlackFactorMode::REMAINING_MARGIN && nDistributedSlackBuses > 0) {
-        ctx->dDistributedSlackBusMarginUp.upload(distributedSlackBusMarginUp, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMarginDown.upload(distributedSlackBusMarginDown, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMarginUp.upload(distributedSlackBusMarginUp, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMarginDown.upload(distributedSlackBusMarginDown, nDistributedSlackBuses * sizeof(double));
     }
-    ctx->slackBusPhiRow = slackBusPhiRow >= 0 ? rowMap[slackBusPhiRow] : -1;
-    ctx->slackOnlyDistribution = (nDistributedSlackBuses == 0 && ctx->slackBusPhiRow >= 0);
-    if (ctx->slackOnlyDistribution) {
-        ctx->dSlackOnlyAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+    ctx->distributedSlack.slackBusPhiRow = slackBusPhiRow >= 0 ? rowMap[slackBusPhiRow] : -1;
+    ctx->distributedSlack.slackOnlyDistribution = (nDistributedSlackBuses == 0 && ctx->distributedSlack.slackBusPhiRow >= 0);
+    if (ctx->distributedSlack.slackOnlyDistribution) {
+        ctx->distributedSlack.dSlackOnlyAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
     if (nDistributedSlackBuses > 0) {
         std::vector<int> distributedSlackBusPhiRowMapped(nDistributedSlackBuses);
         for (int i = 0; i < nDistributedSlackBuses; i++) {
             distributedSlackBusPhiRowMapped[i] = rowMap[distributedSlackBusPhiRow[i]];
         }
-        ctx->dDistributedSlackBusPhiRow.upload(distributedSlackBusPhiRowMapped.data(), nDistributedSlackBuses * sizeof(int));
-        ctx->dDistributedSlackBusFactor.upload(distributedSlackBusFactor, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusBaseTargetP.upload(distributedSlackBusBaseTargetP, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMaxDelta.upload(distributedSlackBusMaxDelta, nDistributedSlackBuses * sizeof(double));
-        ctx->dDistributedSlackBusMinDelta.upload(distributedSlackBusMinDelta, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusPhiRow.upload(distributedSlackBusPhiRowMapped.data(), nDistributedSlackBuses * sizeof(int));
+        ctx->distributedSlack.dDistributedSlackBusFactor.upload(distributedSlackBusFactor, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusBaseTargetP.upload(distributedSlackBusBaseTargetP, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMaxDelta.upload(distributedSlackBusMaxDelta, nDistributedSlackBuses * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackBusMinDelta.upload(distributedSlackBusMinDelta, nDistributedSlackBuses * sizeof(double));
         double factorSum = 0.0;
         for (int i = 0; i < nDistributedSlackBuses; i++) {
             factorSum += distributedSlackBusFactor[i];
         }
-        ctx->distributedSlackFactorSum = factorSum > 0 ? factorSum : 1.0;
-        ctx->dSlackRetainedShare.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDistributedSlackLastPassAccounting.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
-        ctx->dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->distributedSlack.distributedSlackFactorSum = factorSum > 0 ? factorSum : 1.0;
+        ctx->distributedSlack.dSlackRetainedShare.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->distributedSlack.dDistributedSlackLastPassAccounting.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
+        ctx->distributedSlack.dSlackRetainedShareApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
     CUDA_CHECK(cudaStreamCreate(&ctx->stream));
     if (mode != GpuLinearSolveMode::BATCHED_LU) {            // our batched LU solves without cuDSS
         gCudssContexts++;
-        CUDSS_CHECK(cudssCreate(&ctx->solver.handle));
-        CUDSS_CHECK(cudssSetStream(ctx->solver.handle, ctx->stream));
-        CUDSS_CHECK(cudssConfigCreate(&ctx->solver.config));
+        CUDSS_CHECK(cudssCreate(&ctx->linearSolver.solver.handle));
+        CUDSS_CHECK(cudssSetStream(ctx->linearSolver.solver.handle, ctx->stream));
+        CUDSS_CHECK(cudssConfigCreate(&ctx->linearSolver.solver.config));
         int ir = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-        CUDSS_CHECK(cudssConfigSet(ctx->solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.solver.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
         if (mode == GpuLinearSolveMode::ROBUST) {
-            applyRobustSingleMatrixConfig(ctx->solver.config);       // its own ordering: never set the ordering twice
+            applyRobustSingleMatrixConfig(ctx->linearSolver.solver.config);       // its own ordering: never set the ordering twice
         } else {
-            applyReorderAlg(ctx->solver.config, ctx->structure->nZeroImpedanceBranch > 0);
+            applyReorderAlg(ctx->linearSolver.solver.config, ctx->structure->nZeroImpedanceBranch > 0);
         }
-        CUDSS_CHECK(cudssDataCreate(ctx->solver.handle, &ctx->solver.data));
+        CUDSS_CHECK(cudssDataCreate(ctx->linearSolver.solver.handle, &ctx->linearSolver.solver.data));
     }
 
     if (mode == GpuLinearSolveMode::UBATCH) {
@@ -338,29 +338,29 @@ void uploadBatchOverrides(BatchSolverContext* ctx, int stateVectorScalingMode, d
     int n = ctx->n;
     int nS = ctx->nScenarios;
     bool clampStep = stateVectorScalingMode == GpuStateVectorScalingMode::MAX_VOLTAGE_CHANGE && varType != nullptr;
-    if (clampStep && !ctx->dVarType.p) {
-        ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
-        ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+    if (clampStep && !ctx->newtonRaphson.dVarType.p) {
+        ctx->newtonRaphson.dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
+        ctx->newtonRaphson.dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
     if (stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH) {                                       // LINE_SEARCH backtracking buffers
-        if (!ctx->dLineSearchPreviousX.p) ctx->dLineSearchPreviousX.alloc(static_cast<size_t>(n) * nS * sizeof(double));
-        if (!ctx->dStepFactor.p) ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+        if (!ctx->newtonRaphson.dLineSearchPreviousX.p) ctx->newtonRaphson.dLineSearchPreviousX.alloc(static_cast<size_t>(n) * nS * sizeof(double));
+        if (!ctx->newtonRaphson.dStepFactor.p) ctx->newtonRaphson.dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
-    ctx->clampStep = clampStep;
-    ctx->maxDv = maxDv;
-    ctx->maxDphi = maxDphi;
+    ctx->newtonRaphson.clampStep = clampStep;
+    ctx->newtonRaphson.maxDv = maxDv;
+    ctx->newtonRaphson.maxDphi = maxDphi;
     // Per-scenario shunt admittance overrides (section shifts / reconnection), PACK-indexed elements (shunt family
     // index, not the global element index).
     installShuntAdmittanceOverrides(ctx, nShuntAdmittanceOverrides, shuntAdmittanceOverrideScenarioElement, shuntAdmittanceOverrideDelta);
-    ctx->nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
+    ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches = nBaseClosedZeroImpedanceBranches > 0 ? nBaseClosedZeroImpedanceBranches : ctx->nZeroImpedanceBranch;         // default: every zero-impedance element always enabled
     if (ctx->nZeroImpedanceBranch > 0) {                                      // the dense (slot, element) forms (see zeroImpedanceBranchOpenMask)
         const size_t width = static_cast<size_t>(ctx->nZeroImpedanceBranch);
-        ctx->zeroImpedanceBranchOpenMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchOpenOverrides,
+        ctx->scenarioOverrides.zeroImpedanceBranchOpenMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchOpenOverrides,
                                                         zeroImpedanceBranchOpenScenarioElement, nullptr, 1);
-        ctx->zeroImpedanceBranchCloseMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchCloseOverrides,
+        ctx->scenarioOverrides.zeroImpedanceBranchCloseMask.installEntries(nS, ctx->installSlots, width, nZeroImpedanceBranchCloseOverrides,
                                                          zeroImpedanceBranchCloseScenarioElement, nullptr, 1);
-        if (ctx->spanningTreeOverrideMask.width() != width) {   // no tree override installed yet: the extraction's tree
-            ctx->spanningTreeOverrideMask.installEntries(nS, {}, width, 0, nullptr, nullptr);
+        if (ctx->scenarioOverrides.spanningTreeOverrideMask.width() != width) {   // no tree override installed yet: the extraction's tree
+            ctx->scenarioOverrides.spanningTreeOverrideMask.installEntries(nS, {}, width, 0, nullptr, nullptr);
         }
         if (traceOn(Trace::PHASE_TIME)) {
             std::fprintf(stderr, "ZI_LISTS nZeroImpedanceBranch=%d nScenarios=%d nZeroImpedanceBranchOpenOverrides=%d nZeroImpedanceBranchCloseOverrides=%d\n", ctx->nZeroImpedanceBranch, ctx->nScenarios, nZeroImpedanceBranchOpenOverrides, nZeroImpedanceBranchCloseOverrides);

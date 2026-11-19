@@ -39,8 +39,11 @@ namespace {
 // directly). Every closed-branch fill - the static and the relocated ones, the F-only fill and the bus-balance fill -
 // goes through the same generated assembler, so their residuals agree bit for bit. The F-only fill used to derive the
 // angles by angle addition from per-branch statics: faster, but another rounding than OLF's.
-__device__ __forceinline__ void closedBranchOutputs(int e, int s, int n, const double* in, const int* ix, const double* x,
-                                                    ClosedBranchParameterOverrides closedBranchParameterOverrides, double* o) {
+// One closed branch's inputs in one scenario, handed to update: its parameters (the scenario's tap override when there
+// is one), the voltages and angles of its sides, and its ratio and phase shift (from the state when they are variables).
+template <typename Update>
+__device__ __forceinline__ void withClosedBranchInputs(int e, int s, int n, const double* in, const int* ix, const double* x,
+                                                       ClosedBranchParameterOverrides closedBranchParameterOverrides, Update update) {
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
@@ -51,10 +54,31 @@ __device__ __forceinline__ void closedBranchOutputs(int e, int s, int n, const d
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
-    updateClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
-                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
-                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
-                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
+    update(p, v1, r1, v2, a1, ph1, ph2);
+}
+
+__device__ __forceinline__ void closedBranchOutputs(int e, int s, int n, const double* in, const int* ix, const double* x,
+                                                    ClosedBranchParameterOverrides closedBranchParameterOverrides, double* o) {
+    withClosedBranchInputs(e, s, n, in, ix, x, closedBranchParameterOverrides,
+                           [&](const double* p, double v1, double r1, double v2, double a1, double ph1, double ph2) {
+        updateClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
+                         o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
+                         o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
+                         o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
+    });
+}
+
+// An open branch's inputs in one scenario, handed to update: its parameters and the voltages of its two ends (1 pu at
+// the open end, which has none).
+template <typename Update>
+__device__ __forceinline__ void withOpenBranchInputs(int e, int s, int n, const double* in, const int* ix, const double* x,
+                                                     Update update) {
+    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
+    const int* q = ix + e * 6;
+    const double* xs = x + s * n;
+    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
+    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
+    update(p, v1, v2);
 }
 
 // What every closed-branch fill adds besides its Jacobian and mismatch outputs.
@@ -66,8 +90,9 @@ __device__ __forceinline__ void scatterClosedBranchChecksAndPhaseControl(int e, 
         // The bus balances the outer-loop checks read (reactive limits, slack distribution, voltage controls): p1 q1 p2 q2
         // on their FROZEN rows, raw (no target, no row mode), the same outputs as F - the fill that a scenario's
         // convergence test passes on is the state its checks read, so no pass of its own recomputes them.
-        const double residuals[4] = {o[0], o[7], o[14], o[21]};
-        const int pos[4] = {0, 7, 14, 21};
+        constexpr ResidualPositions<4> RESIDUALS = residualPositions<4>(CLOSED_BRANCH_SCATTER);
+        const double residuals[4] = {o[RESIDUALS.at[0]], o[RESIDUALS.at[1]], o[RESIDUALS.at[2]], o[RESIDUALS.at[3]]};
+        const int pos[4] = {RESIDUALS.at[0], RESIDUALS.at[1], RESIDUALS.at[2], RESIDUALS.at[3]};
         scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, residuals, scenarioEntries(qbuf, s, n, layout));
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: emit the controlled
@@ -148,19 +173,13 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
                                     const char* disabled, const char* active,
                                     const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                     ReactiveRelocationTables rt, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
-    const int* q = ix + e * 6;
-    const double* xs = x + s * n;
-    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
-    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     double o[OPEN_BRANCH_OUTPUT_COUNT];
-    updateOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
-                   o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
+    withOpenBranchInputs(e, s, n, in, ix, x, [&](const double* p, double v1, double v2) {
+        updateOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
+                       o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
+    });
     if (dynamicRelocation) {
         scatterAddRelocated(OPEN_BRANCH_OUTPUT_COUNT, dest + e * OPEN_BRANCH_OUTPUT_COUNT, alternateDestination + e * OPEN_BRANCH_OUTPUT_COUNT, selectorRow + e * OPEN_BRANCH_OUTPUT_COUNT,
                       mode + (size_t) s * n, o, scenarioEntries(vals, s, nnz, layout), scenarioEntries(F, s, n, layout),
@@ -175,20 +194,15 @@ __global__ void fillOpenBranchBatch(int elementCount, int nScenarios, int n, int
 // F-ONLY batch fills: evaluate just the residual values (the generated eval<X>F
 // routines) and scatter only the F rows — for iterations that never consume the
 // Jacobian (the final residual/convergence fill). The residual positions in
-// each family's dest stride are checked against the generated scatter tables by
-// static_asserts, so a codegen output-order change fails the build loudly.
+// each family's dest stride are read off the generated scatter tables
+// (residualPositions), and their count checked by static_asserts, so a codegen
+// output change fails the build loudly.
 // ---------------------------------------------------------------------------------
 
-static_assert(CLOSED_BRANCH_SCATTER[0].role == 0 && CLOSED_BRANCH_SCATTER[7].role == 0
-           && CLOSED_BRANCH_SCATTER[14].role == 0 && CLOSED_BRANCH_SCATTER[21].role == 0,
-              "closed-branch residual outputs moved — update fillClosedBranchBatchF and fillClosedBranchBatch's Q buffer");
-static_assert(OPEN_BRANCH_SCATTER[0].role == 0 && OPEN_BRANCH_SCATTER[2].role == 0
-           && OPEN_BRANCH_SCATTER[4].role == 0 && OPEN_BRANCH_SCATTER[6].role == 0,
-              "open-branch residual outputs moved — update fillOpenBranchBatchF");
-static_assert(SHUNT_SCATTER[0].role == 0 && SHUNT_SCATTER[2].role == 0,
-              "shunt residual outputs moved — update fillShuntBatchF");
-static_assert(HVDC_AC_EMULATION_SCATTER[0].role == 0 && HVDC_AC_EMULATION_SCATTER[3].role == 0,
-              "hvdc residual outputs moved — update fillHvdcBatchF");
+static_assert(residualCount(CLOSED_BRANCH_SCATTER) == 4, "fillClosedBranchBatchF computes p1 q1 p2 q2: the generated outputs changed");
+static_assert(residualCount(OPEN_BRANCH_SCATTER) == 4, "fillOpenBranchBatchF computes four residuals: the generated outputs changed");
+static_assert(residualCount(SHUNT_SCATTER) == 2, "fillShuntBatchF computes p and q: the generated outputs changed");
+static_assert(residualCount(HVDC_AC_EMULATION_SCATTER) == 2, "fillHvdcBatchF computes p1 p2: the generated outputs changed");
 
 __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest,
@@ -203,20 +217,13 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
     int e, s;
     itemAndScenario(tid, elementCount, layout, e, s);
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-    double pOv[8];
-    bool tapOv = findTapOverride(closedBranchParameterOverrides, s, e, pOv);
-    if (tapOv) {
-        p = pOv;
-    }
-    const double* xs = x + s * n;
-    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
-    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double o[4];                                             // p1 q1 p2 q2: the fused fill's own expressions
-    updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 7, 14, 21};
+    withClosedBranchInputs(e, s, n, in, ix, x, closedBranchParameterOverrides,
+                           [&](const double* p, double v1, double r1, double v2, double a1, double ph1, double ph2) {
+        updateClosedBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3);
+    });
+    constexpr ResidualPositions<4> RESIDUALS = residualPositions<4>(CLOSED_BRANCH_SCATTER);
+    const int pos[4] = {RESIDUALS.at[0], RESIDUALS.at[1], RESIDUALS.at[2], RESIDUALS.at[3]};
     const ScenarioValues FS = scenarioEntries(F, s, n, layout);
     if (dynamicRelocation && relocatedElement[e]) {
         scatterAddFRelocated(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, alternateDestination + e * CLOSED_BRANCH_OUTPUT_COUNT, selectorRow + e * CLOSED_BRANCH_OUTPUT_COUNT,
@@ -228,7 +235,7 @@ __global__ void fillClosedBranchBatchF(int elementCount, int nScenarios, int n, 
         scatterAddF(4, dest + e * CLOSED_BRANCH_OUTPUT_COUNT, pos, o, scenarioEntries(qbuf, s, n, layout));
     }
     if (phaseControlDestination != nullptr) {                                 // continuous phase control: the P residual at a1
-        for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14
+        for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at their table positions
             int d = phaseControlDestination[e * CLOSED_BRANCH_OUTPUT_COUNT + pos[j]];
             if (d < -1 && mode[(size_t) s * n + phaseControlSelector[e * CLOSED_BRANCH_OUTPUT_COUNT + pos[j]]] == GpuRowMode::BRANCH_TARGET_P) {
                 atomicAdd(&FS[-2 - d], o[j]);
@@ -243,19 +250,14 @@ __global__ void fillOpenBranchBatchF(int elementCount, int nScenarios, int n, in
                                      const char* disabled, const char* active,
                                      const int* alternateDestination, const int* selectorRow, const int* mode, int dynamicRelocation,
                                      ReactiveRelocationTables rt, BatchLayout layout) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= elementCount * nScenarios) return;
     int e, s;
-    itemAndScenario(tid, elementCount, layout, e, s);
-    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
-    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
-    const int* q = ix + e * 6;
-    const double* xs = x + s * n;
-    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
-    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
+    if (!liveElement(elementCount, nScenarios, nElements, elemOffset, active, disabled, layout, e, s)) return;
     double o[4];
-    updateOpenBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
-    const int pos[4] = {0, 2, 4, 6};
+    withOpenBranchInputs(e, s, n, in, ix, x, [&](const double* p, double v1, double v2) {
+        updateOpenBranchWithoutDerivatives(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
+    });
+    constexpr ResidualPositions<4> RESIDUALS = residualPositions<4>(OPEN_BRANCH_SCATTER);
+    const int pos[4] = {RESIDUALS.at[0], RESIDUALS.at[1], RESIDUALS.at[2], RESIDUALS.at[3]};
     if (dynamicRelocation) {
         scatterAddFRelocated(4, dest + e * OPEN_BRANCH_OUTPUT_COUNT, alternateDestination + e * OPEN_BRANCH_OUTPUT_COUNT, selectorRow + e * OPEN_BRANCH_OUTPUT_COUNT,
                        pos, mode + (size_t) s * n, o, scenarioEntries(F, s, n, layout), relocationTablesForScenario(rt, s), e * OPEN_BRANCH_OUTPUT_COUNT);

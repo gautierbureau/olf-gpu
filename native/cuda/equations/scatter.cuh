@@ -57,6 +57,35 @@ __device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int
     return (lo < rowPtr[row + 1] && colIdx[lo] == col) ? lo : -1;
 }
 
+// The positions of a family's N residual outputs (scatter role 0) in its output order, read off its generated scatter
+// table at compile time: where a mismatch-only fill, which computes those outputs alone, scatters them.
+template <int N>
+struct ResidualPositions {
+    int at[N];
+};
+
+template <int N, typename Scatter, int COUNT>
+__host__ __device__ constexpr ResidualPositions<N> residualPositions(const Scatter (&table)[COUNT]) {
+    ResidualPositions<N> positions{};
+    int k = 0;
+    for (int i = 0; i < COUNT; i++) {
+        if (table[i].role == 0) {
+            positions.at[k++] = i;
+        }
+    }
+    return positions;
+}
+
+// How many residual outputs (scatter role 0) a family has: checked against the N its mismatch-only fill computes.
+template <typename Scatter, int COUNT>
+__host__ __device__ constexpr int residualCount(const Scatter (&table)[COUNT]) {
+    int k = 0;
+    for (int i = 0; i < COUNT; i++) {
+        k += table[i].role == 0 ? 1 : 0;
+    }
+    return k;
+}
+
 static __device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, ScenarioValues F) {
     for (int k = 0; k < nres; k++) {
         int d = dest[pos[k]];

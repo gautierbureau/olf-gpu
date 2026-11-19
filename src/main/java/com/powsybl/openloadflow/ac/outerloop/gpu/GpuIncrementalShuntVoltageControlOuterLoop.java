@@ -43,7 +43,6 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuIncrementalShuntVoltageControlOuterLoop.class);
 
-    private static final int MAX_DIRECTION_CHANGE = 3;       // OLF IncrementalShuntVoltageControlOuterLoop
     private static final double MIN_TARGET_DEADBAND_KV = 0.1;
 
     private GpuIncrementalShuntVoltageControlOuterLoop() {
@@ -64,23 +63,6 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
     public record Controller(int bRow, int vRow, int controlledBusNum, double targetV, double halfDeadband,
                       List<Sub> subs, double bMagnitude, int shuntAdmittanceOverrideElement, int elemIndexAbs, int shuntNum) {
-    }
-
-    private static final class ControllerContext {
-        int directionChangeCount;
-        int currentDirection;
-        int allowedDirection;
-
-        void update(int direction) {                         // OLF ControllerContext.updateAllowedDirection
-            if (directionChangeCount < MAX_DIRECTION_CHANGE) {
-                if (currentDirection != 0 && currentDirection != direction) {
-                    directionChangeCount++;
-                }
-                currentDirection = direction;
-            } else {
-                allowedDirection = direction;
-            }
-        }
     }
 
     public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

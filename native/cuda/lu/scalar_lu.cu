@@ -11,75 +11,13 @@
 
 #include "../common/check.cuh"
 #include "../common/stats.cuh"
+#include "lu_lanes.cuh"
 #include "lu_split.cuh"
 
 namespace olfgpu {
 
 namespace {
 
-constexpr int LU_BLOCK = 128;
-constexpr int TILE = 32;                                     // transposes: 32 entries x 32 lanes per block
-constexpr int TILE_ROWS = 8;
-
-unsigned int blocksFor(size_t threads) {
-    return static_cast<unsigned int>((threads + LU_BLOCK - 1) / LU_BLOCK);
-}
-
-// The lane the k-th lane slot of a launch works on: lane k of the factorization, or the k-th selected lane (a position
-// in its lane map) when there is a selection.
-__device__ __forceinline__ int laneOf(int k, const int* __restrict__ selected) {
-    return selected == nullptr ? k : selected[k];
-}
-
-// dst[map[k] * capacity + a] = src[laneMap[a] * stride + k]: scenario-major rows to the lane-interleaved layout,
-// through a shared tile so both sides stay contiguous (k along the source, lanes along the destination). The lanes:
-// 0 .. width, or the width selected ones.
-__global__ void toInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                              const int* __restrict__ selected, const int* __restrict__ map,
-                              const double* __restrict__ src, double* __restrict__ dst) {
-    __shared__ double tile[TILE][TILE + 1];
-    const int k0 = blockIdx.x * TILE;
-    const int c0 = blockIdx.y * TILE;
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int c = c0 + r;
-        const int k = k0 + threadIdx.x;
-        if (c < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k];
-        }
-    }
-    __syncthreads();
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int k = k0 + r;
-        const int c = c0 + threadIdx.x;
-        if (c < width && k < count) {
-            dst[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)] = tile[threadIdx.x][r];
-        }
-    }
-}
-
-// The way back: dst[laneMap[a] * stride + k] = src[map[k] * capacity + a].
-__global__ void fromInterleaved(int count, int stride, int width, int capacity, const int* __restrict__ laneMap,
-                                const int* __restrict__ selected, const int* __restrict__ map,
-                                const double* __restrict__ src, double* __restrict__ dst) {
-    __shared__ double tile[TILE][TILE + 1];
-    const int k0 = blockIdx.x * TILE;
-    const int c0 = blockIdx.y * TILE;
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int k = k0 + r;
-        const int c = c0 + threadIdx.x;
-        if (c < width && k < count) {
-            tile[r][threadIdx.x] = src[static_cast<size_t>(map[k]) * capacity + laneOf(c, selected)];
-        }
-    }
-    __syncthreads();
-    for (int r = threadIdx.y; r < TILE; r += TILE_ROWS) {
-        const int c = c0 + r;
-        const int k = k0 + threadIdx.x;
-        if (c < width && k < count) {
-            dst[static_cast<size_t>(laneMap[laneOf(c, selected)]) * stride + k] = tile[threadIdx.x][r];
-        }
-    }
-}
 
 // out[e] = lu[e * capacity + lane]: one lane's factors out of the interleaved layout.
 __global__ void gatherLane(int nnzLu, int capacity, int lane, const double* __restrict__ lu, double* __restrict__ out) {
@@ -87,16 +25,6 @@ __global__ void gatherLane(int nnzLu, int capacity, int lane, const double* __re
     if (e < static_cast<size_t>(nnzLu)) {
         out[e] = lu[e * capacity + lane];
     }
-}
-
-__global__ void zeroFill(int nFill, int width, int capacity, const int* __restrict__ fillEntry, double* __restrict__ lu) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nFill) * width) {
-        return;
-    }
-    const int f = static_cast<int>(g / width);
-    const int a = static_cast<int>(g - static_cast<size_t>(f) * width);
-    lu[static_cast<size_t>(fillEntry[f]) * capacity + a] = 0.0;
 }
 
 // An entry's value once its contributions are in acc: an L entry divides by its pivot - an outsized multiplier is
@@ -192,12 +120,11 @@ __global__ void forwardLevel(int nRows, int width, int capacity, const int* __re
                              const int* __restrict__ rows, const int* __restrict__ luRowPtr,
                              const int* __restrict__ luCol, const int* __restrict__ luDiag,
                              const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nRows) * width) {
+    int t;
+    int a;
+    if (!itemLane(nRows, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double y = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luDiag[i];
@@ -212,12 +139,11 @@ __global__ void backwardLevel(int nRows, int width, int capacity, const int* __r
                               const int* __restrict__ rows, const int* __restrict__ luRowPtr,
                               const int* __restrict__ luCol, const int* __restrict__ luDiag,
                               const double* __restrict__ lu, double* __restrict__ z) {
-    const size_t g = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (g >= static_cast<size_t>(nRows) * width) {
+    int t;
+    int a;
+    if (!itemLane(nRows, width, selected, t, a)) {
         return;
     }
-    const int t = static_cast<int>(g / width);
-    const int a = laneOf(static_cast<int>(g - static_cast<size_t>(t) * width), selected);
     const int i = rows[t];
     double x = z[static_cast<size_t>(i) * capacity + a];
     const int qEnd = luRowPtr[i + 1];
@@ -298,17 +224,10 @@ std::vector<int> levelLongest(const ScalarLuPlan& plan, bool backward) {
     return longest;
 }
 
-template <typename T>
-void uploadVector(DeviceBuf& buf, const std::vector<T>& v) {
-    if (!v.empty()) {
-        buf.upload(v.data(), v.size() * sizeof(T));
-    }
-}
-
 // The triangular solves on width lanes: every lane of the last factorization (selected null) or the selected ones.
 void solveScalar(ScalarLu& lu, const int* selected, int width, const double* b, double* x, cudaStream_t stream) {
-    const dim3 tileBlock(TILE, TILE_ROWS);
-    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (width + TILE - 1) / TILE);
+    const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
+    const dim3 vectorGrid((lu.n + LU_TILE - 1) / LU_TILE, (width + LU_TILE - 1) / LU_TILE);
     toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, width, lu.capacity, lu.dLaneMap.as<int>(), selected,
             lu.dRowPosition.as<int>(), b, lu.dWork.as<double>());
     for (int l = 0; l + 1 < static_cast<int>(lu.forwardLevelStart.size()); l++) {
@@ -392,30 +311,12 @@ void createScalarLu(ScalarLu& lu, const ScalarLuPlan& plan, int capacity) {
 
 void factorizeScalarLanes(ScalarLu& lu, const double* vals, BatchLayout layout, const int* laneMap, int width,
                           cudaStream_t stream) {
-    if (width < 0 || width > lu.capacity) {
-        throw std::runtime_error("batched LU width " + std::to_string(width) + " outside 0.."
-                                 + std::to_string(lu.capacity));
-    }
-    lu.width = width;
-    lu.hLaneMap.assign(laneMap, laneMap + width);
-    if (width == 0) {
+    // Values interleaved by scenario are read in place by the steps (initialEntry); scenario-major ones are copied into the
+    // lane-interleaved layout first, the fill entries zeroed.
+    if (!beginLaneFactorization(lu, vals, layout, laneMap, width, lu.dTrouble, lu.dEntryOfA, stream)) {
         return;
     }
-    CUDA_CHECK(cudaMemcpyAsync(lu.dLaneMap.p, laneMap, width * sizeof(int), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemsetAsync(lu.dTrouble.p, 0, width * sizeof(int), stream));
-    // Values interleaved by scenario are read in place by the steps (initialEntry); scenario-major ones are copied into
-    // the lane-interleaved layout first, the fill entries zeroed.
     const double* src = layout.interleaved ? vals : nullptr;
-    if (!layout.interleaved) {
-        const dim3 tileBlock(TILE, TILE_ROWS);
-        const dim3 valuesGrid((lu.nnzA + TILE - 1) / TILE, (width + TILE - 1) / TILE);
-        toInterleaved<<<valuesGrid, tileBlock, 0, stream>>>(lu.nnzA, lu.nnzA, width, lu.capacity, lu.dLaneMap.as<int>(),
-                nullptr, lu.dEntryOfA.as<int>(), vals, lu.dLu.as<double>());
-        if (lu.nFill > 0) {
-            zeroFill<<<blocksFor(static_cast<size_t>(lu.nFill) * width), LU_BLOCK, 0, stream>>>(lu.nFill, width,
-                    lu.capacity, lu.dFillEntry.as<int>(), lu.dLu.as<double>());
-        }
-    }
     for (int s = 0; s + 1 < static_cast<int>(lu.stepStart.size()); s++) {
         const int items = lu.stepStart[s + 1] - lu.stepStart[s];
         if (items == 0) {

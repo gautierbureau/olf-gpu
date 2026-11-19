@@ -130,15 +130,15 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 void hvdcStep(BatchSolverContext* ctx, DriverPass& drv, int loopKind) {
     const int& n = drv.n;
     const int& nS = drv.nS;
-    hvdcAcEmulationLoopBatch<<<grid(ctx->nHvdcAcEmulation * nS), BLOCK, 0, ctx->stream>>>(
-            ctx->nHvdcAcEmulation, nS, n, ctx->nElements, ctx->hvdcAcEmulationOffset,
+    hvdcAcEmulationLoopBatch<<<grid(ctx->hvdcAcEmulation.nHvdcAcEmulation * nS), BLOCK, 0, ctx->stream>>>(
+            ctx->hvdcAcEmulation.nHvdcAcEmulation, nS, n, ctx->nElements, ctx->hvdcAcEmulationOffset,
             loopKind == GpuOuterLoopKind::FREEZING_HVDC_AC_EMULATION ? 0 : 1,
-            ctx->dHvdcElement.as<int>(), ctx->dHvdcBus1PRow.as<int>(), ctx->dHvdcBus2PRow.as<int>(),
-            ctx->dHvdcBus1PhiColumn.as<int>(), ctx->dHvdcBus2PhiColumn.as<int>(),
+            ctx->hvdcAcEmulation.dHvdcElement.as<int>(), ctx->hvdcAcEmulation.dHvdcBus1PRow.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PRow.as<int>(),
+            ctx->hvdcAcEmulation.dHvdcBus1PhiColumn.as<int>(), ctx->hvdcAcEmulation.dHvdcBus2PhiColumn.as<int>(),
             ctx->dMode.as<int>(), ctx->structure->dRelocatedChildOwnRow.p != nullptr ? ctx->structure->dRelocatedChildOwnRow.as<int>() : nullptr,
-            ctx->dHvdcAcEmulationParameters.as<double>(), ctx->hvdcContingencyOutage.device(),
+            ctx->hvdcAcEmulation.dHvdcAcEmulationParameters.as<double>(), ctx->hvdcAcEmulation.hvdcContingencyOutage.device(),
             ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
-            ctx->hvdcAcEmulationStatus.device(), ctx->hvdcAppliedDelta1.device(), ctx->hvdcAppliedDelta2.device(),
+            ctx->hvdcAcEmulation.hvdcAcEmulationStatus.device(), ctx->hvdcAcEmulation.hvdcAppliedDelta1.device(), ctx->hvdcAcEmulation.hvdcAppliedDelta2.device(),
             ctx->dOuterLoopCheckActive.as<char>(), ctx->dOuterLoopUnstable.as<char>());
 }
 

@@ -157,24 +157,36 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, supernodalPlanStatistics)(
     }
 }
 
-// values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major; laneMap: the scenarios to
-// factorize and solve; pivoted (1 when the pivoting engine factorized the lane) and pivotClamps: per entry of laneMap,
-// written. With interleavedValues, the values reach the factorization interleaved by scenario, as a batch context
-// holds them (the engines read them in place), instead of scenario-major.
-static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder,
-                                jintArray jColOrder, jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides,
-                                jintArray jLaneMap, jdoubleArray jSolutions, jintArray jPivoted, jintArray jPivotClamps,
-                                bool interleavedValues) {
-    try {
-        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
-        const std::vector<int> colIdx = intsOf(env, jColIdx);
+// What every factorize-and-solve test entry point sets up alike: the pattern and its row and column orders unpacked, the
+// scenario-major values (capacity * nnz), right-hand sides and solutions (capacity * n) read, the lane map checked against
+// the capacity, the plan built and the LU created on it, the three device buffers and a stream. close() destroys the
+// stream, checked; the destructor only when an exception left it.
+struct LuFixture {
+    int n;
+    int capacity;
+    int nnz;
+    std::vector<int> rowPtr;
+    std::vector<int> colIdx;
+    std::vector<int> laneMap;
+    std::vector<double> values;
+    std::vector<double> rightHandSides;
+    std::vector<double> solutions;
+    std::shared_ptr<LuPlan> plan;
+    BatchedLu lu;
+    DeviceBuf dValues;
+    DeviceBuf dRightHandSides;
+    DeviceBuf dSolutions;
+    cudaStream_t stream = nullptr;
+
+    LuFixture(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder, jint capacity,
+              jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions)
+        : n(n), capacity(capacity), rowPtr(intsOf(env, jRowPtr)), colIdx(intsOf(env, jColIdx)), laneMap(intsOf(env, jLaneMap)) {
         const std::vector<int> rowOrder = intsOf(env, jRowOrder);
         const std::vector<int> colOrder = intsOf(env, jColOrder);
-        const std::vector<int> laneMap = intsOf(env, jLaneMap);
-        const int nnz = rowPtr[n];
-        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
-        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
-        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
+        nnz = rowPtr[n];
+        values.resize(static_cast<size_t>(capacity) * nnz);
+        rightHandSides.resize(static_cast<size_t>(capacity) * n);
+        solutions.resize(static_cast<size_t>(capacity) * n);
         env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
         env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
         env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
@@ -184,13 +196,19 @@ static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArra
                                          + std::to_string(capacity - 1));
             }
         }
-        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
-                                                         colOrder.data());
-        BatchedLu lu;
+        plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(), colOrder.data());
         createBatchedLu(lu, *plan, capacity);
-        DeviceBuf dValues;
-        DeviceBuf dRightHandSides;
-        DeviceBuf dSolutions;
+    }
+
+    ~LuFixture() {
+        if (stream != nullptr) {
+            cudaStreamDestroy(stream);
+        }
+    }
+
+    // The values on the device, interleaved by scenario as a batch context holds them or scenario-major, the right-hand
+    // sides and the solutions too; the stream. Returns the values' layout.
+    BatchLayout upload(bool interleavedValues) {
         const BatchLayout layout = interleavedValues ? interleavedLayout(capacity) : scenarioMajorLayout(capacity);
         if (interleavedValues) {
             std::vector<double> interleaved(static_cast<size_t>(layout.stride) * nnz, 0.0);
@@ -205,29 +223,55 @@ static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArra
         }
         dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
         dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
-        cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreate(&stream));
-        std::vector<int> clamps;
-        std::vector<int> pivoted(laneMap.size(), 0);
-        try {
-            factorizeLanes(lu, dValues.as<double>(), layout, laneMap.data(), static_cast<int>(laneMap.size()), stream);
-            solveLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
-            clamps = readPivotClamps(lu, stream);
-            size_t next = 0;
-            for (size_t a = 0; a < laneMap.size() && next < lu.hPivoted.size(); a++) {
-                if (laneMap[a] == lu.hPivoted[next]) {
-                    pivoted[a] = 1;
-                    next++;
-                }
+        return layout;
+    }
+
+    // Per entry of the lane map: 1 when the pivoting engine factorized its lane in the last factorization.
+    void markPivoted(int* pivoted) const {
+        size_t next = 0;
+        for (size_t a = 0; a < laneMap.size() && next < lu.hPivoted.size(); a++) {
+            if (laneMap[a] == lu.hPivoted[next]) {
+                pivoted[a] = 1;
+                next++;
             }
-            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-        } catch (...) {
-            cudaStreamDestroy(stream);
-            throw;
         }
-        CUDA_CHECK(cudaStreamDestroy(stream));
+    }
+
+    void readSolutions() {
+        CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    }
+
+    void close() {
+        cudaStream_t s = stream;
+        stream = nullptr;
+        CUDA_CHECK(cudaStreamDestroy(s));
+    }
+
+    void writeSolutions(JNIEnv* env, jdoubleArray jSolutions) const {
         env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+    }
+};
+
+// values: capacity * nnz, rightHandSides and solutions: capacity * n, scenario-major; laneMap: the scenarios to
+// factorize and solve; pivoted (1 when the pivoting engine factorized the lane) and pivotClamps: per entry of laneMap,
+// written. With interleavedValues, the values reach the factorization interleaved by scenario, as a batch context
+// holds them (the engines read them in place), instead of scenario-major.
+static void factorizeAndSolveIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder,
+                                jintArray jColOrder, jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides,
+                                jintArray jLaneMap, jdoubleArray jSolutions, jintArray jPivoted, jintArray jPivotClamps,
+                                bool interleavedValues) {
+    try {
+        LuFixture f(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap, jSolutions);
+        const BatchLayout layout = f.upload(interleavedValues);
+        factorizeLanes(f.lu, f.dValues.as<double>(), layout, f.laneMap.data(), static_cast<int>(f.laneMap.size()), f.stream);
+        solveLanes(f.lu, f.dRightHandSides.as<double>(), f.dSolutions.as<double>(), f.stream);
+        const std::vector<int> clamps = readPivotClamps(f.lu, f.stream);
+        std::vector<int> pivoted(f.laneMap.size(), 0);
+        f.markPivoted(pivoted.data());
+        f.readSolutions();
+        f.close();
+        f.writeSolutions(env, jSolutions);
         env->SetIntArrayRegion(jPivoted, 0, static_cast<jsize>(pivoted.size()), pivoted.data());
         env->SetIntArrayRegion(jPivotClamps, 0, static_cast<jsize>(clamps.size()), clamps.data());
     } catch (const std::exception& e) {
@@ -261,57 +305,24 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveSelected)(
         jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jintArray jSelected,
         jdoubleArray jSolutions) {
     try {
-        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
-        const std::vector<int> colIdx = intsOf(env, jColIdx);
-        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
-        const std::vector<int> colOrder = intsOf(env, jColOrder);
-        const std::vector<int> laneMap = intsOf(env, jLaneMap);
+        LuFixture f(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap, jSolutions);
         const std::vector<int> selected = intsOf(env, jSelected);
-        const int nnz = rowPtr[n];
-        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
-        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
-        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
-        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
-        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
-        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
         std::vector<char> scenarios(capacity, 0);
-        for (const std::vector<int>* list : {&laneMap, &selected}) {
-            for (int s : *list) {
-                if (s < 0 || s >= capacity) {
-                    throw std::runtime_error("scenario " + std::to_string(s) + " outside 0.."
-                                             + std::to_string(capacity - 1));
-                }
-            }
-        }
         for (int s : selected) {
+            if (s < 0 || s >= capacity) {
+                throw std::runtime_error("scenario " + std::to_string(s) + " outside 0.." + std::to_string(capacity - 1));
+            }
             scenarios[s] = 1;
         }
-        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
-                                                         colOrder.data());
-        BatchedLu lu;
-        createBatchedLu(lu, *plan, capacity);
-        DeviceBuf dValues;
-        DeviceBuf dRightHandSides;
-        DeviceBuf dSolutions;
-        dValues.upload(values.data(), values.size() * sizeof(double));
-        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
-        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreate(&stream));
-        try {
-            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
-                           static_cast<int>(laneMap.size()), stream);
-            selectLanes(lu, scenarios, stream);
-            solveSelectedLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-        } catch (...) {
-            cudaStreamDestroy(stream);
-            throw;
-        }
-        CUDA_CHECK(cudaStreamDestroy(stream));
-        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        f.upload(false);
+        factorizeLanes(f.lu, f.dValues.as<double>(), scenarioMajorLayout(capacity), f.laneMap.data(),
+                       static_cast<int>(f.laneMap.size()), f.stream);
+        selectLanes(f.lu, scenarios, f.stream);
+        solveSelectedLanes(f.lu, f.dRightHandSides.as<double>(), f.dSolutions.as<double>(), f.stream);
+        CUDA_CHECK(cudaStreamSynchronize(f.stream));
+        f.readSolutions();
+        f.close();
+        f.writeSolutions(env, jSolutions);
     } catch (const std::exception& e) {
         throwJava(env, e);
     }
@@ -328,75 +339,24 @@ static void factorizeRoundsIn(JNIEnv* env, jint n, jintArray jRowPtr, jintArray 
                               jintArray jLaneMap, jint rounds, jint installRound, jdoubleArray jSolutions,
                               jintArray jPivoted, jintArray jDelays, bool interleavedValues) {
     try {
-        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
-        const std::vector<int> colIdx = intsOf(env, jColIdx);
-        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
-        const std::vector<int> colOrder = intsOf(env, jColOrder);
-        const std::vector<int> laneMap = intsOf(env, jLaneMap);
-        const int nnz = rowPtr[n];
-        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
-        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
-        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
-        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
-        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
-        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
-        for (int s : laneMap) {
-            if (s < 0 || s >= capacity) {
-                throw std::runtime_error("lane map entry " + std::to_string(s) + " outside 0.."
-                                         + std::to_string(capacity - 1));
-            }
-        }
-        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
-                                                         colOrder.data());
-        BatchedLu lu;
-        createBatchedLu(lu, *plan, capacity);
-        DeviceBuf dValues;
-        DeviceBuf dRightHandSides;
-        DeviceBuf dSolutions;
-        const BatchLayout layout = interleavedValues ? interleavedLayout(capacity) : scenarioMajorLayout(capacity);
-        if (interleavedValues) {
-            std::vector<double> interleaved(static_cast<size_t>(layout.stride) * nnz, 0.0);
-            for (int s = 0; s < capacity; s++) {
-                for (int k = 0; k < nnz; k++) {
-                    interleaved[static_cast<size_t>(k) * layout.stride + s] = values[static_cast<size_t>(s) * nnz + k];
-                }
-            }
-            dValues.upload(interleaved.data(), interleaved.size() * sizeof(double));
-        } else {
-            dValues.upload(values.data(), values.size() * sizeof(double));
-        }
-        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
-        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreate(&stream));
-        std::vector<int> pivoted(static_cast<size_t>(rounds) * laneMap.size(), 0);
+        LuFixture f(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap, jSolutions);
+        const BatchLayout layout = f.upload(interleavedValues);
+        std::vector<int> pivoted(static_cast<size_t>(rounds) * f.laneMap.size(), 0);
         std::vector<int> delays(rounds, 0);
-        try {
-            for (int round = 0; round < rounds; round++) {
-                if (round == installRound) {
-                    forgetLaneRouting(lu, laneMap);
-                }
-                factorizeLanes(lu, dValues.as<double>(), layout, laneMap.data(), static_cast<int>(laneMap.size()),
-                               stream);
-                delays[round] = lu.fast->delayed;
-                size_t next = 0;
-                for (size_t a = 0; a < laneMap.size() && next < lu.hPivoted.size(); a++) {
-                    if (laneMap[a] == lu.hPivoted[next]) {
-                        pivoted[static_cast<size_t>(round) * laneMap.size() + a] = 1;
-                        next++;
-                    }
-                }
+        for (int round = 0; round < rounds; round++) {
+            if (round == installRound) {
+                forgetLaneRouting(f.lu, f.laneMap);
             }
-            solveLanes(lu, dRightHandSides.as<double>(), dSolutions.as<double>(), stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-        } catch (...) {
-            cudaStreamDestroy(stream);
-            throw;
+            factorizeLanes(f.lu, f.dValues.as<double>(), layout, f.laneMap.data(), static_cast<int>(f.laneMap.size()),
+                           f.stream);
+            delays[round] = f.lu.fast->delayed;
+            f.markPivoted(pivoted.data() + static_cast<size_t>(round) * f.laneMap.size());
         }
-        CUDA_CHECK(cudaStreamDestroy(stream));
-        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        solveLanes(f.lu, f.dRightHandSides.as<double>(), f.dSolutions.as<double>(), f.stream);
+        CUDA_CHECK(cudaStreamSynchronize(f.stream));
+        f.readSolutions();
+        f.close();
+        f.writeSolutions(env, jSolutions);
         env->SetIntArrayRegion(jPivoted, 0, static_cast<jsize>(pivoted.size()), pivoted.data());
         env->SetIntArrayRegion(jDelays, 0, static_cast<jsize>(delays.size()), delays.data());
     } catch (const std::exception& e) {
@@ -431,63 +391,33 @@ OLF_JNI(ac_solver_gpu, BatchedLuNative, factorizeAndSolveNewtonStep)(
         JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx, jintArray jRowOrder, jintArray jColOrder,
         jint capacity, jdoubleArray jValues, jdoubleArray jRightHandSides, jintArray jLaneMap, jdoubleArray jSolutions) {
     try {
-        const std::vector<int> rowPtr = intsOf(env, jRowPtr);
-        const std::vector<int> colIdx = intsOf(env, jColIdx);
-        const std::vector<int> rowOrder = intsOf(env, jRowOrder);
-        const std::vector<int> colOrder = intsOf(env, jColOrder);
-        const std::vector<int> laneMap = intsOf(env, jLaneMap);
-        const int nnz = rowPtr[n];
-        std::vector<double> values(static_cast<size_t>(capacity) * nnz);
-        std::vector<double> rightHandSides(static_cast<size_t>(capacity) * n);
-        std::vector<double> solutions(static_cast<size_t>(capacity) * n);
-        env->GetDoubleArrayRegion(jValues, 0, static_cast<jsize>(values.size()), values.data());
-        env->GetDoubleArrayRegion(jRightHandSides, 0, static_cast<jsize>(rightHandSides.size()), rightHandSides.data());
-        env->GetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        LuFixture f(env, n, jRowPtr, jColIdx, jRowOrder, jColOrder, capacity, jValues, jRightHandSides, jLaneMap, jSolutions);
         std::vector<char> lanes(capacity, 0);
-        for (int s : laneMap) {
-            if (s < 0 || s >= capacity) {
-                throw std::runtime_error("lane map entry " + std::to_string(s) + " outside 0.."
-                                         + std::to_string(capacity - 1));
-            }
+        for (int s : f.laneMap) {
             lanes[s] = 1;
         }
-        const std::shared_ptr<LuPlan> plan = buildLuPlan(n, rowPtr.data(), colIdx.data(), rowOrder.data(),
-                                                         colOrder.data());
-        BatchedLu lu;
-        createBatchedLu(lu, *plan, capacity);
+        f.upload(false);
         const size_t vectorBytes = static_cast<size_t>(capacity) * n * sizeof(double);
-        DeviceBuf dRowPtr, dColIdx, dValues, dRightHandSides, dSolutions, dLanes, dResidual, dCorrection,
-                dInternalResidual, dInternalCorrection, dScore, dMask;
-        dRowPtr.upload(rowPtr.data(), rowPtr.size() * sizeof(int));
-        dColIdx.upload(colIdx.data(), colIdx.size() * sizeof(int));
-        dValues.upload(values.data(), values.size() * sizeof(double));
-        dRightHandSides.upload(rightHandSides.data(), rightHandSides.size() * sizeof(double));
-        dSolutions.upload(solutions.data(), solutions.size() * sizeof(double));
+        DeviceBuf dRowPtr, dColIdx, dLanes, dResidual, dCorrection, dInternalResidual, dInternalCorrection, dScore, dMask;
+        dRowPtr.upload(f.rowPtr.data(), f.rowPtr.size() * sizeof(int));
+        dColIdx.upload(f.colIdx.data(), f.colIdx.size() * sizeof(int));
         dLanes.upload(lanes.data(), lanes.size());
         dResidual.alloc(vectorBytes);
         dCorrection.alloc(vectorBytes);
         dInternalResidual.alloc(vectorBytes);
         dInternalCorrection.alloc(vectorBytes);
         dScore.alloc(static_cast<size_t>(capacity) * sizeof(double));
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreate(&stream));
-        try {
-            factorizeLanes(lu, dValues.as<double>(), scenarioMajorLayout(capacity), laneMap.data(),
-                           static_cast<int>(laneMap.size()), stream);
-            const BatchedLuSystems systems{&lu, n, capacity, nnz, dRowPtr.as<int>(), dColIdx.as<int>(), dValues.as<double>(),
-                                           true, dLanes.as<char>(), stream, dResidual.as<double>(), dCorrection.as<double>(),
-                                           dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask,
-                                           scenarioMajorLayout(capacity)};
-            solveNewtonStep(systems, dRightHandSides.as<double>(), dSolutions.as<double>());
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            CUDA_CHECK(cudaMemcpy(solutions.data(), dSolutions.p, solutions.size() * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-        } catch (...) {
-            cudaStreamDestroy(stream);
-            throw;
-        }
-        CUDA_CHECK(cudaStreamDestroy(stream));
-        env->SetDoubleArrayRegion(jSolutions, 0, static_cast<jsize>(solutions.size()), solutions.data());
+        factorizeLanes(f.lu, f.dValues.as<double>(), scenarioMajorLayout(capacity), f.laneMap.data(),
+                       static_cast<int>(f.laneMap.size()), f.stream);
+        const BatchedLuSystems systems{&f.lu, n, capacity, f.nnz, dRowPtr.as<int>(), dColIdx.as<int>(), f.dValues.as<double>(),
+                                       true, dLanes.as<char>(), f.stream, dResidual.as<double>(), dCorrection.as<double>(),
+                                       dInternalResidual.as<double>(), dInternalCorrection.as<double>(), dScore, dMask,
+                                       scenarioMajorLayout(capacity)};
+        solveNewtonStep(systems, f.dRightHandSides.as<double>(), f.dSolutions.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(f.stream));
+        f.readSolutions();
+        f.close();
+        f.writeSolutions(env, jSolutions);
     } catch (const std::exception& e) {
         throwJava(env, e);
     }

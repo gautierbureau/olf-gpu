@@ -27,7 +27,7 @@ OLF_JNI(ac_equations_vector_gpu, ZeroImpedanceNative, setBatchSpanningTreeOverri
         pairs.push_back(triples[k + 1]);
         isTree.push_back(triples[k + 2] != 0 ? 1 : 0);
     }
-    ctx->spanningTreeOverrideMask.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nZeroImpedanceBranch,
+    ctx->scenarioOverrides.spanningTreeOverrideMask.installEntries(ctx->nScenarios, ctx->installSlots, ctx->nZeroImpedanceBranch,
                                                  static_cast<int>(isTree.size()), pairs.data(), isTree.data());
     if (traceOn(Trace::PHASE_TIME)) {
         std::fprintf(stderr, "ZI_LISTS nSpanningTreeOverrides=%d\n", static_cast<int>(isTree.size()));

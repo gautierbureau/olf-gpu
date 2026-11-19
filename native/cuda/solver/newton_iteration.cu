@@ -39,29 +39,29 @@ namespace olfgpu {
 // The compacted solver (straggler compaction, narrow refinement), created the first time a compacted width is
 // needed, for capacity scenarios at most.
 static void ensureCompactedSolver(BatchSolverContext* ctx, int n, int nnz, int capacity) {
-    if (ctx->compactedCapacity != 0) {
+    if (ctx->linearSolver.compactedCapacity != 0) {
         return;
     }
-    ctx->compactedCapacity = std::max(1, capacity);
-    ctx->dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->compactedCapacity * sizeof(double));
-    ctx->dBCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dDxCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->compactedCapacity) * sizeof(int));
-    CUDSS_CHECK(cudssCreate(&ctx->compactedSolver.handle));
-    CUDSS_CHECK(cudssSetStream(ctx->compactedSolver.handle, ctx->stream));
-    CUDSS_CHECK(cudssConfigCreate(&ctx->compactedSolver.config));
-    applyReorderAlg(ctx->compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
+    ctx->linearSolver.compactedCapacity = std::max(1, capacity);
+    ctx->linearSolver.dValsCompacted.alloc(static_cast<size_t>(nnz) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dBCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dDxCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dCompactedScenarioMap.alloc(static_cast<size_t>(ctx->linearSolver.compactedCapacity) * sizeof(int));
+    CUDSS_CHECK(cudssCreate(&ctx->linearSolver.compactedSolver.handle));
+    CUDSS_CHECK(cudssSetStream(ctx->linearSolver.compactedSolver.handle, ctx->stream));
+    CUDSS_CHECK(cudssConfigCreate(&ctx->linearSolver.compactedSolver.config));
+    applyReorderAlg(ctx->linearSolver.compactedSolver.config, ctx->structure->nZeroImpedanceBranch > 0);
     int compactedIterativeRefinementSteps = ctx->structure->nZeroImpedanceBranch > 0 ? configuredIterativeRefinementBaseSteps() : ITERATIVE_REFINEMENT_STEPS_WITHOUT_COUPLERS;
-    CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->compactedUniformBatchSystemMatrix, n, n, nnz,
-            ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->dValsCompacted.as<double>(),
+    CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_IR_N_STEPS, &compactedIterativeRefinementSteps, sizeof(compactedIterativeRefinementSteps)));
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->linearSolver.compactedUniformBatchSystemMatrix, n, n, nnz,
+            ctx->structure->dRowPtr.as<int>(), nullptr, ctx->structure->dColIdx.as<int>(), ctx->linearSolver.dValsCompacted.as<double>(),
             OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchSolutionMatrix, n, 1, n, ctx->dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    ctx->dRCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    ctx->dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->compactedCapacity * sizeof(double));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchResidualMatrix, n, 1, n, ctx->dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->compactedUniformBatchDeltaMatrix, n, 1, n, ctx->dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchRightHandSideMatrix, n, 1, n, ctx->linearSolver.dBCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchSolutionMatrix, n, 1, n, ctx->linearSolver.dDxCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    ctx->linearSolver.dRCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    ctx->linearSolver.dDeltaCompacted.alloc(static_cast<size_t>(n) * ctx->linearSolver.compactedCapacity * sizeof(double));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchResidualMatrix, n, 1, n, ctx->linearSolver.dRCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->linearSolver.compactedUniformBatchDeltaMatrix, n, 1, n, ctx->linearSolver.dDeltaCompacted.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 // A new batch size needs a FRESH data object and a fresh ANALYSIS. Setting
@@ -73,69 +73,183 @@ static void ensureCompactedSolver(BatchSolverContext* ctx, int n, int nnz, int c
 // Tier change to a width analyzed before: its own data object, the batch size set back on the
 // (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
 static cudssData_t compactedDataForWidth(BatchSolverContext* ctx, int w) {
-    cudssData_t& cached = ctx->compactData[w];
+    cudssData_t& cached = ctx->linearSolver.compactData[w];
     if (cached == nullptr) {
-        CUDSS_CHECK(cudssDataCreate(ctx->compactedSolver.handle, &cached));
-        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+        CUDSS_CHECK(cudssDataCreate(ctx->linearSolver.compactedSolver.handle, &cached));
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
         gAnalysesCompact++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->compactedSolver.config, cached, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-    } else if (w != ctx->compactWidth) {
-        CUDSS_CHECK(cudssConfigSet(ctx->compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.compactedSolver.config, cached, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchSolutionMatrix, ctx->linearSolver.compactedUniformBatchRightHandSideMatrix)); }
+    } else if (w != ctx->linearSolver.compactWidth) {
+        CUDSS_CHECK(cudssConfigSet(ctx->linearSolver.compactedSolver.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
     }
-    ctx->compactWidth = w;
+    ctx->linearSolver.compactWidth = w;
     return cached;
 }
 
-// The inner Newton-Raphson (OLF NewtonRaphson.run) of every scenario of the batch, each at its own iteration, with its
-// outer loops run in place (outer_loop_sequence.cuh): a scenario whose solve converges is checked at once along its own
-// loops, and one an UNSTABLE check makes re-solve restarts its Newton at its new targets and modes in the same batched
-// iteration, while the others go on with theirs. One batched factorization serves every scenario still solving,
-// whatever solve it is in: fill, factorize, solve, refine, scale and update until no scenario solves.
-void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& sequence) {
-    const int& n = drv.n;
-    const int& nnz = drv.nnz;
-    const int& nS = drv.nS;
-    const size_t& nTot = drv.nTot;
-    const double& tol = drv.tol;
-    const int& maxIter = drv.maxIter;
-    const int& stateVectorScalingMode = drv.stateVectorScalingMode;
-    const double& convEpsPerEq = drv.convEpsPerEq;
-    const bool& deviceFixedIter = drv.deviceFixedIter;
-    int& nActive = drv.nActive;
-    std::vector<char>& active = drv.active;
-    std::vector<char>& live = drv.live;
-    std::vector<double>& hF = drv.hF;
-    BatchResult& res = drv.res;
+namespace {
 
+// One call of newtonSolve: the batched Newton loop of every scenario still solving, step by step as OLF's NewtonRaphson
+// runs them (test, Jacobian and mismatch, solve, update), with the outer loops of a converged solve run in place.
+class BatchedNewton {
+public:
+    BatchedNewton(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& sequence)
+        : ctx(ctx), drv(drv), sequence(sequence), n(drv.n), nnz(drv.nnz), nS(drv.nS), nTot(drv.nTot), tol(drv.tol),
+          maxIter(drv.maxIter), stateVectorScalingMode(drv.stateVectorScalingMode), convEpsPerEq(drv.convEpsPerEq),
+          deviceFixedIter(drv.deviceFixedIter), nActive(drv.nActive), active(drv.active), live(drv.live), hF(drv.hF),
+          res(drv.res), it(ctx->slotState.iteration), solves(ctx->slotState.solves),
+          batchedIterations(ctx->slotState.batchedIterations), lastSolveRatio(ctx->slotState.lastSolveRatio),
+          lineSearch(stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH),
+          lineSearchLastSumOfSquares(ctx->slotState.lineSearchLastSumOfSquares),
+          lineSearchHasLastTestResult(ctx->slotState.lineSearchHasLastTestResult),
+          hMu(lineSearch ? nS : 0, -1.0), solveConverged(nS, 0), restarted(nS, 0), installed(installedFlags(ctx)),
+          olf2NormThreshold(convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0) {
+        nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
+        // A call that goes on with scenarios a paused one left solving resumes the iteration it paused in, after its tests and
+        // checks: its first iteration has no test half (k == 0, as for a first one), and it is not a new batched iteration for
+        // them.
+        for (int s = 0; s < nS && !resuming; s++) {
+            resuming = active[s] && !installed[s];
+        }
+    }
+
+    // The batched iterations, until no scenario solves or the call pauses.
+    void run() {
+        for (int k = 0; nActive > 0; k++) {
+            if (capBatchedIterations(k)) {
+                break;
+            }
+            for (int s = 0; s < nS; s++) {
+                if (active[s] && (k > 0 || installed[s])) {
+                    batchedIterations[s]++;
+                }
+            }
+            drv.outer = k;
+            gNewtonLoopIteration = k;
+            if (k > 0 || !resuming) {
+                gNewtonIters++;
+            }
+            bool atBudget = false;                               // a scenario is at its Newton budget
+            bool allAtBudget = true;                             // every scenario still solving is: the fill computes F only
+            for (int s = 0; s < nS; s++) {
+                if (!active[s]) continue;
+                if (it[s] == maxIter) {
+                    atBudget = true;
+                } else {
+                    allAtBudget = false;
+                }
+            }
+            if (deviceFixedIter) {
+                // Device fixed-iteration mode (tol <= 0): NO per-iteration host sync and NO retirement — every scenario
+                // runs exactly maxIter steps on the device; the mismatch is read back ONCE, on the final iteration, only to
+                // report ||F||inf. This drops the per-iteration D->H copy of the full batched mismatch. Tradeoff: a
+                // scenario going non-finite is not isolated, so it can poison a uniform-batched factorization — use
+                // tol > 0 if scenarios may diverge.
+                fillActiveBatch(ctx, drv, allAtBudget);
+                if (atBudget) {
+                    finishFixedIterations();
+                    break;                                       // final residual recorded; done
+                }
+            } else {
+                // ---- residual check + retirement: every iteration copies the batched mismatch norms to the host (the only
+                // thing crossing PCIe) and ends the solves that converged, diverged or ran their budget out. The test reads F
+                // alone: the Jacobian is filled once this iteration's restarts are known, for every scenario still solving
+                // (below). At iteration 0 no solve can end on convergence, so the first iteration needs no test fill. ----
+                if (k > 0 && testAndCheck(atBudget)) {
+                    return;                                      // paused: the caller refills the bank
+                }
+                if (nActive == 0) {
+                    break;
+                }
+                // The Jacobian and the mismatch of every scenario still solving: those going on, and those at their
+                // iteration 0 (all of them at the first iteration, then the ones a check restarted at their new targets and
+                // modes), whose test reads this fill. At iteration 0 only a non-finite mismatch can end a solve: OLF counts
+                // a step before testing it.
+                fillActiveBatch(ctx, drv, false);
+                if (testRestartedSolves()) {
+                    break;
+                }
+            }
+            // Scenarios still being FACTORIZED this iteration. Summed over iterations this is the batch's
+            // real work measure: the CPU pays each contingency its own iteration count, so a batch is only
+            // as efficient as its retirement — a batch that keeps every scenario alive until the last
+            // straggler converges pays the WORST case for all of them.
+            gActiveIterSum += nActive;
+            // The linear-solve guard checks the second iteration of a scenario's first solve (below); the solve before a
+            // scenario's budget keeps its residual for the budget's test (the it == maxIter branch).
+            bool guardDue = false;
+            bool budgetResidualDue = false;
+            if (!deviceFixedIter) {
+                for (int s = 0; s < nS; s++) {
+                    if (!active[s]) continue;
+                    guardDue = guardDue || (solves[s] == 0 && it[s] == 1);
+                    budgetResidualDue = budgetResidualDue || it[s] == maxIter - 1;
+                }
+            }
+            if (lineSearch) {                                    // LINE_SEARCH: remember the pre-step iterates
+                CUDA_CHECK(cudaMemcpyAsync(ctx->newtonRaphson.dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
+                                           cudaMemcpyDeviceToDevice, ctx->stream));
+            }
+            if (ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH || ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
+                solveUniformBatch(k, guardDue, budgetResidualDue);
+            } else {
+                solvePerScenario(budgetResidualDue);
+            }
+            for (int s = 0; s < nS; s++) {
+                if (active[s]) {
+                    it[s]++;
+                }
+            }
+        }   // ---- end of the batched Newton loop ----
+    }
+
+private:
+    BatchSolverContext* ctx;
+    DriverPass& drv;
+    OuterLoopSequence& sequence;
+    const int& n;
+    const int& nnz;
+    const int& nS;
+    const size_t& nTot;
+    const double& tol;
+    const int& maxIter;
+    const int& stateVectorScalingMode;
+    const double& convEpsPerEq;
+    const bool& deviceFixedIter;
+    int& nActive;
+    std::vector<char>& active;
+    std::vector<char>& live;
+    std::vector<double>& hF;
+    BatchResult& res;
     // Per scenario (the context's SlotSolveState, which the call started for the scenarios it installed): the Newton
     // iteration of its current solve, the solves it has ended, the batched iterations since it was installed, and the
     // linear-solve residual ratio of its LAST solve — scored only when a solve runs its Newton budget out (see the
     // it == maxIter branch), so a healthy run never pays for it.
-    std::vector<int>& it = ctx->slotState.iteration;
-    std::vector<int>& solves = ctx->slotState.solves;
-    std::vector<int>& batchedIterations = ctx->slotState.batchedIterations;
-    std::vector<double>& lastSolveRatio = ctx->slotState.lastSolveRatio;
+    std::vector<int>& it;
+    std::vector<int>& solves;
+    std::vector<int>& batchedIterations;
+    std::vector<double>& lastSolveRatio;
     // LINE_SEARCH per-scenario backtracking state (lastNorm2 / haveLast, per solve — a restart retargets the system,
     // voiding the step relation)
-    const bool lineSearch = stateVectorScalingMode == GpuStateVectorScalingMode::LINE_SEARCH;
-    std::vector<double>& lineSearchLastSumOfSquares = ctx->slotState.lineSearchLastSumOfSquares;
-    std::vector<char>& lineSearchHasLastTestResult = ctx->slotState.lineSearchHasLastTestResult;
-    std::vector<double> hMu(lineSearch ? nS : 0, -1.0);
-    std::vector<char> solveConverged(nS, 0), restarted(nS, 0);
+    const bool lineSearch;
+    std::vector<double>& lineSearchLastSumOfSquares;
+    std::vector<char>& lineSearchHasLastTestResult;
+    std::vector<double> hMu;
+    std::vector<char> solveConverged, restarted;
     std::vector<double> hNorms;
-    nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
-    // A call that goes on with scenarios a paused one left solving resumes the iteration it paused in, after its tests and
-    // checks: its first iteration has no test half (k == 0, as for a first one), and it is not a new batched iteration for
-    // them.
-    const std::vector<char> installed = installedFlags(ctx);
+    const std::vector<char> installed;
     bool resuming = false;
-    for (int s = 0; s < nS && !resuming; s++) {
-        resuming = active[s] && !installed[s];
-    }
+    // Inner-Newton convergence test. Default (convEpsPerEq <= 0): the device infinity-norm floor
+    // ‖F‖∞ < tol (stricter than OLF's usual criterion). When convEpsPerEq > 0: OLF's EXACT criterion
+    // — DefaultNewtonRaphsonStoppingCriteria stops at ‖F‖₂ < sqrt(convEpsPerEq² · n) — so a batched SA
+    // can be run with the SAME stopping decision as the CPU loadflow for an apples-to-apples timing
+    // comparison. ‖F‖∞ is still recorded in res.norm[s] for reporting either way. n counts the padded
+    // system rows; for batched scenarios (no islanding — those go to the CPU) that equals OLF's active
+    // equation count, since disabled-branch rows keep the bus equations and identity pads contribute 0.
+    const double olf2NormThreshold;
 
     // A scenario's solve ended (converged, out of budget, diverged or rejected): its per-scenario Newton work, and the
     // work by what started the solve (OLF_GPU_PHASE_TIME).
-    auto endSolve = [&](int s) {
+    void endSolve(int s) {
         if (ctx->outerLoopSolvePasses[s] == 0) ctx->outerLoopFirstSolveIterations[s] = res.iters[s];
         ctx->outerLoopIterations[s] += res.iters[s];
         ctx->outerLoopSolvePasses[s]++;
@@ -150,23 +264,16 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                 gOuterLoopReSolveLaneIterations[trigger] += res.iters[s];
             }
         }
-    };
+    }
 
-    // Inner-Newton convergence test. Default (convEpsPerEq <= 0): the device infinity-norm floor
-    // ‖F‖∞ < tol (stricter than OLF's usual criterion). When convEpsPerEq > 0: OLF's EXACT criterion
-    // — DefaultNewtonRaphsonStoppingCriteria stops at ‖F‖₂ < sqrt(convEpsPerEq² · n) — so a batched SA
-    // can be run with the SAME stopping decision as the CPU loadflow for an apples-to-apples timing
-    // comparison. ‖F‖∞ is still recorded in res.norm[s] for reporting either way. n counts the padded
-    // system rows; for batched scenarios (no islanding — those go to the CPU) that equals OLF's active
-    // equation count, since disabled-branch rows keep the bus equations and identity pads contribute 0.
-    const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
-    auto norm2ThresholdOf = [&](int sIdx) {
-        return convEpsPerEq > 0.0 && !ctx->hNActive.empty()
-                ? std::sqrt(convEpsPerEq * convEpsPerEq * ctx->hNActive[sIdx]) : olf2NormThreshold;
-    };
+    double norm2ThresholdOf(int sIdx) const {
+        return convEpsPerEq > 0.0 && !ctx->newtonRaphson.hNActive.empty()
+                ? std::sqrt(convEpsPerEq * convEpsPerEq * ctx->newtonRaphson.hNActive[sIdx]) : olf2NormThreshold;
+    }
+
     // The test of one scenario after a fill, at its own iteration: its traces, and the end of its solve when it
     // converged, diverged or ran its budget out. Returns whether it left the Newton loop.
-    auto testScenario = [&](int s) -> bool {
+    bool testScenario(int s) {
         double norm = 0.0;
         double ssq = 0.0;
         bool finite = true;
@@ -189,7 +296,7 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         }
         // PER_EQUATION_TYPE (per-row thresholds set on the context): OLF's
         // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
-        bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
+        bool converged = ctx->newtonRaphson.perRowCriteria ? (finite && maxRatio < 1.0)
                 : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < norm2ThresholdOf(s)) : (norm < tol);
         static const char* sdEnv = traceValue(Trace::STATE_DUMP);
         if (sdEnv != nullptr && s == 0 && it[s] <= std::atoi(sdEnv) && n <= 64) {
@@ -214,8 +321,8 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             CUDA_CHECK(cudaMemcpy(hT.data(), ctx->dTarget.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hX.data(), ctx->dX.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hM.data(), ctx->dMode.as<int>() + (size_t) s * n, n * sizeof(int), cudaMemcpyDeviceToHost));
-            if (ctx->clampStep && ctx->dStepFactor.p) {
-                CUDA_CHECK(cudaMemcpy(&fac, ctx->dStepFactor.as<double>() + s, sizeof(double), cudaMemcpyDeviceToHost));
+            if (ctx->newtonRaphson.clampStep && ctx->newtonRaphson.dStepFactor.p) {
+                CUDA_CHECK(cudaMemcpy(&fac, ctx->newtonRaphson.dStepFactor.as<double>() + s, sizeof(double), cudaMemcpyDeviceToHost));
             }
             int wr = 0;
             for (int r = 1; r < n; r++) if (std::fabs(hFs[r]) > std::fabs(hFs[wr])) wr = r;
@@ -287,18 +394,20 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             return true;
         }
         return false;
-    };
-    auto ensureLinearResidualBuffers = [&]() {
-        if (!ctx->dLinRp.p) {
-            ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
-            ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
-            ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
-        }
-    };
+    }
 
-    for (int k = 0; nActive > 0; k++) {
-        // Every scenario's work is bounded (its outer-loop budget of solves, each within maxIter): one still solving after
-        // that many batched iterations since it was installed would never end. It goes to the CPU.
+    void ensureLinearResidualBuffers() {
+        if (!ctx->linearSolver.dLinRp.p) {
+            ctx->linearSolver.dLinRp.alloc((size_t) n * nS * sizeof(double));
+            ctx->linearSolver.dLinRm.alloc((size_t) n * nS * sizeof(double));
+            ctx->linearSolver.dLinSc.alloc((size_t) 3 * nS * sizeof(double));
+        }
+    }
+
+    // Every scenario's work is bounded (its outer-loop budget of solves, each within maxIter): one still solving after
+    // that many batched iterations since it was installed would never end. It goes to the CPU. Returns whether none is
+    // left.
+    bool capBatchedIterations(int k) {
         bool capped = false;
         for (int s = 0; s < nS; s++) {
             if (!active[s] || batchedIterations[s] <= drv.maxBatchedIterations) continue;
@@ -312,199 +421,163 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         }
         if (capped) {
             if (nActive == 0) {
-                break;
+                return true;
             }
             CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
         }
-        for (int s = 0; s < nS; s++) {
-            if (active[s] && (k > 0 || installed[s])) {
-                batchedIterations[s]++;
-            }
-        }
-        drv.outer = k;
-        gNewtonLoopIteration = k;
-        if (k > 0 || !resuming) {
-            gNewtonIters++;
-        }
-        bool atBudget = false;                               // a scenario is at its Newton budget
-        bool allAtBudget = true;                             // every scenario still solving is: the fill computes F only
-        for (int s = 0; s < nS; s++) {
-            if (!active[s]) continue;
-            if (it[s] == maxIter) {
-                atBudget = true;
-            } else {
-                allAtBudget = false;
-            }
-        }
-        if (deviceFixedIter) {
-            // Device fixed-iteration mode (tol <= 0): NO per-iteration host sync and NO retirement — every scenario
-            // runs exactly maxIter steps on the device; the mismatch is read back ONCE, on the final iteration, only to
-            // report ||F||inf. This drops the per-iteration D->H copy of the full batched mismatch. Tradeoff: a
-            // scenario going non-finite is not isolated, so it can poison a uniform-batched factorization — use
-            // tol > 0 if scenarios may diverge.
-            fillActiveBatch(ctx, drv, allAtBudget);
-            if (atBudget) {
-                CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
-                for (int s = 0; s < nS; s++) {
-                    if (active[s]) {
-                        testScenario(s);
-                        endSolve(s);
-                        active[s] = 0;                       // its solve has ended: the call hands it back
-                    }
-                }
-                nActive = 0;
-                break;                                       // final residual recorded; done
-            }
-        } else {
-            // ---- residual check + retirement: every iteration copies the batched mismatch norms to the host (the only
-            // thing crossing PCIe) and ends the solves that converged, diverged or ran their budget out. The test reads F
-            // alone: the Jacobian is filled once this iteration's restarts are known, for every scenario still solving
-            // (below). At iteration 0 no solve can end on convergence, so the first iteration needs no test fill. ----
-            if (k > 0) {
-                fillActiveBatch(ctx, drv, true);
-                // Device-side reduction: read back nS*4 norms, not the 70-MB mismatch.
-                readNormsBatch(ctx, drv, hNorms);
-                // ---- LINE_SEARCH backtrack (per scenario): the full step applied at it-1 may have
-                //      RAISED that scenario's ||F||2 — walk it back to x = xPrev + mu*dx with
-                //      mu = stepFold^-k until the 2-norm improves, mirroring
-                //      OLF's LineSearchStateVectorScaling. Judged on the 2-norm
-                //      (ssq, monotonic-equivalent); a non-finite mismatch backtracks too. Scenarios
-                //      not backtracking keep their state (mu sentinel -1 masks the step kernel). ----
-                if (lineSearch) {
-                    auto needsBt = [&](int s2) {
-                        return active[s2] && lineSearchHasLastTestResult[s2]
-                                && (hNorms[s2 * 4 + 2] == 0.0 || hNorms[s2 * 4 + 1] >= lineSearchLastSumOfSquares[s2]);
-                    };
-                    bool anyBt = false;
-                    for (int s2 = 0; s2 < nS; s2++) {
-                        if (needsBt(s2)) anyBt = true;
-                    }
-                    for (int b = 1; anyBt && b <= ctx->lineSearchStateVectorScalingMaxIteration; b++) {
-                        double mu = 1.0 / std::pow(ctx->lineSearchStateVectorScalingStepFold, b);
-                        for (int s2 = 0; s2 < nS; s2++) hMu[s2] = needsBt(s2) ? mu : -1.0;
-                        CUDA_CHECK(cudaMemcpyAsync(ctx->dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
-                        stepFromPrevBatchMasked<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS,
-                                ctx->dLineSearchPreviousX.as<double>(), ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
-                        fillActiveBatch(ctx, drv, false);              // full fill: J must sit at the accepted x (like the seq path)
-                        readNormsBatch(ctx, drv, hNorms);
-                        anyBt = false;
-                        for (int s2 = 0; s2 < nS; s2++) {
-                            if (needsBt(s2)) anyBt = true;
-                        }
-                    }
-                    for (int s2 = 0; s2 < nS; s2++) {
-                        if (active[s2]) {
-                            lineSearchLastSumOfSquares[s2] = hNorms[s2 * 4 + 1];
-                            lineSearchHasLastTestResult[s2] = 1;
-                        }
-                    }
-                }
-                // A solve about to report exhaustion: score its LAST linear solve. A wrong factorization sits at
-                // 1e5..1e13, a sound solve at 1e-9, so this separates "OLF's budget, spent moving" from "the step was
-                // junk" without the per-iteration cost of scoring every solve (measured: 34 s on a 19 s rte6515 run).
-                // The residual J.dx - B of that solve was kept right after it (see the solve below), while
-                // dVals/dDx/dB still held it; it is scored here against the mismatch of the budget's iteration.
-                if (atBudget) {
-                    ensureLinearResidualBuffers();
-                    linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
-                            ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
-                    std::vector<double> hsc((size_t) 3 * nS);
-                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                    CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
-                    for (int s2 = 0; s2 < nS; s2++) {
-                        if (active[s2] && it[s2] == maxIter) {
-                            lastSolveRatio[s2] = hsc[3 * s2 + 2];
-                        }
-                    }
-                }
-                bool anyChanged = false;
-                for (int s = 0; s < nS; s++) {
-                    if (active[s] && testScenario(s)) {
-                        anyChanged = true;
-                    }
-                }
-                if (anyChanged) {
-                    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
-                }
-                // ---- the outer loops of the scenarios whose solve just converged, in place ----
-                if (std::find(solveConverged.begin(), solveConverged.end(), 1) != solveConverged.end()) {
-                    checkSolvedScenarios(ctx, drv, sequence, solveConverged, restarted);
-                    std::fill(solveConverged.begin(), solveConverged.end(), 0);
-                    for (int s = 0; s < nS; s++) {
-                        if (restarted[s]) {
-                            it[s] = 0;
-                            gRestarts++;
-                            if (lineSearch) {
-                                lineSearchHasLastTestResult[s] = 0;
-                            }
-                        }
-                    }
-                    // counted again: a device loop may also have routed a scenario it did not check to the CPU
-                    nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
-                    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
-                }
-                // The caller refills the bank: once pauseAtEnded scenarios have ended, the call returns here, between this
-                // iteration's checks and its fill, with the others still solving; the next call installs new scenarios into
-                // the slots handed back and goes on from here.
-                if (drv.pauseAtEnded > 0 && nActive > 0 && ctx->slotState.ended() >= drv.pauseAtEnded) {
-                    return;
-                }
-            }
-            if (nActive == 0) {
-                break;
-            }
-            // The Jacobian and the mismatch of every scenario still solving: those going on, and those at their
-            // iteration 0 (all of them at the first iteration, then the ones a check restarted at their new targets and
-            // modes), whose test reads this fill. At iteration 0 only a non-finite mismatch can end a solve: OLF counts
-            // a step before testing it.
-            fillActiveBatch(ctx, drv, false);
-            bool anyAtZero = false;
-            for (int s = 0; s < nS; s++) {
-                anyAtZero = anyAtZero || (active[s] && it[s] == 0);
-            }
-            if (anyAtZero) {
-                readNormsBatch(ctx, drv, hNorms);
-                bool anyDiverged = false;
-                for (int s = 0; s < nS; s++) {
-                    if (!active[s] || it[s] != 0) continue;
-                    if (lineSearch) {
-                        lineSearchLastSumOfSquares[s] = hNorms[s * 4 + 1];
-                        lineSearchHasLastTestResult[s] = 1;
-                    }
-                    if (testScenario(s)) {
-                        anyDiverged = true;
-                    }
-                }
-                if (anyDiverged) {
-                    CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
-                    if (nActive == 0) {
-                        break;
-                    }
-                }
-            }
-        }
+        return false;
+    }
 
-        // Scenarios still being FACTORIZED this iteration. Summed over iterations this is the batch's
-        // real work measure: the CPU pays each contingency its own iteration count, so a batch is only
-        // as efficient as its retirement — a batch that keeps every scenario alive until the last
-        // straggler converges pays the WORST case for all of them.
-        gActiveIterSum += nActive;
-        // The linear-solve guard checks the second iteration of a scenario's first solve (below); the solve before a
-        // scenario's budget keeps its residual for the budget's test (the it == maxIter branch).
-        bool guardDue = false;
-        bool budgetResidualDue = false;
-        if (!deviceFixedIter) {
-            for (int s = 0; s < nS; s++) {
-                if (!active[s]) continue;
-                guardDue = guardDue || (solves[s] == 0 && it[s] == 1);
-                budgetResidualDue = budgetResidualDue || it[s] == maxIter - 1;
+    // Device fixed-iteration mode at its last iteration: the mismatch of every scenario read back once, for the report.
+    void finishFixedIterations() {
+        CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            if (active[s]) {
+                testScenario(s);
+                endSolve(s);
+                active[s] = 0;                       // its solve has ended: the call hands it back
             }
         }
-        if (lineSearch) {                                    // LINE_SEARCH: remember the pre-step iterates
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dLineSearchPreviousX.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
-                                       cudaMemcpyDeviceToDevice, ctx->stream));
+        nActive = 0;
+    }
+
+    // The test half of an iteration after a step: the norms, the LINE_SEARCH backtrack, the score of a solve that ran its
+    // budget out, the test of every scenario, and the outer loops of the solves that converged. Returns whether the call
+    // pauses here.
+    bool testAndCheck(bool atBudget) {
+        fillActiveBatch(ctx, drv, true);
+        // Device-side reduction: read back nS*4 norms, not the 70-MB mismatch.
+        readNormsBatch(ctx, drv, hNorms);
+        if (lineSearch) {
+            backtrackLineSearch();
         }
-        if (ctx->mode == GpuLinearSolveMode::UBATCH || ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        // A solve about to report exhaustion: score its LAST linear solve. A wrong factorization sits at
+        // 1e5..1e13, a sound solve at 1e-9, so this separates "OLF's budget, spent moving" from "the step was
+        // junk" without the per-iteration cost of scoring every solve (measured: 34 s on a 19 s rte6515 run).
+        // The residual J.dx - B of that solve was kept right after it (see the solve below), while
+        // dVals/dDx/dB still held it; it is scored here against the mismatch of the budget's iteration.
+        if (atBudget) {
+            scoreBudgetSolves();
+        }
+        bool anyChanged = false;
+        for (int s = 0; s < nS; s++) {
+            if (active[s] && testScenario(s)) {
+                anyChanged = true;
+            }
+        }
+        if (anyChanged) {
+            CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+        }
+        // ---- the outer loops of the scenarios whose solve just converged, in place ----
+        if (std::find(solveConverged.begin(), solveConverged.end(), 1) != solveConverged.end()) {
+            checkSolvedScenarios(ctx, drv, sequence, solveConverged, restarted);
+            std::fill(solveConverged.begin(), solveConverged.end(), 0);
+            for (int s = 0; s < nS; s++) {
+                if (restarted[s]) {
+                    it[s] = 0;
+                    gRestarts++;
+                    if (lineSearch) {
+                        lineSearchHasLastTestResult[s] = 0;
+                    }
+                }
+            }
+            // counted again: a device loop may also have routed a scenario it did not check to the CPU
+            nActive = static_cast<int>(std::count(active.begin(), active.end(), 1));
+            CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+        }
+        // The caller refills the bank: once pauseAtEnded scenarios have ended, the call returns here, between this
+        // iteration's checks and its fill, with the others still solving; the next call installs new scenarios into
+        // the slots handed back and goes on from here.
+        if (drv.pauseAtEnded > 0 && nActive > 0 && ctx->slotState.ended() >= drv.pauseAtEnded) {
+            return true;
+        }
+        return false;
+    }
+
+    // ---- LINE_SEARCH backtrack (per scenario): the full step applied at it-1 may have
+    //      RAISED that scenario's ||F||2 — walk it back to x = xPrev + mu*dx with
+    //      mu = stepFold^-k until the 2-norm improves, mirroring
+    //      OLF's LineSearchStateVectorScaling. Judged on the 2-norm
+    //      (ssq, monotonic-equivalent); a non-finite mismatch backtracks too. Scenarios
+    //      not backtracking keep their state (mu sentinel -1 masks the step kernel). ----
+    void backtrackLineSearch() {
+        auto needsBt = [&](int s2) {
+            return active[s2] && lineSearchHasLastTestResult[s2]
+                    && (hNorms[s2 * 4 + 2] == 0.0 || hNorms[s2 * 4 + 1] >= lineSearchLastSumOfSquares[s2]);
+        };
+        bool anyBt = false;
+        for (int s2 = 0; s2 < nS; s2++) {
+            if (needsBt(s2)) anyBt = true;
+        }
+        for (int b = 1; anyBt && b <= ctx->newtonRaphson.lineSearchStateVectorScalingMaxIteration; b++) {
+            double mu = 1.0 / std::pow(ctx->newtonRaphson.lineSearchStateVectorScalingStepFold, b);
+            for (int s2 = 0; s2 < nS; s2++) hMu[s2] = needsBt(s2) ? mu : -1.0;
+            CUDA_CHECK(cudaMemcpyAsync(ctx->newtonRaphson.dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+            stepFromPrevBatchMasked<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS,
+                    ctx->newtonRaphson.dLineSearchPreviousX.as<double>(), ctx->dDx.as<double>(), ctx->newtonRaphson.dStepFactor.as<double>(), ctx->dX.as<double>());
+            fillActiveBatch(ctx, drv, false);              // full fill: J must sit at the accepted x (like the seq path)
+            readNormsBatch(ctx, drv, hNorms);
+            anyBt = false;
+            for (int s2 = 0; s2 < nS; s2++) {
+                if (needsBt(s2)) anyBt = true;
+            }
+        }
+        for (int s2 = 0; s2 < nS; s2++) {
+            if (active[s2]) {
+                lineSearchLastSumOfSquares[s2] = hNorms[s2 * 4 + 1];
+                lineSearchHasLastTestResult[s2] = 1;
+            }
+        }
+    }
+
+    void scoreBudgetSolves() {
+        ensureLinearResidualBuffers();
+        linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->linearSolver.dLinRp.as<double>(),
+                ctx->linearSolver.dLinRm.as<double>(), ctx->dF.as<double>(), ctx->linearSolver.dLinSc.as<double>());
+        std::vector<double> hsc((size_t) 3 * nS);
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->linearSolver.dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+        for (int s2 = 0; s2 < nS; s2++) {
+            if (active[s2] && it[s2] == maxIter) {
+                lastSolveRatio[s2] = hsc[3 * s2 + 2];
+            }
+        }
+    }
+
+    // The test of the scenarios at their iteration 0 (all of them at the first iteration, then those a check restarted):
+    // only a non-finite mismatch can end a solve there. Returns whether none is left.
+    bool testRestartedSolves() {
+        bool anyAtZero = false;
+        for (int s = 0; s < nS; s++) {
+            anyAtZero = anyAtZero || (active[s] && it[s] == 0);
+        }
+        if (!anyAtZero) {
+            return false;
+        }
+        readNormsBatch(ctx, drv, hNorms);
+        bool anyDiverged = false;
+        for (int s = 0; s < nS; s++) {
+            if (!active[s] || it[s] != 0) continue;
+            if (lineSearch) {
+                lineSearchLastSumOfSquares[s] = hNorms[s * 4 + 1];
+                lineSearchHasLastTestResult[s] = 1;
+            }
+            if (testScenario(s)) {
+                anyDiverged = true;
+            }
+        }
+        if (anyDiverged) {
+            CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
+            if (nActive == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // UBATCH and BATCHED_LU: the identity systems of the scenarios not solving, the right-hand side, one batched linear
+    // solve, the linear-solve guard and the step.
+    void solveUniformBatch(int k, bool guardDue, bool budgetResidualDue) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
         //      via CUDSS_CONFIG_UBATCH_SIZE on the single per-block matrix, FACTORIZED every iteration
         //      (honest Newton). Our batched LU (BATCHED_LU mode) factorizes the active scenarios only; the inactive ones
@@ -515,138 +588,11 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
         markIdentityLanes<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, ctx->dActive.as<char>(), ctx->dIdentityLane.as<char>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         repairZeroDiagonalRightHandSide(ctx, nS, ctx->dB.as<double>());
-        if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+        if (ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
             batchedLuNewtonSolve(ctx, drv, k);
         } else {
-        if (!ctx->analyzed) {
-            bool timeIt = traceOn(Trace::TRACE);
-            long long t0 = 0;
-            if (timeIt) {
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
-            }
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
-            double ms = -1.0;
-            if (timeIt) {
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                ms = (std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count() - t0) / 1.0e6;
-            }
-            traceLuNnz(ctx->solver.handle, ctx->solver.data, "ubatch", ctx->nScenarios, ms);
-            ctx->analyzed = true;
+            solveCudss();
         }
-        // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
-        // host-side phase overhead vs separate FACTORIZATION + SOLVE calls.
-        int ubPhase = CUDSS_PHASE_SOLVE | CUDSS_PHASE_FACTORIZATION;
-        // ---- solve-only COMPACTION: when few scenarios remain active, gather their vals/B into
-        //      compact buffers and solve a NARROWER ubatch on the dedicated dsCompacted context, then
-        //      scatter dx back. UBATCH only (factorizes every iteration — stateless across width
-        //      changes); width quantized to power-of-2 tiers so the cheap single-block re-ANALYSIS
-        //      runs only on tier change. Pad slots duplicate the first active scenario (keeps the
-        //      batch non-singular) and are discarded by the scatter. dDx is zeroed first so
-        //      inactive scenarios' frozen states are not perturbed by stale solutions (the
-        //      full-width update kernel adds dx over ALL scenarios). ----
-        // Compact once at most half of the chunk is active. Above it every iteration factorizes the full width, padded
-        // lanes included (network.xiidm: 278,144 lane-iterations for 234,088 useful). Compact widths are powers of
-        // two, so a tier change re-analyzes rarely.
-        constexpr double COMPACT_FRAC = 0.5;
-        const int compactLimit = std::max(1, std::min(nS, static_cast<int>(COMPACT_FRAC * nS)));
-        bool compactSolve = !deviceFixedIter && ctx->mode == GpuLinearSolveMode::UBATCH && nActive > 0 && nActive <= compactLimit
-                && nActive < nS;
-        if (!compactSolve) {
-            gWidthIterSum += nS;                             // full-width factorization this iteration
-        }
-        if (compactSolve) {
-            ensureCompactedSolver(ctx, n, nnz, compactLimit);
-            std::vector<int> cmap;
-            cmap.reserve(ctx->compactedCapacity);
-            for (int cs = 0; cs < nS; cs++) {
-                if (active[cs]) {
-                    cmap.push_back(cs);
-                }
-            }
-            int nReal = static_cast<int>(cmap.size());
-            int w = 1;
-            while (w < nReal) {
-                w <<= 1;
-            }
-            if (w > ctx->compactedCapacity) {
-                w = ctx->compactedCapacity;
-            }
-            while (static_cast<int>(cmap.size()) < w) {
-                cmap.push_back(cmap[0]);
-            }
-            gWidthIterSum += w;                              // compacted width actually factorized
-            gCompactIters++;
-            CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
-            gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
-            gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dB.as<double>(), ctx->dBCompacted.as<double>());
-            cudssData_t compactData = compactedDataForWidth(ctx, w);
-            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchSolutionMatrix, ctx->compactedUniformBatchRightHandSideMatrix)); }
-            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dRCompacted.p != nullptr && ctx->dIterativeRefinementScore.p != nullptr && ctx->dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
-                // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
-                refineLanes(ctx, w, n, nnz, ctx->dValsCompacted.as<double>(), ctx->dDxCompacted.as<double>(), ctx->dBCompacted.as<double>(),
-                        ctx->dRCompacted.as<double>(), ctx->dDeltaCompacted.as<double>(), nullptr, configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
-                    AnalysisTimer at_(__LINE__, 'S');
-                    CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, compactData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix));
-                });
-            }
-            CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
-            scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDxCompacted.as<double>(), ctx->dDx.as<double>());
-        } else {
-            gFullFactorizations++;
-            { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, ubPhase, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
-            if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->dR.p != nullptr && ctx->uniformBatchResidualMatrix != nullptr && ctx->dIterativeRefinementScore.p != nullptr) {
-                // adaptive refinement on the full-width UBATCH solve (see refineLanes). A uniform-batch solve runs every
-                // lane of its batch, so the lanes that need refinement go to the compacted solver when that is narrower:
-                // gathered and factorized there once, then solved at that width. A full-width refinement solve cost
-                // about 280 ms on network.xiidm, a compacted one 65 ms.
-                std::vector<int> refineMap;
-                int refineReal = 0;
-                cudssData_t refineData = nullptr;
-                refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
-                        ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
-                    AnalysisTimer at_(__LINE__, 'S');
-                    CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_SOLVE, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchDeltaMatrix, ctx->uniformBatchResidualMatrix));
-                }, [&](const std::vector<char>& lane, int nLane) {
-                    if (refineData == nullptr) {
-                        int w = 1;
-                        while (w < nLane) {
-                            w <<= 1;
-                        }
-                        if (nLane > compactLimit || w >= nS) {
-                            return false;                    // no narrower than the full width
-                        }
-                        ensureCompactedSolver(ctx, n, nnz, compactLimit);
-                        if (w > ctx->compactedCapacity) {
-                            return false;
-                        }
-                        for (int cs = 0; cs < nS; cs++) {
-                            if (lane[cs]) {
-                                refineMap.push_back(cs);
-                            }
-                        }
-                        refineReal = static_cast<int>(refineMap.size());
-                        while (static_cast<int>(refineMap.size()) < w) {
-                            refineMap.push_back(refineMap[0]);
-                        }
-                        CUDA_CHECK(cudaMemcpyAsync(ctx->dCompactedScenarioMap.p, refineMap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
-                        gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->dValsCompacted.as<double>());
-                        refineData = compactedDataForWidth(ctx, w);
-                        gRefinementFactorizations++;
-                        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_FACTORIZATION, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
-                    }
-                    int w = static_cast<int>(refineMap.size());       // the lanes factorized first: a superset of those left
-                    gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dCompactedScenarioMap.as<int>(), ctx->dR.as<double>(), ctx->dRCompacted.as<double>());
-                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->compactedSolver.config, refineData, ctx->compactedUniformBatchSystemMatrix, ctx->compactedUniformBatchDeltaMatrix, ctx->compactedUniformBatchResidualMatrix)); }
-                    scatterScenarios<<<grid(n * refineReal), BLOCK, 0, ctx->stream>>>(n, refineReal, ctx->dCompactedScenarioMap.as<int>(), ctx->dDeltaCompacted.as<double>(), ctx->dDelta.as<double>());
-                    return true;
-                });
-            }
-        }
-        }   // cuDSS
         // LINEAR-SOLVE GUARD, second iteration of every scenario's first solve: a
         // factorization the UNPIVOTED uniform batch got wrong shows as a linear residual ratio of
         // 1e6..1e13 (rte6515's full busbar scope, 366 retained couplers: min pivots of 1e-18 under
@@ -667,14 +613,14 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             ensureLinearResidualBuffers();
             launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                     ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+                    ctx->dB.as<double>(), ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>());
         }
         if (guardDue) {
-            linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>(),
-                    ctx->dF.as<double>(), ctx->dLinSc.as<double>());
+            linResidScoreBatch<<<nS, LANE_NORM_BLOCK, 0, ctx->stream>>>(n, nS, ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>(),
+                    ctx->dF.as<double>(), ctx->linearSolver.dLinSc.as<double>());
             std::vector<double> hsc((size_t) 3 * nS);
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-            CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->linearSolver.dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
             for (int s = 0; s < nS; s++) {
                 if (!active[s] || solves[s] != 0 || it[s] != 1) continue;
                 double ratio = hsc[3 * s + 2];
@@ -704,15 +650,158 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
                 }
             }
         }
-        if (ctx->clampStep) {
-            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
-            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+        if (ctx->newtonRaphson.clampStep) {
+            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->newtonRaphson.dVarType.as<int>(), ctx->dActive.as<char>(), ctx->newtonRaphson.maxDv, ctx->newtonRaphson.maxDphi, ctx->newtonRaphson.dStepFactor.as<double>());
+            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->newtonRaphson.dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
+    }
+
+    // UBATCH on cuDSS: ANALYZE once, then a factorization and a solve over every scenario, or over the ones still solving
+    // gathered into a narrower batch, with its adaptive refinement.
+    void solveCudss() {
+        if (!ctx->linearSolver.analyzed) {
+            bool timeIt = traceOn(Trace::TRACE);
+            long long t0 = 0;
+            if (timeIt) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+            }
+            gAnalysesMain++;
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
+            double ms = -1.0;
+            if (timeIt) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                ms = (std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count() - t0) / 1.0e6;
+            }
+            traceLuNnz(ctx->linearSolver.solver.handle, ctx->linearSolver.solver.data, "ubatch", ctx->nScenarios, ms);
+            ctx->linearSolver.analyzed = true;
+        }
+        // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
+        // host-side phase overhead vs separate FACTORIZATION + SOLVE calls.
+        int ubPhase = CUDSS_PHASE_SOLVE | CUDSS_PHASE_FACTORIZATION;
+        // ---- solve-only COMPACTION: when few scenarios remain active, gather their vals/B into
+        //      compact buffers and solve a NARROWER ubatch on the dedicated dsCompacted context, then
+        //      scatter dx back. UBATCH only (factorizes every iteration — stateless across width
+        //      changes); width quantized to power-of-2 tiers so the cheap single-block re-ANALYSIS
+        //      runs only on tier change. Pad slots duplicate the first active scenario (keeps the
+        //      batch non-singular) and are discarded by the scatter. dDx is zeroed first so
+        //      inactive scenarios' frozen states are not perturbed by stale solutions (the
+        //      full-width update kernel adds dx over ALL scenarios). ----
+        // Compact once at most half of the chunk is active. Above it every iteration factorizes the full width, padded
+        // lanes included (network.xiidm: 278,144 lane-iterations for 234,088 useful). Compact widths are powers of
+        // two, so a tier change re-analyzes rarely.
+        constexpr double COMPACT_FRAC = 0.5;
+        const int compactLimit = std::max(1, std::min(nS, static_cast<int>(COMPACT_FRAC * nS)));
+        bool compactSolve = !deviceFixedIter && ctx->linearSolver.mode == GpuLinearSolveMode::UBATCH && nActive > 0 && nActive <= compactLimit
+                && nActive < nS;
+        if (!compactSolve) {
+            gWidthIterSum += nS;                             // full-width factorization this iteration
+        }
+        if (compactSolve) {
+            solveCompacted(compactLimit);
         } else {
-        // ---- fallback: analyze once (shared pattern), refactorize + solve per scenario ----
+            solveFullWidth(compactLimit, ubPhase);
+        }
+    }
+
+    void solveCompacted(int compactLimit) {
+        ensureCompactedSolver(ctx, n, nnz, compactLimit);
+        std::vector<int> cmap;
+        cmap.reserve(ctx->linearSolver.compactedCapacity);
+        for (int cs = 0; cs < nS; cs++) {
+            if (active[cs]) {
+                cmap.push_back(cs);
+            }
+        }
+        int nReal = static_cast<int>(cmap.size());
+        int w = 1;
+        while (w < nReal) {
+            w <<= 1;
+        }
+        if (w > ctx->linearSolver.compactedCapacity) {
+            w = ctx->linearSolver.compactedCapacity;
+        }
+        while (static_cast<int>(cmap.size()) < w) {
+            cmap.push_back(cmap[0]);
+        }
+        gWidthIterSum += w;                              // compacted width actually factorized
+        gCompactIters++;
+        CUDA_CHECK(cudaMemcpyAsync(ctx->linearSolver.dCompactedScenarioMap.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+        gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->linearSolver.dValsCompacted.as<double>());
+        gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dB.as<double>(), ctx->linearSolver.dBCompacted.as<double>());
+        cudssData_t compactData = compactedDataForWidth(ctx, w);
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, compactData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchSolutionMatrix, ctx->linearSolver.compactedUniformBatchRightHandSideMatrix)); }
+        if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->linearSolver.dRCompacted.p != nullptr && ctx->linearSolver.dIterativeRefinementScore.p != nullptr && ctx->linearSolver.dIterativeRefinementScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+            // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
+            refineLanes(ctx, w, n, nnz, ctx->linearSolver.dValsCompacted.as<double>(), ctx->linearSolver.dDxCompacted.as<double>(), ctx->linearSolver.dBCompacted.as<double>(),
+                    ctx->linearSolver.dRCompacted.as<double>(), ctx->linearSolver.dDeltaCompacted.as<double>(), nullptr, configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
+                AnalysisTimer at_(__LINE__, 'S');
+                CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, compactData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix));
+            });
+        }
+        CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
+        scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dDxCompacted.as<double>(), ctx->dDx.as<double>());
+    }
+
+    void solveFullWidth(int compactLimit, int ubPhase) {
+        gFullFactorizations++;
+        { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, ubPhase, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
+        if (ctx->structure->nZeroImpedanceBranch > 0 && ctx->linearSolver.dR.p != nullptr && ctx->linearSolver.uniformBatchResidualMatrix != nullptr && ctx->linearSolver.dIterativeRefinementScore.p != nullptr) {
+            // adaptive refinement on the full-width UBATCH solve (see refineLanes). A uniform-batch solve runs every
+            // lane of its batch, so the lanes that need refinement go to the compacted solver when that is narrower:
+            // gathered and factorized there once, then solved at that width. A full-width refinement solve cost
+            // about 280 ms on network.xiidm, a compacted one 65 ms.
+            std::vector<int> refineMap;
+            int refineReal = 0;
+            cudssData_t refineData = nullptr;
+            refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
+                    ctx->linearSolver.dR.as<double>(), ctx->linearSolver.dDelta.as<double>(), ctx->dActive.as<char>(), configuredIterativeRefinementBaseSteps(), [&](const std::vector<char>&, const char*) {
+                AnalysisTimer at_(__LINE__, 'S');
+                CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchDeltaMatrix, ctx->linearSolver.uniformBatchResidualMatrix));
+            }, [&](const std::vector<char>& lane, int nLane) {
+                if (refineData == nullptr) {
+                    int w = 1;
+                    while (w < nLane) {
+                        w <<= 1;
+                    }
+                    if (nLane > compactLimit || w >= nS) {
+                        return false;                    // no narrower than the full width
+                    }
+                    ensureCompactedSolver(ctx, n, nnz, compactLimit);
+                    if (w > ctx->linearSolver.compactedCapacity) {
+                        return false;
+                    }
+                    for (int cs = 0; cs < nS; cs++) {
+                        if (lane[cs]) {
+                            refineMap.push_back(cs);
+                        }
+                    }
+                    refineReal = static_cast<int>(refineMap.size());
+                    while (static_cast<int>(refineMap.size()) < w) {
+                        refineMap.push_back(refineMap[0]);
+                    }
+                    CUDA_CHECK(cudaMemcpyAsync(ctx->linearSolver.dCompactedScenarioMap.p, refineMap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+                    gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->dVals.as<double>(), ctx->linearSolver.dValsCompacted.as<double>());
+                    refineData = compactedDataForWidth(ctx, w);
+                    gRefinementFactorizations++;
+                    { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_FACTORIZATION, ctx->linearSolver.compactedSolver.config, refineData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix)); }
+                }
+                int w = static_cast<int>(refineMap.size());       // the lanes factorized first: a superset of those left
+                gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dR.as<double>(), ctx->linearSolver.dRCompacted.as<double>());
+                { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.compactedSolver.handle, CUDSS_PHASE_SOLVE, ctx->linearSolver.compactedSolver.config, refineData, ctx->linearSolver.compactedUniformBatchSystemMatrix, ctx->linearSolver.compactedUniformBatchDeltaMatrix, ctx->linearSolver.compactedUniformBatchResidualMatrix)); }
+                scatterScenarios<<<grid(n * refineReal), BLOCK, 0, ctx->stream>>>(n, refineReal, ctx->linearSolver.dCompactedScenarioMap.as<int>(), ctx->linearSolver.dDeltaCompacted.as<double>(), ctx->linearSolver.dDelta.as<double>());
+                return true;
+            });
+        }
+    }
+
+    // The fallback: analyze once (shared pattern), refactorize + solve per scenario.
+    void solvePerScenario(bool budgetResidualDue) {
         for (int s = 0; s < nS; s++) {
             if (!active[s]) continue;
             double* valsS = ctx->dVals.as<double>() + (size_t) s * nnz;
@@ -721,25 +810,25 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             double* fS = ctx->dF.as<double>() + (size_t) s * n;
             negateIntoOne<<<grid(n), BLOCK, 0, ctx->stream>>>(n, fS, bS);
             repairZeroDiagonalRightHandSide(ctx, 1, bS, s);
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.systemMatrix, valsS));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.rightHandSideMatrix, bS));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.solutionMatrix, dxS));
-            if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.systemMatrix, valsS));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.rightHandSideMatrix, bS));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.solutionMatrix, dxS));
+            if (!ctx->linearSolver.analyzed) {
                 gAnalysesMain++;
-                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
-                traceLuNnz(ctx->solver.handle, ctx->solver.data, "per-scenario", ctx->nScenarios);
-                ctx->analyzed = true;
+                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
+                traceLuNnz(ctx->linearSolver.solver.handle, ctx->linearSolver.solver.data, "per-scenario", ctx->nScenarios);
+                ctx->linearSolver.analyzed = true;
             }
             gRobustFactorizations++;
-            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                    ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
+            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
-            if (ctx->clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
+            if (ctx->newtonRaphson.clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
                 // unclamped, the robust mode took full Newton steps and its base load flow on network.xiidm's
                 // busbar scope settled 0.32 kV away from OLF's
-                maxVoltageChangeFactorBatch<<<1, BLOCK, 0, ctx->stream>>>(n, dxS, ctx->dVarType.as<int>(), nullptr,
-                        ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>() + s);
-                axpy1BatchScaled<<<grid(n), BLOCK, 0, ctx->stream>>>(n, n, dxS, ctx->dStepFactor.as<double>() + s, xS);
+                maxVoltageChangeFactorBatch<<<1, BLOCK, 0, ctx->stream>>>(n, dxS, ctx->newtonRaphson.dVarType.as<int>(), nullptr,
+                        ctx->newtonRaphson.maxDv, ctx->newtonRaphson.maxDphi, ctx->newtonRaphson.dStepFactor.as<double>() + s);
+                axpy1BatchScaled<<<grid(n), BLOCK, 0, ctx->stream>>>(n, n, dxS, ctx->newtonRaphson.dStepFactor.as<double>() + s, xS);
             } else {
                 axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
             }
@@ -748,16 +837,21 @@ void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& se
             ensureLinearResidualBuffers();
             launchLinResidRows(ctx->stream, n, nS, nnz, ctx->structure->dRowPtr.as<int>(),
                     ctx->structure->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->layout, ctx->dDx.as<double>(),
-                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+                    ctx->dB.as<double>(), ctx->linearSolver.dLinRp.as<double>(), ctx->linearSolver.dLinRm.as<double>());
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
-        }
-        for (int s = 0; s < nS; s++) {
-            if (active[s]) {
-                it[s]++;
-            }
-        }
-    }   // ---- end of the batched Newton loop ----
+    }
+};
+
+}  // namespace
+
+// The inner Newton-Raphson (OLF NewtonRaphson.run) of every scenario of the batch, each at its own iteration, with its
+// outer loops run in place (outer_loop_sequence.cuh): a scenario whose solve converges is checked at once along its own
+// loops, and one an UNSTABLE check makes re-solve restarts its Newton at its new targets and modes in the same batched
+// iteration, while the others go on with theirs. One batched factorization serves every scenario still solving,
+// whatever solve it is in: fill, factorize, solve, refine, scale and update until no scenario solves.
+void newtonSolve(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSequence& sequence) {
+    BatchedNewton(ctx, drv, sequence).run();
 }
 
 }  // namespace olfgpu

@@ -23,7 +23,7 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchIncrementalTr
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nIncrementalTransformerVoltageControlControllerBranches = 0;
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches = 0;
     if (jRhoRow == nullptr || env->GetArrayLength(jRhoRow) == 0) {
         return 0;
     }
@@ -39,35 +39,35 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchIncrementalTr
     readI(jGroupControllerStart, groupControllerStart);                              // shared controlled buses run in-kernel too
     std::vector<int> vRow, groupController;
     std::vector<double> targetV, halfTargetDeadband;
-    readI(jRhoRow, ctx->hIncrementalTransformerVoltageControlRhoRow);
+    readI(jRhoRow, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow);
     readI(jVRow, vRow);
     readD(jTargetV, targetV);
     readD(jHalfTargetDeadband, halfTargetDeadband);
-    readI(jControllerElement, ctx->hIncrementalTransformerVoltageControlElement);
-    readI(jTapStart, ctx->hIncrementalTransformerVoltageControlTapStart);
-    readD(jTapRows, ctx->hIncrementalTransformerVoltageControlTapRows);
-    readI(jBaseTap, ctx->hIncrementalTransformerVoltageControlBaseTap);
+    readI(jControllerElement, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement);
+    readI(jTapStart, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart);
+    readD(jTapRows, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows);
+    readI(jBaseTap, ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap);
     readI(jGroupController, groupController);
-    int nc = static_cast<int>(ctx->hIncrementalTransformerVoltageControlRhoRow.size());
-    ctx->dIncrementalTransformerVoltageControlRhoRow.upload(ctx->hIncrementalTransformerVoltageControlRhoRow.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlElement.upload(ctx->hIncrementalTransformerVoltageControlElement.data(), nc * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTapStart.upload(ctx->hIncrementalTransformerVoltageControlTapStart.data(), ctx->hIncrementalTransformerVoltageControlTapStart.size() * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlTapRows.upload(ctx->hIncrementalTransformerVoltageControlTapRows.data(), ctx->hIncrementalTransformerVoltageControlTapRows.size() * sizeof(double));
-    ctx->dIncrementalTransformerVoltageControlBaseTap.upload(ctx->hIncrementalTransformerVoltageControlBaseTap.data(), nc * sizeof(int));
-    ctx->nIncrementalTransformerVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
-    ctx->dIncrementalTransformerVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
-    ctx->incrementalTransformerVoltageControlMaxTapShift = maxTapShift > 0 ? maxTapShift : 1;
+    int nc = static_cast<int>(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow.size());
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlRhoRow.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlRhoRow.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlControlledBusVRow.upload(vRow.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTargetV.upload(targetV.data(), nc * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlHalfTargetDeadband.upload(halfTargetDeadband.data(), nc * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlElement.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlElement.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapStart.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart.data(), ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapStart.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlTapRows.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows.data(), ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlTapRows.size() * sizeof(double));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlBaseTap.upload(ctx->incrementalTransformerVoltageControl.hIncrementalTransformerVoltageControlBaseTap.data(), nc * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlGroups = static_cast<int>(groupControllerStart.size()) - 1;
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupControllerStart.upload(groupControllerStart.data(), groupControllerStart.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlGroupController.upload(groupController.data(), groupController.size() * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.incrementalTransformerVoltageControlMaxTapShift = maxTapShift > 0 ? maxTapShift : 1;
     size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
-    ctx->dIncrementalTransformerVoltageControlCurrentTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlCurrentDirection.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlDirectionChangeCount.ensure(nst * sizeof(int));
-    ctx->dIncrementalTransformerVoltageControlAllowedDirection.ensure(nst * sizeof(int));
-    ctx->nIncrementalTransformerVoltageControlControllerBranches = nc;
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAppliedTap.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentDirection.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlDirectionChangeCount.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlAllowedDirection.ensure(nst * sizeof(int));
+    ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches = nc;
     return 1;
 }
 
@@ -75,12 +75,12 @@ extern "C" JNIEXPORT jintArray JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchIncrementalTransformerVoltageControlTaps)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->dIncrementalTransformerVoltageControlCurrentTap.p) {
+    if (ctx == nullptr || ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches <= 0 || !ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.p) {
         return nullptr;
     }
     std::vector<int> host;
-    readInstalledRows(ctx, ctx->dIncrementalTransformerVoltageControlCurrentTap.p,
-                      static_cast<size_t>(ctx->nIncrementalTransformerVoltageControlControllerBranches), host);
+    readInstalledRows(ctx, ctx->incrementalTransformerVoltageControl.dIncrementalTransformerVoltageControlCurrentTap.p,
+                      static_cast<size_t>(ctx->incrementalTransformerVoltageControl.nIncrementalTransformerVoltageControlControllerBranches), host);
     jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
@@ -104,11 +104,11 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVo
     if (ctx == nullptr) {
         return 0;
     }
-    ctx->nTransformerVoltageControlMembers = 0;
-    ctx->nGeneratorVoltageControlFreezeCandidates = 0;
-    ctx->transformerVoltageControlFixMinMask.clear();
-    ctx->transformerVoltageControlFixMaxMask.clear();
-    ctx->transformerVoltageControlFixWords = 0;
+    ctx->transformerVoltageControl.nTransformerVoltageControlMembers = 0;
+    ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates = 0;
+    ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.clear();
+    ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.clear();
+    ctx->transformerVoltageControl.transformerVoltageControlFixWords = 0;
     if (jMemberRhoRow == nullptr || env->GetArrayLength(jMemberRhoRow) == 0) {
         return 0;
     }
@@ -134,56 +134,56 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVo
     readD(jDeltaTargetOn, deltaTargetOn);
     readD(jDeltaTargetOff, deltaTargetOff);
     readI(jMemberRhoRow, memberRhoRow);
-    readI(jMemberElement, ctx->hTransformerVoltageControlMemberElement);
-    readI(jMemberBaseTap, ctx->hTransformerVoltageControlMemberBaseTap);
-    readI(jMemberTapStart, ctx->hTransformerVoltageControlMemberTapStart);
+    readI(jMemberElement, ctx->transformerVoltageControl.hTransformerVoltageControlMemberElement);
+    readI(jMemberBaseTap, ctx->transformerVoltageControl.hTransformerVoltageControlMemberBaseTap);
+    readI(jMemberTapStart, ctx->transformerVoltageControl.hTransformerVoltageControlMemberTapStart);
     readD(jMemberMinR1, memberMinR1);
     readD(jMemberMaxR1, memberMaxR1);
     readD(jMemberInitialR1, memberInitialR1);
-    readD(jTapRows, ctx->hTransformerVoltageControlTapRows);
+    readD(jTapRows, ctx->transformerVoltageControl.hTransformerVoltageControlTapRows);
     int nM = static_cast<int>(memberRhoRow.size());
     int nG = static_cast<int>(groupMemberStart.size()) - 1;
     int nD = static_cast<int>(deltaRow.size());
     for (int m = 0; m < nM; m++) {
-        if (ctx->hTransformerVoltageControlMemberTapStart[m + 1] - ctx->hTransformerVoltageControlMemberTapStart[m] <= 0) {
+        if (ctx->transformerVoltageControl.hTransformerVoltageControlMemberTapStart[m + 1] - ctx->transformerVoltageControl.hTransformerVoltageControlMemberTapStart[m] <= 0) {
             return 0;                                        // no tap table: the host orchestrator keeps the control
         }
     }
-    ctx->dTransformerVoltageControlGroupMemberStart.upload(groupMemberStart.data(), groupMemberStart.size() * sizeof(int));
-    ctx->dTransformerVoltageControlGroupControlledBusVRow.upload(groupControlledBusVRow.data(), nG * sizeof(int));
-    ctx->dTransformerVoltageControlGroupTargetV.upload(groupTargetV.data(), nG * sizeof(double));
-    ctx->dTransformerVoltageControlGroupHalfTargetDeadband.upload(groupHalfTargetDeadband.data(), nG * sizeof(double));
-    ctx->dTransformerVoltageControlGroupUseInitialTapPosition.upload(groupUseInitialTapPosition.data(), nG * sizeof(int));
-    ctx->dTransformerVoltageControlDeltaStart.upload(deltaStart.data(), deltaStart.size() * sizeof(int));
-    ctx->dTransformerVoltageControlDeltaRow.upload(deltaRow.data(), std::max(nD, 1) * sizeof(int));
-    ctx->dTransformerVoltageControlDeltaModeOn.upload(deltaModeOn.data(), std::max(nD, 1) * sizeof(int));
-    ctx->dTransformerVoltageControlDeltaModeOff.upload(deltaModeOff.data(), std::max(nD, 1) * sizeof(int));
-    ctx->dTransformerVoltageControlDeltaTargetOn.upload(deltaTargetOn.data(), std::max(nD, 1) * sizeof(double));
-    ctx->dTransformerVoltageControlDeltaTargetOff.upload(deltaTargetOff.data(), std::max(nD, 1) * sizeof(double));
-    ctx->dTransformerVoltageControlMemberRhoRow.upload(memberRhoRow.data(), nM * sizeof(int));
-    ctx->dTransformerVoltageControlMemberElement.upload(ctx->hTransformerVoltageControlMemberElement.data(), nM * sizeof(int));
-    ctx->dTransformerVoltageControlMemberBaseTap.upload(ctx->hTransformerVoltageControlMemberBaseTap.data(), nM * sizeof(int));
-    ctx->dTransformerVoltageControlMemberTapStart.upload(ctx->hTransformerVoltageControlMemberTapStart.data(), ctx->hTransformerVoltageControlMemberTapStart.size() * sizeof(int));
-    ctx->dTransformerVoltageControlMemberMinR1.upload(memberMinR1.data(), nM * sizeof(double));
-    ctx->dTransformerVoltageControlMemberMaxR1.upload(memberMaxR1.data(), nM * sizeof(double));
-    ctx->dTransformerVoltageControlMemberInitialR1.upload(memberInitialR1.data(), nM * sizeof(double));
-    ctx->dTransformerVoltageControlTapRows.upload(ctx->hTransformerVoltageControlTapRows.data(), ctx->hTransformerVoltageControlTapRows.size() * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupMemberStart.upload(groupMemberStart.data(), groupMemberStart.size() * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupControlledBusVRow.upload(groupControlledBusVRow.data(), nG * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupTargetV.upload(groupTargetV.data(), nG * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupHalfTargetDeadband.upload(groupHalfTargetDeadband.data(), nG * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupUseInitialTapPosition.upload(groupUseInitialTapPosition.data(), nG * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaStart.upload(deltaStart.data(), deltaStart.size() * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaRow.upload(deltaRow.data(), std::max(nD, 1) * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaModeOn.upload(deltaModeOn.data(), std::max(nD, 1) * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaModeOff.upload(deltaModeOff.data(), std::max(nD, 1) * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaTargetOn.upload(deltaTargetOn.data(), std::max(nD, 1) * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlDeltaTargetOff.upload(deltaTargetOff.data(), std::max(nD, 1) * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberRhoRow.upload(memberRhoRow.data(), nM * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberElement.upload(ctx->transformerVoltageControl.hTransformerVoltageControlMemberElement.data(), nM * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberBaseTap.upload(ctx->transformerVoltageControl.hTransformerVoltageControlMemberBaseTap.data(), nM * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberTapStart.upload(ctx->transformerVoltageControl.hTransformerVoltageControlMemberTapStart.data(), ctx->transformerVoltageControl.hTransformerVoltageControlMemberTapStart.size() * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberMinR1.upload(memberMinR1.data(), nM * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberMaxR1.upload(memberMaxR1.data(), nM * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberInitialR1.upload(memberInitialR1.data(), nM * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlTapRows.upload(ctx->transformerVoltageControl.hTransformerVoltageControlTapRows.data(), ctx->transformerVoltageControl.hTransformerVoltageControlTapRows.size() * sizeof(double));
     size_t nS = ctx->nScenarios;
-    ctx->dTransformerVoltageControlStep.ensure(nS * sizeof(int));
-    ctx->dTransformerVoltageControlGroupStep.ensure(nS * nG * sizeof(int));
-    ctx->dTransformerVoltageControlGroupSharedMinR1.ensure(nS * nG * sizeof(double));
-    ctx->dTransformerVoltageControlGroupSharedMaxR1.ensure(nS * nG * sizeof(double));
-    ctx->dTransformerVoltageControlGroupSharedInitialR1.ensure(nS * nG * sizeof(double));
-    ctx->dTransformerVoltageControlMemberState.ensure(nS * nM * sizeof(int));
-    ctx->dTransformerVoltageControlMemberTap.ensure(nS * nM * sizeof(int));
-    ctx->dTransformerVoltageControlMemberRoundingR1.ensure(nS * nM * sizeof(double));
-    ctx->dTransformerVoltageControlSavedDeltaTarget.ensure(nS * std::max(nD, 1) * sizeof(double));
-    ctx->dTransformerVoltageControlRejected.ensure(nS * sizeof(char));
-    ctx->nTransformerVoltageControlGroups = nG;
-    ctx->nTransformerVoltageControlDeltaRows = nD;
-    ctx->transformerVoltageControlMode = mode;
-    ctx->transformerVoltageControlEntryOn = entryOn;
-    ctx->nTransformerVoltageControlMembers = nM;
+    ctx->transformerVoltageControl.dTransformerVoltageControlStep.ensure(nS * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupStep.ensure(nS * nG * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMinR1.ensure(nS * nG * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedMaxR1.ensure(nS * nG * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlGroupSharedInitialR1.ensure(nS * nG * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.ensure(nS * nM * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap.ensure(nS * nM * sizeof(int));
+    ctx->transformerVoltageControl.dTransformerVoltageControlMemberRoundingR1.ensure(nS * nM * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlSavedDeltaTarget.ensure(nS * std::max(nD, 1) * sizeof(double));
+    ctx->transformerVoltageControl.dTransformerVoltageControlRejected.ensure(nS * sizeof(char));
+    ctx->transformerVoltageControl.nTransformerVoltageControlGroups = nG;
+    ctx->transformerVoltageControl.nTransformerVoltageControlDeltaRows = nD;
+    ctx->transformerVoltageControl.transformerVoltageControlMode = mode;
+    ctx->transformerVoltageControl.transformerVoltageControlEntryOn = entryOn;
+    ctx->transformerVoltageControl.nTransformerVoltageControlMembers = nM;
     return 1;
 }
 
@@ -195,7 +195,7 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchGeneratorVolt
         JNIEnv* env, jclass, jlong handle, jintArray jGeneratorVoltageControlFreezeVRow, jdoubleArray jGeneratorVoltageControlFreezeLoadTargetQ, jintArray jGeneratorVoltageControlFreezeReactiveLimitEntry,
         jintArray jFixPvRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0) {
+    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0) {
         return 0;
     }
     auto readI = [&](jintArray a, std::vector<int>& v) {
@@ -218,22 +218,22 @@ OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchGeneratorVolt
         if (static_cast<int>(reactiveLimitEntry.size()) != nGeneratorVoltageControlFreezeCandidates) {
             reactiveLimitEntry.assign(nGeneratorVoltageControlFreezeCandidates, -1);                         // no remote candidate
         }
-        ctx->dGeneratorVoltageControlFreezeVRow.upload(vRow.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeLoadTargetQ.upload(loadQ.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(double));
-        ctx->dGeneratorVoltageControlFreezeReactiveLimitEntry.upload(reactiveLimitEntry.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeVRow.upload(vRow.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeLoadTargetQ.upload(loadQ.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(double));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeReactiveLimitEntry.upload(reactiveLimitEntry.data(), nGeneratorVoltageControlFreezeCandidates * sizeof(int));
         size_t nsc = static_cast<size_t>(ctx->nScenarios) * nGeneratorVoltageControlFreezeCandidates;
-        ctx->dGeneratorVoltageControlFrozen.ensure(nsc * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeSavedMode.ensure(nsc * sizeof(int));
-        ctx->dGeneratorVoltageControlFreezeSavedTarget.ensure(nsc * sizeof(double));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.ensure(nsc * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedMode.ensure(nsc * sizeof(int));
+        ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeSavedTarget.ensure(nsc * sizeof(double));
     }
-    ctx->nGeneratorVoltageControlFreezeCandidates = nGeneratorVoltageControlFreezeCandidates;
-    ctx->transformerVoltageControlFixMinMask.clear();                               // armed by setBatchTransformerVoltageControlFixMasks
-    ctx->transformerVoltageControlFixMaxMask.clear();
-    ctx->transformerVoltageControlFixWords = 0;
+    ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates = nGeneratorVoltageControlFreezeCandidates;
+    ctx->transformerVoltageControl.transformerVoltageControlFixMinMask.clear();                               // armed by setBatchTransformerVoltageControlFixMasks
+    ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask.clear();
+    ctx->transformerVoltageControl.transformerVoltageControlFixWords = 0;
     if (jFixPvRow != nullptr) {
         readI(jFixPvRow, fixRow);
         if (!fixRow.empty()) {
-            ctx->dTransformerVoltageControlFixPvRow.upload(fixRow.data(), fixRow.size() * sizeof(int));
+            ctx->transformerVoltageControl.dTransformerVoltageControlFixPvRow.upload(fixRow.data(), fixRow.size() * sizeof(int));
         }
     }
     return 1;
@@ -246,17 +246,17 @@ extern "C" JNIEXPORT void JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, setBatchTransformerVoltageControlFixMasks)(
         JNIEnv* env, jclass, jlong handle, jintArray jMin, jintArray jMax, jint words) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0) {
+    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0) {
         return;
     }
     bool none = jMin == nullptr || jMax == nullptr || words <= 0;
-    size_t width = static_cast<size_t>(ctx->nTransformerVoltageControlMembers) * std::max(static_cast<int>(words), 0);
+    size_t width = static_cast<size_t>(ctx->transformerVoltageControl.nTransformerVoltageControlMembers) * std::max(static_cast<int>(words), 0);
     const char* who = "setBatchTransformerVoltageControlFixMasks";
-    installSlotRows(env, ctx, ctx->transformerVoltageControlFixMinMask, width, none ? nullptr : jMin, who);
+    installSlotRows(env, ctx, ctx->transformerVoltageControl.transformerVoltageControlFixMinMask, width, none ? nullptr : jMin, who);
     if (!env->ExceptionCheck()) {
-        installSlotRows(env, ctx, ctx->transformerVoltageControlFixMaxMask, width, none ? nullptr : jMax, who);
+        installSlotRows(env, ctx, ctx->transformerVoltageControl.transformerVoltageControlFixMaxMask, width, none ? nullptr : jMax, who);
     }
-    ctx->transformerVoltageControlFixWords = none ? 0 : words;
+    ctx->transformerVoltageControl.transformerVoltageControlFixWords = none ? 0 : words;
 }
 
 /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (gen − load)} — layout
@@ -265,20 +265,20 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchGeneratorVoltageControlFreeze)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0 || ctx->nGeneratorVoltageControlFreezeCandidates <= 0 || !ctx->dGeneratorVoltageControlFrozen.p) {
+    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0 || ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates <= 0 || !ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.p) {
         return nullptr;
     }
     int n = ctx->n;
     const int nRows = installedSlotCount(ctx);
-    size_t count = static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates) * nRows;
-    std::vector<int> frozen, voltageRow(ctx->nGeneratorVoltageControlFreezeCandidates);
+    size_t count = static_cast<size_t>(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates) * nRows;
+    std::vector<int> frozen, voltageRow(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates);
     std::vector<double> target, out(count * 2);
-    readInstalledRows(ctx, ctx->dGeneratorVoltageControlFrozen.p, static_cast<size_t>(ctx->nGeneratorVoltageControlFreezeCandidates), frozen);
-    cudaMemcpy(voltageRow.data(), ctx->dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    readInstalledRows(ctx, ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFrozen.p, static_cast<size_t>(ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates), frozen);
+    cudaMemcpy(voltageRow.data(), ctx->generatorVoltageControlFreeze.dGeneratorVoltageControlFreezeVRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost);
     readInstalledRows(ctx, ctx->dTarget.p, static_cast<size_t>(n), target);
     for (int s = 0; s < nRows; s++) {
-        for (int c = 0; c < ctx->nGeneratorVoltageControlFreezeCandidates; c++) {
-            size_t i = static_cast<size_t>(s) * ctx->nGeneratorVoltageControlFreezeCandidates + c;
+        for (int c = 0; c < ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates; c++) {
+            size_t i = static_cast<size_t>(s) * ctx->generatorVoltageControlFreeze.nGeneratorVoltageControlFreezeCandidates + c;
             out[i * 2] = frozen[i];
             out[i * 2 + 1] = target[static_cast<size_t>(s) * n + voltageRow[c]];
         }
@@ -294,15 +294,15 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 OLF_JNI(ac_outerloop_gpu, TransformerVoltageControlNative, readBatchTransformerVoltageControlState)(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || ctx->nTransformerVoltageControlMembers <= 0 || !ctx->dTransformerVoltageControlMemberState.p) {
+    if (ctx == nullptr || ctx->transformerVoltageControl.nTransformerVoltageControlMembers <= 0 || !ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.p) {
         return nullptr;
     }
-    const size_t nMembers = static_cast<size_t>(ctx->nTransformerVoltageControlMembers);
+    const size_t nMembers = static_cast<size_t>(ctx->transformerVoltageControl.nTransformerVoltageControlMembers);
     std::vector<int> memberState, tap;
     std::vector<double> roundingR1;
-    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberState.p, nMembers, memberState);
-    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberTap.p, nMembers, tap);
-    readInstalledRows(ctx, ctx->dTransformerVoltageControlMemberRoundingR1.p, nMembers, roundingR1);
+    readInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberState.p, nMembers, memberState);
+    readInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberTap.p, nMembers, tap);
+    readInstalledRows(ctx, ctx->transformerVoltageControl.dTransformerVoltageControlMemberRoundingR1.p, nMembers, roundingR1);
     const size_t count = memberState.size();
     std::vector<double> out(count * 3);
     for (size_t i = 0; i < count; i++) {

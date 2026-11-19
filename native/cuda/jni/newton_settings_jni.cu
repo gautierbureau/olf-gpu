@@ -69,8 +69,8 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchLineSearch)(
     if (ctx == nullptr) {
         return;
     }
-    ctx->lineSearchStateVectorScalingMaxIteration = lineSearchStateVectorScalingMaxIteration > 0 ? lineSearchStateVectorScalingMaxIteration : 10;
-    ctx->lineSearchStateVectorScalingStepFold = lineSearchStateVectorScalingStepFold > 1.0 ? lineSearchStateVectorScalingStepFold : 4.0 / 3.0;
+    ctx->newtonRaphson.lineSearchStateVectorScalingMaxIteration = lineSearchStateVectorScalingMaxIteration > 0 ? lineSearchStateVectorScalingMaxIteration : 10;
+    ctx->newtonRaphson.lineSearchStateVectorScalingStepFold = lineSearchStateVectorScalingStepFold > 1.0 ? lineSearchStateVectorScalingStepFold : 4.0 / 3.0;
 }
 
 // PER_EQUATION_TYPE stopping criterion: install (or clear, with nulls) the per-row threshold
@@ -85,18 +85,16 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteria)(
         return;
     }
     if (jFixedVariableRowMaxMismatch == nullptr || jEquationRowMaxMismatch == nullptr) {
-        ctx->perRowCriteria = false;
-        ctx->perRowAlternateCriteria = false;
+        ctx->newtonRaphson.perRowCriteria = false;
+        ctx->newtonRaphson.perRowAlternateCriteria = false;
         return;
     }
     int n = ctx->structure->n;
-    jdouble* fixedVariableRowMaxMismatch = env->GetDoubleArrayElements(jFixedVariableRowMaxMismatch, nullptr);
-    jdouble* equationRowMaxMismatch = env->GetDoubleArrayElements(jEquationRowMaxMismatch, nullptr);
-    ctx->dFixedVariableRowMaxMismatch.upload(fixedVariableRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
-    ctx->dEquationRowMaxMismatch.upload(equationRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
-    env->ReleaseDoubleArrayElements(jFixedVariableRowMaxMismatch, fixedVariableRowMaxMismatch, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(jEquationRowMaxMismatch, equationRowMaxMismatch, JNI_ABORT);
-    ctx->perRowCriteria = true;
+    const JniDoubles fixedVariableRowMaxMismatch(env, jFixedVariableRowMaxMismatch);
+    const JniDoubles equationRowMaxMismatch(env, jEquationRowMaxMismatch);
+    ctx->newtonRaphson.dFixedVariableRowMaxMismatch.upload(fixedVariableRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    ctx->newtonRaphson.dEquationRowMaxMismatch.upload(equationRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    ctx->newtonRaphson.perRowCriteria = true;
 }
 
 // The per-row ALTERNATE threshold and its selector row (-1: none) of the PER_EQUATION_TYPE criterion, read by
@@ -110,17 +108,15 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchRowCriteriaAlternate)(
         return;
     }
     if (jAlternateRowMaxMismatch == nullptr || jAlternateRowMaxMismatchSelector == nullptr) {
-        ctx->perRowAlternateCriteria = false;
+        ctx->newtonRaphson.perRowAlternateCriteria = false;
         return;
     }
     int n = ctx->structure->n;
-    jdouble* alternateRowMaxMismatch = env->GetDoubleArrayElements(jAlternateRowMaxMismatch, nullptr);
-    jint* alternateRowMaxMismatchSelector = env->GetIntArrayElements(jAlternateRowMaxMismatchSelector, nullptr);
-    ctx->dAlternateRowMaxMismatch.upload(alternateRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
-    ctx->dAlternateRowMaxMismatchSelector.upload(alternateRowMaxMismatchSelector, static_cast<size_t>(n) * sizeof(int));
-    env->ReleaseDoubleArrayElements(jAlternateRowMaxMismatch, alternateRowMaxMismatch, JNI_ABORT);
-    env->ReleaseIntArrayElements(jAlternateRowMaxMismatchSelector, alternateRowMaxMismatchSelector, JNI_ABORT);
-    ctx->perRowAlternateCriteria = true;
+    const JniDoubles alternateRowMaxMismatch(env, jAlternateRowMaxMismatch);
+    const JniInts alternateRowMaxMismatchSelector(env, jAlternateRowMaxMismatchSelector);
+    ctx->newtonRaphson.dAlternateRowMaxMismatch.upload(alternateRowMaxMismatch, static_cast<size_t>(n) * sizeof(double));
+    ctx->newtonRaphson.dAlternateRowMaxMismatchSelector.upload(alternateRowMaxMismatchSelector, static_cast<size_t>(n) * sizeof(int));
+    ctx->newtonRaphson.perRowAlternateCriteria = true;
 }
 
 // Per-scenario ACTIVE equation counts for the L2 stopping threshold (see hNActive). Per-chunk state.
@@ -133,14 +129,14 @@ OLF_JNI(ac_solver_gpu, NewtonSettingsNative, setBatchActiveRowCounts)(
     }
     std::vector<int> nActive = jniInts(env, jNActive);
     if (ctx->installSlots.empty()) {                        // the whole bank: null leaves every slot at the full count
-        ctx->hNActive = nActive;
+        ctx->newtonRaphson.hNActive = nActive;
         return;
     }
-    if (ctx->hNActive.empty()) {
-        ctx->hNActive.assign(ctx->nScenarios, ctx->n);
+    if (ctx->newtonRaphson.hNActive.empty()) {
+        ctx->newtonRaphson.hNActive.assign(ctx->nScenarios, ctx->n);
     }
     for (int j = 0; j < installedSlotCount(ctx); j++) {
-        ctx->hNActive[installedSlot(ctx, j)] = j < static_cast<int>(nActive.size()) ? nActive[j] : ctx->n;
+        ctx->newtonRaphson.hNActive[installedSlot(ctx, j)] = j < static_cast<int>(nActive.size()) ? nActive[j] : ctx->n;
     }
 }
 

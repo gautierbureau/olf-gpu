@@ -67,38 +67,38 @@ void sensitivitySolve(BatchSolverContext* ctx, DriverPass& drv, bool& first) {
     const int& n = drv.n;
     const int& nS = drv.nS;
     gSensitivitySolves++;
-    if (ctx->mode == GpuLinearSolveMode::ROBUST) {
+    if (ctx->linearSolver.mode == GpuLinearSolveMode::ROBUST) {
         for (int s2 = 0; s2 < nS; s2++) {
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.systemMatrix, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.rightHandSideMatrix, ctx->dB.as<double>() + (size_t) s2 * n));
-            CUDSS_CHECK(cudssMatrixSetValues(ctx->solver.solutionMatrix, ctx->dDx.as<double>() + (size_t) s2 * n));
-            if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.systemMatrix, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.rightHandSideMatrix, ctx->dB.as<double>() + (size_t) s2 * n));
+            CUDSS_CHECK(cudssMatrixSetValues(ctx->linearSolver.solver.solutionMatrix, ctx->dDx.as<double>() + (size_t) s2 * n));
+            if (!ctx->linearSolver.analyzed) {
                 gAnalysesMain++;
-                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
-                ctx->analyzed = true;
+                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
+                ctx->linearSolver.analyzed = true;
             }
             gSensitivityFactorizations++;
-            { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                    ctx->solver.config, ctx->solver.data, ctx->solver.systemMatrix, ctx->solver.solutionMatrix, ctx->solver.rightHandSideMatrix)); }
+            { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.solver.systemMatrix, ctx->linearSolver.solver.solutionMatrix, ctx->linearSolver.solver.rightHandSideMatrix)); }
         }
         first = false;
         return;
     }
-    if (ctx->mode == GpuLinearSolveMode::BATCHED_LU) {
+    if (ctx->linearSolver.mode == GpuLinearSolveMode::BATCHED_LU) {
         if (first) gSensitivityFactorizations++;
         batchedLuSensitivitySolve(ctx, nS, first);
         first = false;
         return;
     }
-    if (!ctx->analyzed) {
+    if (!ctx->linearSolver.analyzed) {
         gAnalysesMain++;
-        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->solver.handle, CUDSS_PHASE_ANALYSIS, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
-        ctx->analyzed = true;
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, CUDSS_PHASE_ANALYSIS, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
+        ctx->linearSolver.analyzed = true;
     }
     int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
     if (first) gSensitivityFactorizations++;
     first = false;
-    { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->solver.handle, phase, ctx->solver.config, ctx->solver.data, ctx->uniformBatchSystemMatrix, ctx->uniformBatchSolutionMatrix, ctx->uniformBatchRightHandSideMatrix)); }
+    { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->linearSolver.solver.handle, phase, ctx->linearSolver.solver.config, ctx->linearSolver.solver.data, ctx->linearSolver.uniformBatchSystemMatrix, ctx->linearSolver.uniformBatchSolutionMatrix, ctx->linearSolver.uniformBatchRightHandSideMatrix)); }
 }
 
 }  // namespace olfgpu

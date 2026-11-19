@@ -64,9 +64,9 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, int nC
             case GpuOuterLoopKind::REACTIVE_LIMITS:           kindName = "ReactiveLimits"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_VOLTAGE_CONTROL:   kindName = "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_SHUNT_VOLTAGE_CONTROL: kindName = "ShuntVoltageControl"; break;
-            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
+            case GpuOuterLoopKind::INCREMENTAL_PHASE_CONTROL: kindName = ctx->phaseControl.nPhaseControlControllerBranches > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
             case GpuOuterLoopKind::INCREMENTAL_TRANSFORMER_REACTIVE_POWER_CONTROL:  kindName = "TransformerReactivePowerControl"; break;
-            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->transformerVoltageControlMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
+            case GpuOuterLoopKind::TRANSFORMER_VOLTAGE_CONTROL:   kindName = ctx->transformerVoltageControl.transformerVoltageControlMode == GpuTransformerVoltageControlMode::WITH_GENERATOR_VOLTAGE_CONTROL ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
             case GpuOuterLoopKind::SHUNT_VOLTAGE_CONTROL:   kindName = "ShuntVoltageControl"; break;
             case GpuOuterLoopKind::SECONDARY_VOLTAGE_CONTROL:   kindName = "SecondaryVoltageControl"; break;
             case GpuOuterLoopKind::AREA_INTERCHANGE_CONTROL:   kindName = "AreaInterchangeControl"; break;
@@ -79,9 +79,9 @@ void traceBatchPass(BatchSolverContext* ctx, DriverPass& drv, int nLoops, int nC
             for (char c : unstable) nUnstableScenarios += c ? 1 : 0;
         }
         int nSwitchedToPq = 0;
-        if (ctx->nReactiveLimitEntries > 0) {
-            std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-            CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
+        if (ctx->reactiveLimits.nReactiveLimitEntries > 0) {
+            std::vector<char> qLimitType(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+            CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
             for (char c : qLimitType) nSwitchedToPq += c ? 1 : 0;
         }
         std::fprintf(stderr, "BATCH_TRACE check: outer=%d loop=%d/%d kind=%s checked=%d changedScenarios=%d iteration=%d switchedToPq=%d",
@@ -98,47 +98,47 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
     int& loopIdx = drv.loopIdx;
     int (&loopOrder)[MAX_DEVICE_LOOPS] = drv.loopOrder;
     std::vector<char>& outerLoopCheckActive = drv.outerLoopCheckActive;
-    if (loopOrder[loopIdx] == GpuOuterLoopKind::REACTIVE_LIMITS && (reactiveLimitsAuditOn || (reactiveLimitsTraceScenario >= 0 && reactiveLimitsTraceScenario < nS)) && ctx->nReactiveLimitEntries > 0) {
-        std::vector<char> checkDecision(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        std::vector<int> voltageRow(ctx->nReactiveLimitEntries);
-        std::vector<double> rowQ(static_cast<size_t>(n) * nS), loadQ(ctx->nReactiveLimitEntries), stateVector(static_cast<size_t>(n) * nS);
-        CUDA_CHECK(cudaMemcpy(checkDecision.data(), ctx->dReactiveLimitCheckDecision.p, checkDecision.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(voltageRow.data(), ctx->dReactiveLimitVoltageRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    if (loopOrder[loopIdx] == GpuOuterLoopKind::REACTIVE_LIMITS && (reactiveLimitsAuditOn || (reactiveLimitsTraceScenario >= 0 && reactiveLimitsTraceScenario < nS)) && ctx->reactiveLimits.nReactiveLimitEntries > 0) {
+        std::vector<char> checkDecision(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS), qLimitType(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+        std::vector<int> voltageRow(ctx->reactiveLimits.nReactiveLimitEntries);
+        std::vector<double> rowQ(static_cast<size_t>(n) * nS), loadQ(ctx->reactiveLimits.nReactiveLimitEntries), stateVector(static_cast<size_t>(n) * nS);
+        CUDA_CHECK(cudaMemcpy(checkDecision.data(), ctx->reactiveLimits.dReactiveLimitCheckDecision.p, checkDecision.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(voltageRow.data(), ctx->reactiveLimits.dReactiveLimitVoltageRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(rowQ.data(), ctx->dQbuf.p, rowQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(loadQ.data(), ctx->dReactiveLimitLoadQ.p, loadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(loadQ.data(), ctx->reactiveLimits.dReactiveLimitLoadQ.p, loadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(stateVector.data(), ctx->dX.p, stateVector.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        std::vector<double> minQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1));
+        std::vector<double> minQ(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? nS : 1));
         std::vector<double> maxQ(minQ.size());
-        CUDA_CHECK(cudaMemcpy(minQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, minQ.size() * sizeof(double),
+        CUDA_CHECK(cudaMemcpy(minQ.data(), ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.p : ctx->reactiveLimits.dReactiveLimitMinQ.p, minQ.size() * sizeof(double),
                 cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(maxQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, maxQ.size() * sizeof(double),
+        CUDA_CHECK(cudaMemcpy(maxQ.data(), ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.p : ctx->reactiveLimits.dReactiveLimitMaxQ.p, maxQ.size() * sizeof(double),
                 cudaMemcpyDeviceToHost));
-        std::vector<int> comparedVoltageRow(ctx->nReactiveLimitEntries, -1);
-        std::vector<double> targetV(ctx->nReactiveLimitEntries, 0.0);
-        if (ctx->dReactiveLimitComparedVoltageRow.p) {
-            CUDA_CHECK(cudaMemcpy(comparedVoltageRow.data(), ctx->dReactiveLimitComparedVoltageRow.p, comparedVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> comparedVoltageRow(ctx->reactiveLimits.nReactiveLimitEntries, -1);
+        std::vector<double> targetV(ctx->reactiveLimits.nReactiveLimitEntries, 0.0);
+        if (ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.p) {
+            CUDA_CHECK(cudaMemcpy(comparedVoltageRow.data(), ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.p, comparedVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         }
-        if (ctx->dReactiveLimitTargetV.p) {
-            CUDA_CHECK(cudaMemcpy(targetV.data(), ctx->dReactiveLimitTargetV.p, targetV.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        if (ctx->reactiveLimits.dReactiveLimitTargetV.p) {
+            CUDA_CHECK(cudaMemcpy(targetV.data(), ctx->reactiveLimits.dReactiveLimitTargetV.p, targetV.size() * sizeof(double), cudaMemcpyDeviceToHost));
         }
         for (int s = 0; s < nS; s++) {
             bool toStderr = (s == reactiveLimitsTraceScenario);
             if (!toStderr && !(reactiveLimitsAuditOn && outerLoopCheckActive[s])) continue;
             int nReactiveLimitsDecisions = 0;
             std::string record;
-            for (int entry = 0; entry < ctx->nReactiveLimitEntries; entry++) {
-                size_t scenarioEntry = (size_t) s * ctx->nReactiveLimitEntries + entry;
+            for (int entry = 0; entry < ctx->reactiveLimits.nReactiveLimitEntries; entry++) {
+                size_t scenarioEntry = (size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + entry;
                 if (!checkDecision[scenarioEntry]) continue;
-                size_t limitIndex = ctx->nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) entry;
+                size_t limitIndex = ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) entry;
                 double comparedV = (comparedVoltageRow[entry] >= 0) ? stateVector[(size_t) s * n + comparedVoltageRow[entry]] : 0.0;
                 double q = rowQ[(size_t) s * n + voltageRow[entry]] + loadQ[entry];
                 // the q the decision READ: at reactiveLimitReactivePowerRow when the entry's balance was relocated (a coupler-tree
                 // child reads its parent's DUMMY_Q row), not at its V row - printing the V-row value logged a
                 // relocated child as q=0 while the kernel switched it to PQ on its real q
                 static const std::vector<int> reactivePowerRow = [&] {
-                    std::vector<int> v(ctx->nReactiveLimitEntries, -1);
-                    if (ctx->dReactiveLimitReactivePowerRow.p) CUDA_CHECK(cudaMemcpy(v.data(), ctx->dReactiveLimitReactivePowerRow.p, v.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    std::vector<int> v(ctx->reactiveLimits.nReactiveLimitEntries, -1);
+                    if (ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p) CUDA_CHECK(cudaMemcpy(v.data(), ctx->reactiveLimits.dReactiveLimitReactivePowerRow.p, v.size() * sizeof(int), cudaMemcpyDeviceToHost));
                     return v;
                 }();
                 int qRow = reactivePowerRow[entry] >= 0 ? reactivePowerRow[entry] : voltageRow[entry];
@@ -155,18 +155,18 @@ void traceReactiveLimitsSwitches(BatchSolverContext* ctx, DriverPass& drv, std::
                     double slope = 0.0;
                     CUDA_CHECK(cudaMemcpy(&slope, ctx->dRowSlope.as<double>() + voltageRow[entry], sizeof(double), cudaMemcpyDeviceToHost));
                     char switchCount = 0;
-                    CUDA_CHECK(cudaMemcpy(&switchCount, ctx->dReactiveLimitPvPqSwitchCount.as<char>() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&switchCount, ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.as<char>() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
                     char localOverride = 0;
                     double localTargetV = 0.0;
-                    if (ctx->reactiveLimitLocalOverride.on()) {
-                        CUDA_CHECK(cudaMemcpy(&localOverride, ctx->reactiveLimitLocalOverride.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
-                        CUDA_CHECK(cudaMemcpy(&localTargetV, ctx->reactiveLimitLocalTargetV.device() + scenarioEntry, sizeof(double), cudaMemcpyDeviceToHost));
+                    if (ctx->reactiveLimits.reactiveLimitLocalOverride.on()) {
+                        CUDA_CHECK(cudaMemcpy(&localOverride, ctx->reactiveLimits.reactiveLimitLocalOverride.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(&localTargetV, ctx->reactiveLimits.reactiveLimitLocalTargetV.device() + scenarioEntry, sizeof(double), cudaMemcpyDeviceToHost));
                     }
                     char monitored = 0;
-                    CUDA_CHECK(cudaMemcpy(&monitored, ctx->dReactiveLimitFlags.as<char>() + entry, 1, cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&monitored, ctx->reactiveLimits.dReactiveLimitFlags.as<char>() + entry, 1, cudaMemcpyDeviceToHost));
                     char islanded = 0;
-                    if (ctx->reactiveLimitIslanded.on()) {
-                        CUDA_CHECK(cudaMemcpy(&islanded, ctx->reactiveLimitIslanded.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
+                    if (ctx->reactiveLimits.reactiveLimitIslanded.on()) {
+                        CUDA_CHECK(cudaMemcpy(&islanded, ctx->reactiveLimits.reactiveLimitIslanded.device() + scenarioEntry, 1, cudaMemcpyDeviceToHost));
                     }
                     char checkActive = 0;
                     CUDA_CHECK(cudaMemcpy(&checkActive, ctx->dOuterLoopCheckActive.as<char>() + s, 1, cudaMemcpyDeviceToHost));
@@ -193,24 +193,24 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
     const int& n = drv.n;
     const int& nS = drv.nS;
     const int& outer = drv.outer;
-    if (!inDistributedSlackPhase && (ctx->nReactiveLimitRemoteEntries > 0 || nS == 1) && ctx->nReactiveLimitEntries > 0
+    if (!inDistributedSlackPhase && (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0 || nS == 1) && ctx->reactiveLimits.nReactiveLimitEntries > 0
             && traceOn(Trace::BATCH_TRACE)) {   // RL trace
-        std::vector<char> qLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        std::vector<char> voltageControlRole(ctx->nReactiveLimitEntries);
-        std::vector<int> voltageRow(ctx->nReactiveLimitEntries);
+        std::vector<char> qLimitType(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+        std::vector<char> voltageControlRole(ctx->reactiveLimits.nReactiveLimitEntries);
+        std::vector<int> voltageRow(ctx->reactiveLimits.nReactiveLimitEntries);
         std::vector<double> rowQ(static_cast<size_t>(n) * nS);
-        std::vector<double> loadQ(ctx->nReactiveLimitEntries);
-        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
-        if (ctx->nReactiveLimitRemoteEntries > 0) {
-        CUDA_CHECK(cudaMemcpy(voltageControlRole.data(), ctx->dReactiveLimitVoltageControlRole.p, voltageControlRole.size(), cudaMemcpyDeviceToHost));
+        std::vector<double> loadQ(ctx->reactiveLimits.nReactiveLimitEntries);
+        CUDA_CHECK(cudaMemcpy(qLimitType.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, qLimitType.size(), cudaMemcpyDeviceToHost));
+        if (ctx->reactiveLimits.nReactiveLimitRemoteEntries > 0) {
+        CUDA_CHECK(cudaMemcpy(voltageControlRole.data(), ctx->reactiveLimits.dReactiveLimitVoltageControlRole.p, voltageControlRole.size(), cudaMemcpyDeviceToHost));
         }
-        CUDA_CHECK(cudaMemcpy(voltageRow.data(), ctx->dReactiveLimitVoltageRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(voltageRow.data(), ctx->reactiveLimits.dReactiveLimitVoltageRow.p, voltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(rowQ.data(), ctx->dQbuf.p, rowQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(loadQ.data(), ctx->dReactiveLimitLoadQ.p, loadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(loadQ.data(), ctx->reactiveLimits.dReactiveLimitLoadQ.p, loadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<int> hMode(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hMode.data(), ctx->dMode.p, hMode.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        std::vector<double> hMaxQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1));
-        CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> hMaxQ(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? nS : 1));
+        CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.p : ctx->reactiveLimits.dReactiveLimitMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<char> hOuterLoopCheckActive(nS);
         CUDA_CHECK(cudaMemcpy(hOuterLoopCheckActive.data(), ctx->dOuterLoopCheckActive.p, nS, cudaMemcpyDeviceToHost));
         // The STATE the PV -> PQ decision is taken at. Without it, a q that disagrees with OLF cannot be
@@ -221,12 +221,12 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         std::vector<double> hTarget(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hTarget.data(), ctx->dTarget.p, hTarget.size() * sizeof(double), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
-            for (int entry = 0; entry < ctx->nReactiveLimitEntries; entry++) {
+            for (int entry = 0; entry < ctx->reactiveLimits.nReactiveLimitEntries; entry++) {
                 if (voltageControlRole[entry] || nS == 1) {
                     std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f nReactiveCapabilityCurves=%d outerLoopCheckActive=%d v=%.9f qbuf=%.9f\n",
-                                 s, entry, (int) voltageControlRole[entry], (int) qLimitType[(size_t) s * ctx->nReactiveLimitEntries + entry], (int) outerLoopUnstable[s],
+                                 s, entry, (int) voltageControlRole[entry], (int) qLimitType[(size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + entry], (int) outerLoopUnstable[s],
                                  rowQ[(size_t) s * n + voltageRow[entry]] + loadQ[entry], hMode[(size_t) s * n + voltageRow[entry]], reactiveLimitTol,
-                                 hMaxQ[ctx->nReactiveCapabilityCurves > 0 ? (size_t) s * ctx->nReactiveLimitEntries + entry : (size_t) entry], ctx->nReactiveCapabilityCurves, (int) hOuterLoopCheckActive[s],
+                                 hMaxQ[ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? (size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + entry : (size_t) entry], ctx->reactiveLimits.nReactiveCapabilityCurves, (int) hOuterLoopCheckActive[s],
                                  hStateVector[(size_t) s * n + voltageRow[entry]], rowQ[(size_t) s * n + voltageRow[entry]]);
                 }
             }
@@ -234,13 +234,13 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
         // PSG: every pilot-self group's layout this pass — the pilot's PV/PQ state, its own row's mode/target,
         // whether updatePilotTargetVEquationBatch flipped it (pilotTargetVDeactivated), and every candidate row with its mode, so a
         // "control lost" verdict can be checked against the members it was taken over.
-        if (ctx->hasPilotSelf && ctx->dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
+        if (ctx->remoteVoltageControl.hasPilotSelf && ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p && ctx->structure->nReactiveRelocationGroups > 0 && !ctx->structure->hReactiveRelocationGroupStart.empty()
                 && traceOn(Trace::BATCH_TRACE)) {
             std::vector<int> pilotSelfEntry(ctx->structure->nReactiveRelocationGroups, -1);
             std::vector<char> hPilotTargetVDeactivated(static_cast<size_t>(ctx->structure->nReactiveRelocationGroups) * nS, 0);
-            CUDA_CHECK(cudaMemcpy(pilotSelfEntry.data(), ctx->dPilotSelfReactiveLimitEntry.p, pilotSelfEntry.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            if (ctx->dReactiveRelocationPilotTargetVDeactivated.p) {
-                CUDA_CHECK(cudaMemcpy(hPilotTargetVDeactivated.data(), ctx->dReactiveRelocationPilotTargetVDeactivated.p, hPilotTargetVDeactivated.size(), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(pilotSelfEntry.data(), ctx->reactiveLimits.dPilotSelfReactiveLimitEntry.p, pilotSelfEntry.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            if (ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p) {
+                CUDA_CHECK(cudaMemcpy(hPilotTargetVDeactivated.data(), ctx->remoteVoltageControl.dReactiveRelocationPilotTargetVDeactivated.p, hPilotTargetVDeactivated.size(), cudaMemcpyDeviceToHost));
             }
             for (int s = 0; s < nS; s++) {
                 for (int g = 0; g < ctx->structure->nReactiveRelocationGroups; g++) {
@@ -260,7 +260,7 @@ void traceReactiveLimitsState(BatchSolverContext* ctx, DriverPass& drv, bool inD
                         candidates += b;
                     }
                     std::fprintf(stderr, "PSG s=%d outer=%d g=%d entry=%d lt=%d pilotRow=%d mode=%d target=%.9f pilotTargetVDeactivated=%d q=%.9f pick=%d cands=[%s ]\n",
-                                 s, outer, g, e, (int) qLimitType[(size_t) s * ctx->nReactiveLimitEntries + e], pilotRow, hMode[(size_t) s * n + pilotRow],
+                                 s, outer, g, e, (int) qLimitType[(size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + e], pilotRow, hMode[(size_t) s * n + pilotRow],
                                  hTarget[(size_t) s * n + pilotRow], (int) hPilotTargetVDeactivated[(size_t) s * ctx->structure->nReactiveRelocationGroups + g],
                                  rowQ[(size_t) s * n + voltageRow[e]] + loadQ[e], pick, candidates.c_str());
                 }
@@ -279,8 +279,8 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
     BatchResult& res = drv.res;
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
         double gate[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // see the gateLast write
-        if (ctx->dDistributedSlackLastPassAccounting.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDistributedSlackLastPassAccounting.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
+        if (ctx->distributedSlack.dDistributedSlackLastPassAccounting.p) {
+            CUDA_CHECK(cudaMemcpy(gate, ctx->distributedSlack.dDistributedSlackLastPassAccounting.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
         }
         std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
                      " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"
@@ -296,13 +296,13 @@ void traceLoopSlot(BatchSolverContext* ctx, DriverPass& drv, int loopTraceSlot, 
 void traceSwitchLog(BatchSolverContext* ctx, DriverPass& drv) {
     const int& nS = drv.nS;
     const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
-    if (ctx->dReactiveLimitsDecisionLog.p && (reactiveLimitsDecisionLogScenario == -2 || (reactiveLimitsDecisionLogScenario >= 0 && reactiveLimitsDecisionLogScenario < nS))) {
+    if (ctx->reactiveLimits.dReactiveLimitsDecisionLog.p && (reactiveLimitsDecisionLogScenario == -2 || (reactiveLimitsDecisionLogScenario >= 0 && reactiveLimitsDecisionLogScenario < nS))) {
         int count = 0;
-        CUDA_CHECK(cudaMemcpy(&count, ctx->dReactiveLimitsDecisionLogCount.p, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&count, ctx->reactiveLimits.dReactiveLimitsDecisionLogCount.p, sizeof(int), cudaMemcpyDeviceToHost));
         int keep = count > REACTIVE_LIMITS_DECISION_LOG_CAPACITY ? REACTIVE_LIMITS_DECISION_LOG_CAPACITY : count;
         std::vector<double> lg((size_t) keep * REACTIVE_LIMITS_DECISION_LOG_WIDTH);
         if (keep > 0) {
-            CUDA_CHECK(cudaMemcpy(lg.data(), ctx->dReactiveLimitsDecisionLog.p, lg.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(lg.data(), ctx->reactiveLimits.dReactiveLimitsDecisionLog.p, lg.size() * sizeof(double), cudaMemcpyDeviceToHost));
         }
         for (int k = 0; k < keep; k++) {
             const double* r = lg.data() + (size_t) k * REACTIVE_LIMITS_DECISION_LOG_WIDTH;
@@ -311,23 +311,19 @@ void traceSwitchLog(BatchSolverContext* ctx, DriverPass& drv) {
                          r[3], r[4], r[5], r[6], r[7], r[8]);
         }
         std::fprintf(stderr, "SW_LOG_END s=%d records=%d (cap %d)\n", reactiveLimitsDecisionLogScenario, count, REACTIVE_LIMITS_DECISION_LOG_CAPACITY);
-        CUDA_CHECK(cudaMemset(ctx->dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
+        CUDA_CHECK(cudaMemset(ctx->reactiveLimits.dReactiveLimitsDecisionLogCount.p, 0, sizeof(int)));
     }
 }
 
 // OLF_GPU_RL_AUDIT: the end-of-solve audit of the reactive-limit decisions.
 void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vector<std::vector<std::string>>& auditLog) {
-    const double& REACTIVE_LIMIT_TOL = drv.reactiveLimitTol;
-    const int& MAX_PQ_PV_SWITCH = drv.maxPqPvSwitch;
-    const bool& hasPerScenarioSvcSusceptanceLimits = drv.hasPerScenarioSvcSusceptanceLimits;
     const int& n = drv.n;
     const int& nS = drv.nS;
     const int& nnz = drv.nnz;
     const size_t& nTot = drv.nTot;
     BatchResult& res = drv.res;
-    const int& reactiveLimitsDecisionLogScenario = drv.reactiveLimitsDecisionLogScenario;
     const bool& usePerScenarioReactiveLimits = drv.usePerScenarioReactiveLimits;
-    if (ctx->nReactiveLimitEntries > 0 && traceOn(Trace::RL_AUDIT)) {
+    if (ctx->reactiveLimits.nReactiveLimitEntries > 0 && traceOn(Trace::RL_AUDIT)) {
         double auditTol = std::atof(traceValue(Trace::RL_AUDIT));
         if (auditTol <= 0.0) auditTol = 1e-6;
         std::vector<char> allLive(nS), auditDumped(nS, 0);
@@ -338,13 +334,13 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         if (ctx->structure->openBranch.elementCount) fillOpenBranchBatch<<<grid(ctx->structure->openBranch.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->openBranch.elementCount, nS, n, nnz, ctx->nElements, ctx->openBranchOffset, ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(), ctx->structure->openBranch.destination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, scenarioMajorLayout(nS));
         if (ctx->structure->shunt.elementCount) fillShuntBatch<<<grid(ctx->structure->shunt.elementCount * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->shunt.elementCount, nS, n, nnz, ctx->nElements, ctx->shuntOffset, ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(), ctx->structure->shunt.destination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(), shuntAdmittanceOverrides(ctx), nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, scenarioMajorLayout(nS));
         if (ctx->structure->nLoadModelTerms) fillLoadModelBatch<<<grid(ctx->structure->nLoadModelTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->structure->nLoadModelTerms, nS, n, nnz, ctx->structure->dLoadModelParameters.as<double>(), ctx->structure->dLoadModelIndices.as<int>(), ctx->structure->dLoadModelDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), nullptr, nullptr, nullptr, scenarioMajorLayout(nS));
-        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->zeroImpedanceBranchOpenMask.device(), ctx->zeroImpedanceBranchCloseMask.device(), ctx->spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
+        if (ctx->nZeroImpedanceBranch) fillZeroImpBatch<<<grid(ctx->nZeroImpedanceBranch * nS), BLOCK, 0, ctx->stream>>>(ctx->nZeroImpedanceBranch, nS, n, nnz, ctx->structure->dZeroImpedanceBranchParameters.as<double>(), ctx->structure->dZeroImpedanceBranchIndices.as<int>(), ctx->structure->dZeroImpedanceBranchDestination.as<int>(), ctx->dX.as<double>(), nullptr, ctx->dQbuf.as<double>(), ctx->dOuterLoopCheckActive.as<char>(), ctx->scenarioOverrides.nBaseClosedZeroImpedanceBranches, nullptr, nullptr, nullptr, 0, ReactiveRelocationTables{}, ctx->scenarioOverrides.zeroImpedanceBranchOpenMask.device(), ctx->scenarioOverrides.zeroImpedanceBranchCloseMask.device(), ctx->scenarioOverrides.spanningTreeOverrideMask.device(), scenarioMajorLayout(nS));
         CUDA_CHECK(cudaMemsetAsync(ctx->dIdentityLane.p, 0, static_cast<size_t>(nS) * sizeof(char), ctx->stream));
-        if (ctx->nRemoteMemberReactiveTerms > 0) {
-            fillRemoteMemberQBatch<<<grid(ctx->nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->nRemoteMemberReactiveTerms, nS, n,
+        if (ctx->remoteVoltageControl.nRemoteMemberReactiveTerms > 0) {
+            fillRemoteMemberQBatch<<<grid(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms * nS), BLOCK, 0, ctx->stream>>>(ctx->remoteVoltageControl.nRemoteMemberReactiveTerms, nS, n,
                     ctx->nElements, ctx->closedBranchOffset, ctx->openBranchOffset,
-                    ctx->dRemoteMemberReactiveTermRow.as<int>(), ctx->dRemoteMemberReactiveTermElement.as<int>(), ctx->dRemoteMemberReactiveTermSide.as<int>(),
-                    ctx->dRemoteMemberReactiveTermKind.as<int>(), ctx->dRemoteMemberReactiveTermWeight.as<double>(),
+                    ctx->remoteVoltageControl.dRemoteMemberReactiveTermRow.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermElement.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermSide.as<int>(),
+                    ctx->remoteVoltageControl.dRemoteMemberReactiveTermKind.as<int>(), ctx->remoteVoltageControl.dRemoteMemberReactiveTermWeight.as<double>(),
                     ctx->structure->closedBranch.parameters.as<double>(), ctx->structure->closedBranch.indices.as<int>(), ctx->structure->shunt.parameters.as<double>(), ctx->structure->shunt.indices.as<int>(),
                     ctx->structure->openBranch.parameters.as<double>(), ctx->structure->openBranch.indices.as<int>(),
                     ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dOuterLoopCheckActive.as<char>(),
@@ -357,22 +353,9 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         // outerLoopUnstable names the scenarios that were returned one check short. Running it on the real
         // buffers is safe for the same reason: a fixpoint is a no-op.
         if (usePerScenarioReactiveLimits) {                                // limits at the FINAL targets
-            reactiveCapabilityCurveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(ctx->nReactiveLimitEntries, nS, ctx->nReactiveCapabilityCurves, n, ctx->reactiveCapabilityCurveExtrapolate,
-                    ctx->dReactiveCapabilityCurveIndices.as<int>(), ctx->dReactiveCapabilityCurveParameters.as<double>(), ctx->dReactiveCapabilityCurvePoints.as<double>(),
-                        ctx->dReactiveLimitEntryCurveStart.as<int>(), ctx->dReactiveLimitEntryCurves.as<int>(), curveHvdcAcEmulationView(ctx),
-                    ctx->dReactiveLimitMinQ.as<double>(), ctx->dReactiveLimitMaxQ.as<double>(), ctx->dReactiveLimitLoadQ.as<double>(),
-                    ctx->dTarget.as<double>(),
-                    ctx->reactiveLimitDeltaOverrides.view(), ctx->reactiveCapabilityCurveOverrides.view(),
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMove.as<double>() : nullptr,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->dDistributedSlackGeneratorMoveValid.as<char>() : nullptr, ctx->distributedSlackGeneratorAnchor.deviceOrNull(), ctx->distributedSlackGeneratorInitialMove.deviceOrNull(), ctx->nDistributedSlackGenerators,
-                    ctx->nDistributedSlackBuses > 0 ? ctx->dDistributedSlackBusPhiRow.as<int>() : nullptr,
-                    ctx->distributedSlackBusRowOverride.deviceOrNull(), ctx->nDistributedSlackBuses,
-                    ctx->nDistributedSlackGenerators > 0 ? ctx->distributedSlackGeneratorBus.as<int>() : nullptr,
-                    ctx->dReactiveLimitMinQPerScenario.as<double>(), ctx->dReactiveLimitMaxQPerScenario.as<double>(),
-                    ctx->dReactiveLimitLoadQPerScenario.as<double>(), nullptr);
-            launchForcedTargetQLimits(ctx, nS, n);
+            launchReactiveLimitBounds(ctx, nS, n, nullptr);
         }
-        CUDA_CHECK(cudaMemsetAsync(ctx->dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->nReactiveLimitEntries) * nS, ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->reactiveLimits.dReactiveLimitCheckDecision.p, 0, static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS, ctx->stream));
         // The check writes the PV/PQ state, row modes and row targets. The context is REUSED by the next
         // chunk, so the audit stashes everything the kernel can touch and puts it back: an
@@ -380,91 +363,61 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         // here (the solve is over) and are exactly n*nS wide, so they carry the two big ones.
         CUDA_CHECK(cudaMemcpyAsync(ctx->dDx.p, ctx->dTarget.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
         CUDA_CHECK(cudaMemcpyAsync(ctx->dB.p, ctx->dMode.p, (size_t) n * nS * sizeof(int), cudaMemcpyDeviceToDevice, ctx->stream));
-        std::vector<char> keepQLimitType(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), keepSwitchCount(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), keepSavedRowMode(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        std::vector<double> keepSavedTarget(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        CUDA_CHECK(cudaMemcpy(keepQLimitType.data(), ctx->dReactiveLimitQLimitType.p, keepQLimitType.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(keepSwitchCount.data(), ctx->dReactiveLimitPvPqSwitchCount.p, keepSwitchCount.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(keepSavedRowMode.data(), ctx->dReactiveLimitSavedRowMode.p, keepSavedRowMode.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(keepSavedTarget.data(), ctx->dReactiveLimitSavedTarget.p, keepSavedTarget.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        reactiveLimitsBatch<<<grid(ctx->nReactiveLimitEntries * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->nSecondaryVoltageControlControllerBuses > 0 ? ctx->dSecondaryVoltageControlReactiveLimitTargetV.as<double>() : nullptr,
-                ctx->nReactiveLimitEntries, nS, n, REACTIVE_LIMIT_TOL, MAX_PQ_PV_SWITCH,
-                ctx->dReactiveLimitVoltageRow.as<int>(),
-                ctx->dReactiveLimitReactivePowerRow.p ? ctx->dReactiveLimitReactivePowerRow.as<int>() : nullptr,
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMinQPerScenario.as<double>() : ctx->dReactiveLimitMinQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitMaxQPerScenario.as<double>() : ctx->dReactiveLimitMaxQ.as<double>(),
-                usePerScenarioReactiveLimits ? ctx->dReactiveLimitLoadQPerScenario.as<double>() : ctx->dReactiveLimitLoadQ.as<double>(),
-                ctx->dReactiveLimitTargetV.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dOuterLoopCheckActive.as<char>(),
-                ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                ctx->dReactiveLimitQLimitType.as<char>(), ctx->dReactiveLimitPvPqSwitchCount.as<char>(), ctx->dOuterLoopUnstable.as<char>(),
-                ctx->dReactiveLimitCheckDecision.as<char>(), ctx->dReactiveLimitSavedRowMode.as<char>(),
-                ctx->reactiveLimitTargetVOverrides.view(),
-                ctx->dRowSlope.as<double>(), ctx->dReactiveLimitSavedTarget.as<double>(), usePerScenarioReactiveLimits ? 1 : 0,
-                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitVoltageControlRole.as<char>() : nullptr,
-                ctx->nReactiveLimitRemoteEntries > 0 ? ctx->dReactiveLimitComparedVoltageRow.as<int>() : nullptr,
-                ctx->dReactiveLimitSvcMinB.as<double>(), ctx->dReactiveLimitSvcMaxB.as<double>(), ctx->dReactiveLimitBaseVSquared.as<double>(),
-                    hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMinBPerScenario.as<double>() : nullptr, hasPerScenarioSvcSusceptanceLimits ? ctx->dReactiveLimitSvcMaxBPerScenario.as<double>() : nullptr,
-                ctx->reactiveLimitIslanded.deviceOrNull(),
-                ctx->reactiveLimitsRobustMode ? ctx->dReactiveLimitInitialTargetQ.as<double>() : nullptr,
-                ctx->reactiveLimitsRobustMinRealisticVoltage, ctx->reactiveLimitsRobustMaxRealisticVoltage, ctx->reactiveLimitsRobustMode,
-                reactiveLimitsDecisionLogScenario, ctx->dReactiveLimitsDecisionLog.p ? ctx->dReactiveLimitsDecisionLog.as<double>() : nullptr,
-                ctx->dReactiveLimitsDecisionLogCount.p ? ctx->dReactiveLimitsDecisionLogCount.as<int>() : nullptr, 999999,
-                    pilotSelfReactiveLimitEntryOrNull(ctx), ctx->structure->nReactiveRelocationGroups,
-                    ctx->reactiveLimitLocalOverride.deviceOrNull(),
-                    ctx->reactiveLimitLocalTargetV.deviceOrNull(),
-                    ctx->dReactiveLimitFlags.p ? ctx->dReactiveLimitFlags.as<char>() : nullptr,
-                    ctx->reactiveLimitComparedVoltageRowOverride.deviceOrNull(),
-                    ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitHoldsReMergedVoltageTarget.as<char>() : nullptr,
-                    ctx->reMergedVoltageTargets.entries() > 0 ? ctx->dReactiveLimitReMergedVoltageRow.as<int>() : nullptr,
-                    nullptr, nullptr);
+        std::vector<char> keepQLimitType(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS), keepSwitchCount(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS), keepSavedRowMode(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+        std::vector<double> keepSavedTarget(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+        CUDA_CHECK(cudaMemcpy(keepQLimitType.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, keepQLimitType.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSwitchCount.data(), ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.p, keepSwitchCount.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSavedRowMode.data(), ctx->reactiveLimits.dReactiveLimitSavedRowMode.p, keepSavedRowMode.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSavedTarget.data(), ctx->reactiveLimits.dReactiveLimitSavedTarget.p, keepSavedTarget.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        launchReactiveLimitsKernel(ctx, drv, 999999, false);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<char> auditOuterLoopUnstable(nS), auditCheckDecision(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
+        std::vector<char> auditOuterLoopUnstable(nS), auditCheckDecision(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
         CUDA_CHECK(cudaMemcpy(auditOuterLoopUnstable.data(), ctx->dOuterLoopUnstable.p, nS, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(auditCheckDecision.data(), ctx->dReactiveLimitCheckDecision.p, auditCheckDecision.size(), cudaMemcpyDeviceToHost));
-        std::vector<char> auditQLimitTypeAfter(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-        CUDA_CHECK(cudaMemcpy(auditQLimitTypeAfter.data(), ctx->dReactiveLimitQLimitType.p, auditQLimitTypeAfter.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(auditCheckDecision.data(), ctx->reactiveLimits.dReactiveLimitCheckDecision.p, auditCheckDecision.size(), cudaMemcpyDeviceToHost));
+        std::vector<char> auditQLimitTypeAfter(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+        CUDA_CHECK(cudaMemcpy(auditQLimitTypeAfter.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, auditQLimitTypeAfter.size(), cudaMemcpyDeviceToHost));
         // put every touched buffer back before anything else reads them
         CUDA_CHECK(cudaMemcpyAsync(ctx->dTarget.p, ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
         CUDA_CHECK(cudaMemcpyAsync(ctx->dMode.p, ctx->dB.p, (size_t) n * nS * sizeof(int), cudaMemcpyDeviceToDevice, ctx->stream));
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitQLimitType.p, keepQLimitType.data(), keepQLimitType.size(), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitPvPqSwitchCount.p, keepSwitchCount.data(), keepSwitchCount.size(), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSavedRowMode.p, keepSavedRowMode.data(), keepSavedRowMode.size(), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dReactiveLimitSavedTarget.p, keepSavedTarget.data(), keepSavedTarget.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitQLimitType.p, keepQLimitType.data(), keepQLimitType.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitPvPqSwitchCount.p, keepSwitchCount.data(), keepSwitchCount.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSavedRowMode.p, keepSavedRowMode.data(), keepSavedRowMode.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->reactiveLimits.dReactiveLimitSavedTarget.p, keepSavedTarget.data(), keepSavedTarget.size() * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemsetAsync(ctx->dOuterLoopUnstable.p, 0, nS, ctx->stream));
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-        std::vector<double> auditRowQ(static_cast<size_t>(n) * nS), auditStateVector(static_cast<size_t>(n) * nS), auditLoadQ(ctx->nReactiveLimitEntries);
-        std::vector<char> auditQLimitTypeBefore(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS), auditIslanded;
-        std::vector<int> auditVoltageRow(ctx->nReactiveLimitEntries), auditMode(static_cast<size_t>(n) * nS);
+        std::vector<double> auditRowQ(static_cast<size_t>(n) * nS), auditStateVector(static_cast<size_t>(n) * nS), auditLoadQ(ctx->reactiveLimits.nReactiveLimitEntries);
+        std::vector<char> auditQLimitTypeBefore(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS), auditIslanded;
+        std::vector<int> auditVoltageRow(ctx->reactiveLimits.nReactiveLimitEntries), auditMode(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(auditRowQ.data(), ctx->dQbuf.p, auditRowQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(auditStateVector.data(), ctx->dX.p, auditStateVector.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(auditLoadQ.data(), ctx->dReactiveLimitLoadQ.p, auditLoadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(auditQLimitTypeBefore.data(), ctx->dReactiveLimitQLimitType.p, auditQLimitTypeBefore.size(), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(auditVoltageRow.data(), ctx->dReactiveLimitVoltageRow.p, auditVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(auditLoadQ.data(), ctx->reactiveLimits.dReactiveLimitLoadQ.p, auditLoadQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(auditQLimitTypeBefore.data(), ctx->reactiveLimits.dReactiveLimitQLimitType.p, auditQLimitTypeBefore.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(auditVoltageRow.data(), ctx->reactiveLimits.dReactiveLimitVoltageRow.p, auditVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(auditMode.data(), ctx->dMode.p, auditMode.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        if (ctx->reactiveLimitIslanded.on()) {
-            auditIslanded.resize(static_cast<size_t>(ctx->nReactiveLimitEntries) * nS);
-            CUDA_CHECK(cudaMemcpy(auditIslanded.data(), ctx->reactiveLimitIslanded.device(), auditIslanded.size(), cudaMemcpyDeviceToHost));
+        if (ctx->reactiveLimits.reactiveLimitIslanded.on()) {
+            auditIslanded.resize(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * nS);
+            CUDA_CHECK(cudaMemcpy(auditIslanded.data(), ctx->reactiveLimits.reactiveLimitIslanded.device(), auditIslanded.size(), cudaMemcpyDeviceToHost));
         }
-        std::vector<double> auditMinQ(static_cast<size_t>(ctx->nReactiveLimitEntries) * (ctx->nReactiveCapabilityCurves > 0 ? nS : 1)), auditMaxQ;
+        std::vector<double> auditMinQ(static_cast<size_t>(ctx->reactiveLimits.nReactiveLimitEntries) * (ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? nS : 1)), auditMaxQ;
         auditMaxQ.resize(auditMinQ.size());
-        CUDA_CHECK(cudaMemcpy(auditMinQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMinQPerScenario.p : ctx->dReactiveLimitMinQ.p, auditMinQ.size() * sizeof(double),
+        CUDA_CHECK(cudaMemcpy(auditMinQ.data(), ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? ctx->reactiveLimits.dReactiveLimitMinQPerScenario.p : ctx->reactiveLimits.dReactiveLimitMinQ.p, auditMinQ.size() * sizeof(double),
                 cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(auditMaxQ.data(), ctx->nReactiveCapabilityCurves > 0 ? ctx->dReactiveLimitMaxQPerScenario.p : ctx->dReactiveLimitMaxQ.p, auditMaxQ.size() * sizeof(double),
+        CUDA_CHECK(cudaMemcpy(auditMaxQ.data(), ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? ctx->reactiveLimits.dReactiveLimitMaxQPerScenario.p : ctx->reactiveLimits.dReactiveLimitMaxQ.p, auditMaxQ.size() * sizeof(double),
                 cudaMemcpyDeviceToHost));
-        std::vector<int> auditComparedVoltageRow(ctx->nReactiveLimitEntries, -1);
-        std::vector<double> auditTargetV(ctx->nReactiveLimitEntries, 0.0);
-        if (ctx->dReactiveLimitComparedVoltageRow.p) {
-            CUDA_CHECK(cudaMemcpy(auditComparedVoltageRow.data(), ctx->dReactiveLimitComparedVoltageRow.p, auditComparedVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<int> auditComparedVoltageRow(ctx->reactiveLimits.nReactiveLimitEntries, -1);
+        std::vector<double> auditTargetV(ctx->reactiveLimits.nReactiveLimitEntries, 0.0);
+        if (ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.p) {
+            CUDA_CHECK(cudaMemcpy(auditComparedVoltageRow.data(), ctx->reactiveLimits.dReactiveLimitComparedVoltageRow.p, auditComparedVoltageRow.size() * sizeof(int), cudaMemcpyDeviceToHost));
         }
-        if (ctx->dReactiveLimitTargetV.p) {
-            CUDA_CHECK(cudaMemcpy(auditTargetV.data(), ctx->dReactiveLimitTargetV.p, auditTargetV.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        if (ctx->reactiveLimits.dReactiveLimitTargetV.p) {
+            CUDA_CHECK(cudaMemcpy(auditTargetV.data(), ctx->reactiveLimits.dReactiveLimitTargetV.p, auditTargetV.size() * sizeof(double), cudaMemcpyDeviceToHost));
         }
         for (int s = 0; s < nS; s++) {
             if (!allLive[s] || !auditOuterLoopUnstable[s]) continue;
-            for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
-                size_t scenarioEntry = (size_t) s * ctx->nReactiveLimitEntries + i;
+            for (int i = 0; i < ctx->reactiveLimits.nReactiveLimitEntries; i++) {
+                size_t scenarioEntry = (size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + i;
                 if (!auditCheckDecision[scenarioEntry]) continue;
-                size_t limitIndex = ctx->nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) i;
+                size_t limitIndex = ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) i;
                 double comparedV = (auditComparedVoltageRow[i] >= 0) ? auditStateVector[(size_t) s * n + auditComparedVoltageRow[i]] : 0.0;
                 // act 1 = a PV -> PQ switch this check owed, 2 = a switch back to PV, 3 = a moved limit it owed
                 std::fprintf(stderr, "RL_OWED s=%d entry=%d vrow=%d act=%d ltBefore=%d ltAfter=%d q=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e\n",
@@ -481,13 +434,13 @@ void traceReactiveLimitsAudit(BatchSolverContext* ctx, DriverPass& drv, std::vec
         }
         for (int s = 0; s < nS; s++) {
             if (!allLive[s]) continue;
-            for (int i = 0; i < ctx->nReactiveLimitEntries; i++) {
-                size_t scenarioEntry = (size_t) s * ctx->nReactiveLimitEntries + i;
+            for (int i = 0; i < ctx->reactiveLimits.nReactiveLimitEntries; i++) {
+                size_t scenarioEntry = (size_t) s * ctx->reactiveLimits.nReactiveLimitEntries + i;
                 if (auditQLimitTypeBefore[scenarioEntry] != 0) continue;                  // switched to PQ: its row holds the limit by construction
                 if (!auditIslanded.empty() && auditIslanded[scenarioEntry]) continue;     // not a controller in this component
                 int m = auditMode[(size_t) s * n + auditVoltageRow[i]];
                 if (m == GpuRowMode::BUS_TARGET_Q) continue;  // row owns its own Q balance this scenario
-                size_t limitIndex = ctx->nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) i;
+                size_t limitIndex = ctx->reactiveLimits.nReactiveCapabilityCurves > 0 ? scenarioEntry : (size_t) i;
                 double q = auditRowQ[(size_t) s * n + auditVoltageRow[i]] + auditLoadQ[i];
                 double over = q < auditMinQ[limitIndex] ? auditMinQ[limitIndex] - q : (q > auditMaxQ[limitIndex] ? q - auditMaxQ[limitIndex] : 0.0);
                 if (over > auditTol) {

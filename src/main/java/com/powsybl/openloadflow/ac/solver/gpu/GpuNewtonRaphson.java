@@ -537,43 +537,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         int n = equationSystem.getIndex().getSortedVariablesToFind().size();
         try {
             long t0 = System.nanoTime();
-            boolean rebuilt = false;
-            // A REACTIVE-LIMIT switch to PQ of a remote gen-VC member (row mode BUS_TARGET_Q) renormalizes OLF's DISTR_Q reactive
-            // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
-            // its static qPct from before the switch. Watch the SET of members switched to PQ and re-extract when it
-            // changes: the context is rebuilt from the fresh extraction with OLF's renormalized keys. That is what used
-            // to make every solve after such a switch CPU-routed; it now solves on the device.
-            java.util.BitSet remoteMembersSwitchedToPqNow = GpuAcActivationExtractor.remoteMembersSwitchedToPq(network, equationSystem);
-            if (!remoteMembersSwitchedToPqNow.equals(remoteMembersSwitchedToPqAtExtraction)) {
-                invalidation.structureDirty = true;
-            }
-            rebuilt = rebuildStructureIfDirty(n, remoteMembersSwitchedToPqNow);
-            if (invalidation.activationDirty) {
-                activation = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
-                varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
-                invalidation.activationDirty = false;
-                criteriaDirty = true;                        // per-row thresholds follow the variables
-            }
-            if (criteriaDirty) {
-                installRowCriteria(n);
-                criteriaDirty = false;
-            }
-            // OLF_GPU_EQ_DUMP=<path>: the GPU equation system as TEXT, next to OLF's own write() of the same
-            // state (<path>.olf). OLF can print its equations, so a wrong one is readable there; ours only
-            // existed as index packs until now. Written once per run, at the FIRST solve carrying a PV -> PQ switch
-            // (row mode BUS_TARGET_Q) when there is one, since that is the assembly under suspicion.
-            dumpEquationsOnce(activation.rowMode(), n);
-            // Since the batch-of-1 route (2026-09-08) BUS_TARGET_V_WITH_SLOPE (slope-SVC) and BRANCH_TARGET_P (continuous phase) rows solve
-            // on-device. BUS_TARGET_Q (a remote gen-VC member SWITCHED TO PQ) used to be CPU-routed here because the pack's
-            // DISTR_Q weights were the STATIC extraction-time qPct while OLF's switch to PQ renormalizes them; the
-            // watch above re-extracts when that set changes, so the weights are OLF's and the solve stays on
-            // the device. Anything ABOVE the modes the kernels implement is still a fallback, not a guess.
-            for (int mode : activation.rowMode()) {
-                if (mode > 4) {
-                    throw new UnsupportedOperationException(
-                            "row mode " + mode + " is not implemented on-device");
-                }
-            }
+            boolean rebuilt = prepareSolve(n);
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
@@ -583,22 +547,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             long t1 = System.nanoTime();
             double convEpsPerEq = GpuSolveSettings.deviceConvEpsPerEq(parameters);
             installTablesAndLineSearch(target, stateVectorScalingMode);
-            // AC-emulation HVDC statuses: OLF's freezing/limits loops DEACTIVATE the hvdc coupling
-            // terms for any non-LINEAR status (the injections ride the target vector as VSC station
-            // targetP, re-extracted every solve) — mirror it with the hv element's disabled bit,
-            // which fillHvdcBatch honors. Without this the fill emitted the LINEAR coupling on top
-            // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition).
-            boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
-            List<LfHvdc> packedHvdcs = network.getHvdcs().stream()
-                    .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
-                    .toList();                               // the packer's exact enumeration order
-            int hvdcAcEmulationOffset = cachedData.getTotalElementCount() - packedHvdcs.size();
-            for (int h = 0; h < packedHvdcs.size(); h++) {
-                if (packedHvdcs.get(h).getAcEmulationControl().getAcEmulationStatus()
-                        != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
-                    elementMask[0][hvdcAcEmulationOffset + h] = true;
-                }
-            }
+            boolean[][] elementMask = baseElementMask();
             // the branches an AutomationSystem tripping may close are packed open: disabled until the device closes one
             var elementMapper = new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper(network, extractionBaseOpenBranchIds);
             for (String id : extractionBaseOpenBranchIds) {
@@ -606,73 +555,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             int[] ovIdx = new int[0];
             double[] ovVal = new double[0];
-            resetDriverPhases();
-            long handle = context.handle.get();
-            int nElements = cachedData.getTotalElementCount();
-            // Every phase's tables, from the SAME builder the batched SA calls (#58). The monitoring
-            // and transformer builders probe controls with an on/off round trip that fires network
-            // events, so the whole call sits inside our dirty-flag guard.
-            var phases = buildDevicePhases(target, n);
-            // HVDC AC emulation (freeze at OLF order 4, limits at 5) as driver phases. The run starts from the
-            // statuses the network holds: OLF's FreezingHvdcACEmulation.initialize has already run when the
-            // engine built its loops, and froze exactly the emulations it freezes — those whose two bus angles
-            // are known, at that flow (a fresh network's NaN angles freeze nothing), with the frozen injection
-            // in the targets. A FROZEN status enters as the base status, unfrozen by the driver's own phase; a
-            // LINEAR one stays linear, also on a host-loop restart, which OLF does not re-initialize either.
-            installHvdcDriverLoops(nElements, elementMask, handle);
-            // MonitoringVoltage (OLF order 6) as a driver phase.
-            monitoringVoltageControllers = phases.monitoring();
-            GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageControllers);
-            // the run's own loops
-            DriverNative.setBatchOuterLoops(handle, driverDistributesActivePower(), driverReactiveLimitsOuterLoop() != null);
-            // AreaInterchangeControl (OLF order 3) in place of DistributedSlack, moving the same participants area by area
-            var areaInterchangeControlOuterLoop = driverAreaInterchangeControlLoop();
-            areaInterchangeControlTables = areaInterchangeControlOuterLoop == null ? null
-                    : GpuAreaInterchangeControlOuterLoop.build(network, areaInterchangeControlOuterLoop, cachedData, elementMapper);
-            if (areaInterchangeControlOuterLoop != null && areaInterchangeControlTables == null) {
-                throw new PowsyblException("GPU driver: the device cannot own AreaInterchangeControl; the solve goes to the CPU");
-            }
-            GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, areaInterchangeControlTables);
-            // every distribution starts at the moves the run's earlier solves applied (none in its first)
-            DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, null,
-                    driverDistributesActivePower() ? GpuDistributedSlackOuterLoop.initialMoves(network, cachedData) : null, null);
-            LfBus distributionSlackBus = driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
-                    ? GpuDistributedSlackOuterLoop.slackBusOf(network, equationSystem, cachedData) : null;
-            double[] slackOnlyInitialMove = distributionSlackBus == null ? null
-                    : new double[] {GpuDistributedSlackOuterLoop.slackInitialMove(distributionSlackBus, driverDistributedSlackParameters())};
-            // AutomationSystem (OLF's last loop) when the engine gave it to the device
-            automationSystemTables = automationSystemOnDevice && driverLoop("AutomationSystem") != null
-                    ? com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.build(network, elementMapper) : null;
-            if (automationSystemOnDevice && driverLoop("AutomationSystem") != null && automationSystemTables == null) {
-                throw new PowsyblException("GPU driver: the device cannot own AutomationSystem; the solve goes to the CPU");
-            }
-            com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.uploadToDevice(handle, automationSystemTables);
-            // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way, as the batched
-            // security analysis. The device owns every loop of the run or the solve goes to the CPU, the same rule
-            // the batched security analysis applies to a whole run: a zone set the kernel refuses, a control loop
-            // the installer refuses, a loop whose builder represented only PART of OLF's controllers.
-            secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
-            boolean secondaryVoltageControlActive = secondaryVoltageControlControllers != null && !secondaryVoltageControlControllers.controllerBuses().isEmpty();
-            if (!com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle,
-                    secondaryVoltageControlActive ? secondaryVoltageControlControllers : null) && secondaryVoltageControlActive) {
-                throw new PowsyblException("GPU driver: the device cannot own SecondaryVoltageControl; the solve goes to the CPU");
-            }
-            List<String> refusedLoops = installControlPhases(handle, phases);
-            if (!refusedLoops.isEmpty()) {
-                throw new PowsyblException("GPU driver: the device cannot own " + refusedLoops + "; the solve goes to the CPU");
-            }
-            com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership.requireComplete();
-            if (driverRejectSlackDistributionFailure && driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
-                    && (cachedData.distributedSlack().slackPhiRow() < 0 || Double.isInfinite(cachedData.distributedSlack().slackRoomUp()))) {
-                // No participant row and no slack generator to bound the slack's own share: either nobody
-                // participates (the pack dropped the distribution, the mismatch simply stays at the slack) or the
-                // slack's share has no generator limits (a load-based slack). The device cannot tell where OLF's
-                // water-fill leaves a remaining mismatch, so OLF's own loop decides this failure behaviour. A
-                // slack-only distribution over the slack's generators is bounded by their rooms on the device.
-                throw new PowsyblException("GPU driver: a distribution without participant rows cannot apply "
-                        + "slackDistributionFailureBehavior " + acLoadFlowParameters.getSlackDistributionFailureBehavior()
-                        + "; the solve goes to the CPU");
-            }
+            double[] slackOnlyInitialMove = installDriverPhases(target, n, elementMask, elementMapper);
             double[] out = BatchSolveNative.solveBatchContext(context.handle.get(),
                     x0, target, new int[0], activation.rowMode(),
                     elementMask,
@@ -694,106 +577,16 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // the RL state only a run with the ReactiveLimits loop moves (every entry stays NONE otherwise)
             reactiveLimitsFinalState = driverReactiveLimitsOuterLoop() != null && cachedData.reactiveLimits().voltageRow().length > 0
                     ? ReactiveLimitsNative.readBatchReactiveLimitsFinalState(context.handle.get()) : null;
-            if (out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.LINEAR_SOLVE_FAILED && !robustModeForRun) {
-                // A FAILED LINEAR SOLVE (status -3, and only that: every other reject names a state
-                // the device cannot lay out or OLF's own budget, and goes to the CPU as before -
-                // retrying those on the device re-solved bases OLF's loops had to decide, 2.6e-3 kV on
-                // the robust-realistic fixture): retry ON THE DEVICE in the robust single-matrix mode
-                // (ROBUST: BTF-COLAMD, global column pivoting, matching) for the rest of the run
-                // before any CPU fallback. rte6515's full busbar structure does not factor in the
-                // uniform batch (linear residual ratio 1e12, the base came back MAX_ITERATION_REACHED
-                // and the whole analysis reported nothing) and converges on the device in the single-matrix solve.
-                // A base load flow that works on the CPU has to work on the GPU.
-                LOGGER.info("GPU Newton-Raphson: device rejected the batch-of-one solve; retrying on the device in the robust single-matrix mode");
-                if (GpuTrace.BATCH_TRACE.isOn()) {
-                    System.err.println("GPU_BASE_ROBUST_RETRY status=-2 -> mode 6 (pivoted single matrix)");
-                }
-                robustModeForRun = true;
-                BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
-                cachedData = null;
-                invalidation.structureDirty = true;
-                return runImpl(voltageInitializer, reportNode, true);
-            }
-            if (out.length > n + 2 && (int) out[n + 2] <= GpuAcSolverStatus.REJECTED) {
-                // The kernel rejected the scenario (status -2, or -3 when the robust retry failed too): a linear solve that did not solve (the
-                // structure does not factor unpivoted), the straggler exit, the outer-loop budget, an
-                // unrealistic state or a device-loop reject. The chunk solver routes such a scenario
-                // to the CPU; the batch-of-one does the same - the CPU Newton-Raphson reruns it and
-                // OLF's loops (deferred by the engine) decide.
-                throw new PowsyblException("GPU driver rejected the base solve (status -2: a failed linear solve (the structure does not factor unpivoted), straggler exit, outer-loop budget, "
-                        + "unrealistic state or a device-loop reject - OLF_GPU_REJECT_TRACE=1 names the gate)");
+            AcSolverResult retried = retryOrRejectOnDevice(out, n, voltageInitializer, reportNode);
+            if (retried != null) {
+                return retried;
             }
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",
                     (t1 - t0) / 1_000_000, rebuilt ? "rebuilt" : "reused", (t2 - t1) / 1_000_000);
             iterations = runNewtonIterations((int) out[n]);
-            // The driver ran OLF's outer loops, which MUTATE TARGETS on the device. OLF's world
-            // still holds the pre-loop ones, so without this the converged state is measured
-            // against stale targets and the run is declared MAX_ITERATION_REACHED — measured as
-            // 170 BUS_TARGET_P rows and 14 BUS_TARGET_V rows over 1e-4, where the same solve with
-            // the driver off leaves none. Give the distribution back to the network, exactly as
-            // OLF's own DistributedSlack does by setting generator targetP.
-            applyDeviceDecisionsToNetwork(cachedData);
-            // write the device solution back; the equation vector re-evaluates from it
-            equationSystem.getStateVector().set(Arrays.copyOf(out, n));
-            equationVector.minus(targetVector);
-            NewtonRaphsonStoppingCriteria.TestResult result =
-                    parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
-            // OLF's NewtonRaphson.run reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, a
-            // test passing after the last allowed step included; the device applies the same rule and its
-            // verdict is kept. OLF's own criterion on the returned state decides the rest.
-            boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED;
-            status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
-            lastRunOnDevice = true;                          // the DRIVER decided the loops of this solve
-
-            // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
-            // numerical failure (e.g. the open zero-impedance-with-loaded-far-bus-behind-a-remote-member shape,
-            // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
-            // and in the batch context — see GpuSeqBaseFallbackTest). Returning it would poison
-            // OLF's outer loops and fail the whole run (an SA base would come back FAILED where the
-            // stock CPU provider succeeds); throw into the CPU-fallback path instead, so the solve
-            // reruns on the CPU Newton-Raphson: never wrong, only un-accelerated. Ordinary
-            // non-convergence (a plausible norm) is NOT retried — the CPU would reproduce it.
-            if (status == AcSolverStatus.MAX_ITERATION_REACHED
-                    && (!Double.isFinite(result.getNorm()) || result.getNorm() > 1e2)) {
-                throw new PowsyblException("GPU Newton-Raphson returned a device-broken state (|f(x)|="
-                        + result.getNorm() + ")");
-            }
-            LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
+            status = acceptDeviceSolution(out, n, iterations);
         } catch (RuntimeException e) {
-            CPU_FALLBACK_COUNT.incrementAndGet();
-            lastRunOnDevice = false;
-            driverFallbackForRun = true;
-            // the native context may be mid-iteration inconsistent — rebuild next run
-            BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
-            cachedData = null;
-            invalidation.structureDirty = true;
-            if (GpuTrace.BATCH_TRACE.isOn()) {
-                System.err.println("GPU_BASE_FALLBACK " + e);   // test logback is broken — stderr lever
-                // "equation row N has no diagonal pairing" names a row INDEX, which on its own says
-                // nothing about which equation could not be paired. Resolve it against the CURRENT
-                // active index -- and read it as a hint, not an identification: activation changes
-                // between solves, so the same row index is a different equation on a later fallback.
-                java.util.regex.Matcher m = java.util.regex.Pattern
-                        .compile("equation row (\\d+) (?:of \\d+ )?has no diagonal pairing").matcher(String.valueOf(e.getMessage()));
-                if (m.find()) {
-                    int row = Integer.parseInt(m.group(1));
-                    var eq = equationSystem.getIndex().getEquationAtColumn(row);
-                    var elem = eq == null ? null
-                            : network.getElement(eq.getType().getElementType(), eq.getElementNum());
-                    System.err.printf("GPU_BASE_FALLBACK   row=%d of n=%d eq=%s elem=%d id=%s"
-                            + " (activation-dependent: verify before trusting)%n", row, n,
-                            eq == null ? "?" : eq.getType(), eq == null ? -1 : eq.getElementNum(),
-                            elem == null ? "?" : elem.getId());
-                }
-                e.printStackTrace();
-            }
-            // Graceful degradation: anything the GPU path cannot handle — an extractor validation rejection
-            // (unsupported variable/equation/term, remote control, zero-impedance shapes) or a native/device
-            // error — is re-run on the standard CPU Newton-Raphson with the SAME equation system and parameters:
-            // never wrong, only un-accelerated.
-            LOGGER.warn("GPU Newton-Raphson unavailable for this run ({}); falling back to the CPU Newton-Raphson",
-                    e.toString());
-            return cpuNewtonRaphson(voltageInitializer, reportNode);
+            return fallBackToCpu(e, n, voltageInitializer, reportNode);
         }
 
         if (status == AcSolverStatus.CONVERGED || parameters.isAlwaysUpdateNetwork()) {
@@ -806,6 +599,266 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                                             lfScNetwork.getSlackBuses().stream().mapToDouble(LfBus::getMismatchP).sum());
         }
         return new AcSolverResult(status, iterations, slackBusActivePowerMismatch);
+    }
+
+    /**
+     * Before a solve: the structure rebuilt when the network changed it (or a remote member's switch to PQ moved OLF's
+     * reactive keys), the activation and the per-row criteria re-extracted, and the row modes checked against what the
+     * kernels implement. Returns whether the structure was rebuilt.
+     */
+    private boolean prepareSolve(int n) {
+        boolean rebuilt;
+        // A REACTIVE-LIMIT switch to PQ of a remote gen-VC member (row mode BUS_TARGET_Q) renormalizes OLF's DISTR_Q reactive
+        // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
+        // its static qPct from before the switch. Watch the SET of members switched to PQ and re-extract when it
+        // changes: the context is rebuilt from the fresh extraction with OLF's renormalized keys. That is what used
+        // to make every solve after such a switch CPU-routed; it now solves on the device.
+        java.util.BitSet remoteMembersSwitchedToPqNow = GpuAcActivationExtractor.remoteMembersSwitchedToPq(network, equationSystem);
+        if (!remoteMembersSwitchedToPqNow.equals(remoteMembersSwitchedToPqAtExtraction)) {
+            invalidation.structureDirty = true;
+        }
+        rebuilt = rebuildStructureIfDirty(n, remoteMembersSwitchedToPqNow);
+        if (invalidation.activationDirty) {
+            activation = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+            varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
+            invalidation.activationDirty = false;
+            criteriaDirty = true;                        // per-row thresholds follow the variables
+        }
+        if (criteriaDirty) {
+            installRowCriteria(n);
+            criteriaDirty = false;
+        }
+        // OLF_GPU_EQ_DUMP=<path>: the GPU equation system as TEXT, next to OLF's own write() of the same
+        // state (<path>.olf). OLF can print its equations, so a wrong one is readable there; ours only
+        // existed as index packs until now. Written once per run, at the FIRST solve carrying a PV -> PQ switch
+        // (row mode BUS_TARGET_Q) when there is one, since that is the assembly under suspicion.
+        dumpEquationsOnce(activation.rowMode(), n);
+        // Since the batch-of-1 route (2026-09-08) BUS_TARGET_V_WITH_SLOPE (slope-SVC) and BRANCH_TARGET_P (continuous phase) rows solve
+        // on-device. BUS_TARGET_Q (a remote gen-VC member SWITCHED TO PQ) used to be CPU-routed here because the pack's
+        // DISTR_Q weights were the STATIC extraction-time qPct while OLF's switch to PQ renormalizes them; the
+        // watch above re-extracts when that set changes, so the weights are OLF's and the solve stays on
+        // the device. Anything ABOVE the modes the kernels implement is still a fallback, not a guess.
+        for (int mode : activation.rowMode()) {
+            if (mode > 4) {
+                throw new UnsupportedOperationException(
+                        "row mode " + mode + " is not implemented on-device");
+            }
+        }
+        return rebuilt;
+    }
+
+    // AC-emulation HVDC statuses: OLF's freezing/limits loops DEACTIVATE the hvdc coupling
+    // terms for any non-LINEAR status (the injections ride the target vector as VSC station
+    // targetP, re-extracted every solve) — mirror it with the hv element's disabled bit,
+    // which fillHvdcBatch honors. Without this the fill emitted the LINEAR coupling on top
+    // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition). Shunts on a bus out of the
+    // network start disabled too (GpuAcData.deadShuntElements).
+    private boolean[][] baseElementMask() {
+        boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
+        List<LfHvdc> packedHvdcs = network.getHvdcs().stream()
+                .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
+                .toList();                               // the packer's exact enumeration order
+        int hvdcAcEmulationOffset = cachedData.getTotalElementCount() - packedHvdcs.size();
+        for (int h = 0; h < packedHvdcs.size(); h++) {
+            if (packedHvdcs.get(h).getAcEmulationControl().getAcEmulationStatus()
+                    != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
+                elementMask[0][hvdcAcEmulationOffset + h] = true;
+            }
+        }
+        for (int e : cachedData.deadShuntElements()) {
+            elementMask[0][e] = true;                    // shunts on a bus out of the network: OLF evaluates nothing there
+        }
+        return elementMask;
+    }
+
+    /**
+     * Every outer loop of the run on the device, from the same builders as the batched security analysis, or a
+     * PowsyblException when the device cannot own one of them. Returns the slack-only distribution's initial move (null
+     * when the distribution has participant rows or no distribution runs).
+     */
+    private double[] installDriverPhases(double[] target, int n, boolean[][] elementMask,
+                                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper elementMapper) {
+        resetDriverPhases();
+        long handle = context.handle.get();
+        int nElements = cachedData.getTotalElementCount();
+        // Every phase's tables, from the SAME builder the batched SA calls (#58). The monitoring
+        // and transformer builders probe controls with an on/off round trip that fires network
+        // events, so the whole call sits inside our dirty-flag guard.
+        var phases = buildDevicePhases(target, n);
+        // HVDC AC emulation (freeze at OLF order 4, limits at 5) as driver phases. The run starts from the
+        // statuses the network holds: OLF's FreezingHvdcACEmulation.initialize has already run when the
+        // engine built its loops, and froze exactly the emulations it freezes — those whose two bus angles
+        // are known, at that flow (a fresh network's NaN angles freeze nothing), with the frozen injection
+        // in the targets. A FROZEN status enters as the base status, unfrozen by the driver's own phase; a
+        // LINEAR one stays linear, also on a host-loop restart, which OLF does not re-initialize either.
+        installHvdcDriverLoops(nElements, elementMask, handle);
+        // MonitoringVoltage (OLF order 6) as a driver phase.
+        monitoringVoltageControllers = phases.monitoring();
+        GpuMonitoringVoltageOuterLoop.installDriverLoop(handle, monitoringVoltageControllers);
+        // the run's own loops
+        DriverNative.setBatchOuterLoops(handle, driverDistributesActivePower(), driverReactiveLimitsOuterLoop() != null);
+        // AreaInterchangeControl (OLF order 3) in place of DistributedSlack, moving the same participants area by area
+        var areaInterchangeControlOuterLoop = driverAreaInterchangeControlLoop();
+        areaInterchangeControlTables = areaInterchangeControlOuterLoop == null ? null
+                : GpuAreaInterchangeControlOuterLoop.build(network, areaInterchangeControlOuterLoop, cachedData, elementMapper);
+        if (areaInterchangeControlOuterLoop != null && areaInterchangeControlTables == null) {
+            throw new PowsyblException("GPU driver: the device cannot own AreaInterchangeControl; the solve goes to the CPU");
+        }
+        GpuAreaInterchangeControlOuterLoop.uploadToDevice(handle, areaInterchangeControlTables);
+        // every distribution starts at the moves the run's earlier solves applied (none in its first)
+        DistributedSlackNative.setBatchDistributedSlackGeneratorAnchors(handle, null,
+                driverDistributesActivePower() ? GpuDistributedSlackOuterLoop.initialMoves(network, cachedData) : null, null);
+        LfBus distributionSlackBus = driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
+                ? GpuDistributedSlackOuterLoop.slackBusOf(network, equationSystem, cachedData) : null;
+        double[] slackOnlyInitialMove = distributionSlackBus == null ? null
+                : new double[] {GpuDistributedSlackOuterLoop.slackInitialMove(distributionSlackBus, driverDistributedSlackParameters())};
+        // AutomationSystem (OLF's last loop) when the engine gave it to the device
+        automationSystemTables = automationSystemOnDevice && driverLoop("AutomationSystem") != null
+                ? com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.build(network, elementMapper) : null;
+        if (automationSystemOnDevice && driverLoop("AutomationSystem") != null && automationSystemTables == null) {
+            throw new PowsyblException("GPU driver: the device cannot own AutomationSystem; the solve goes to the CPU");
+        }
+        com.powsybl.openloadflow.ac.outerloop.gpu.GpuAutomationSystemOuterLoop.uploadToDevice(handle, automationSystemTables);
+        // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way, as the batched
+        // security analysis. The device owns every loop of the run or the solve goes to the CPU, the same rule
+        // the batched security analysis applies to a whole run: a zone set the kernel refuses, a control loop
+        // the installer refuses, a loop whose builder represented only PART of OLF's controllers.
+        secondaryVoltageControlControllers = phases.secondaryVoltageControlControllers();
+        boolean secondaryVoltageControlActive = secondaryVoltageControlControllers != null && !secondaryVoltageControlControllers.controllerBuses().isEmpty();
+        if (!com.powsybl.openloadflow.ac.outerloop.gpu.GpuSecondaryVoltageControlOuterLoop.uploadToDevice(handle,
+                secondaryVoltageControlActive ? secondaryVoltageControlControllers : null) && secondaryVoltageControlActive) {
+            throw new PowsyblException("GPU driver: the device cannot own SecondaryVoltageControl; the solve goes to the CPU");
+        }
+        List<String> refusedLoops = installControlPhases(handle, phases);
+        if (!refusedLoops.isEmpty()) {
+            throw new PowsyblException("GPU driver: the device cannot own " + refusedLoops + "; the solve goes to the CPU");
+        }
+        com.powsybl.openloadflow.ac.outerloop.gpu.DevicePhaseOwnership.requireComplete();
+        if (driverRejectSlackDistributionFailure && driverDistributesActivePower() && cachedData.distributedSlack().busPhiRow().length == 0
+                && (cachedData.distributedSlack().slackPhiRow() < 0 || Double.isInfinite(cachedData.distributedSlack().slackRoomUp()))) {
+            // No participant row and no slack generator to bound the slack's own share: either nobody
+            // participates (the pack dropped the distribution, the mismatch simply stays at the slack) or the
+            // slack's share has no generator limits (a load-based slack). The device cannot tell where OLF's
+            // water-fill leaves a remaining mismatch, so OLF's own loop decides this failure behaviour. A
+            // slack-only distribution over the slack's generators is bounded by their rooms on the device.
+            throw new PowsyblException("GPU driver: a distribution without participant rows cannot apply "
+                    + "slackDistributionFailureBehavior " + acLoadFlowParameters.getSlackDistributionFailureBehavior()
+                    + "; the solve goes to the CPU");
+        }
+        return slackOnlyInitialMove;
+    }
+
+    /**
+     * A rejected batch-of-one solve: a failed linear solve is retried on the device in the robust single-matrix mode
+     * (returns that retry's result); any other reject throws into the CPU fallback. Null: the solve was not rejected.
+     */
+    private AcSolverResult retryOrRejectOnDevice(double[] out, int n, VoltageInitializer voltageInitializer, ReportNode reportNode) {
+        if (out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.LINEAR_SOLVE_FAILED && !robustModeForRun) {
+            // A FAILED LINEAR SOLVE (status -3, and only that: every other reject names a state
+            // the device cannot lay out or OLF's own budget, and goes to the CPU as before -
+            // retrying those on the device re-solved bases OLF's loops had to decide, 2.6e-3 kV on
+            // the robust-realistic fixture): retry ON THE DEVICE in the robust single-matrix mode
+            // (ROBUST: BTF-COLAMD, global column pivoting, matching) for the rest of the run
+            // before any CPU fallback. rte6515's full busbar structure does not factor in the
+            // uniform batch (linear residual ratio 1e12, the base came back MAX_ITERATION_REACHED
+            // and the whole analysis reported nothing) and converges on the device in the single-matrix solve.
+            // A base load flow that works on the CPU has to work on the GPU.
+            LOGGER.info("GPU Newton-Raphson: device rejected the batch-of-one solve; retrying on the device in the robust single-matrix mode");
+            if (GpuTrace.BATCH_TRACE.isOn()) {
+                System.err.println("GPU_BASE_ROBUST_RETRY status=-2 -> mode 6 (pivoted single matrix)");
+            }
+            robustModeForRun = true;
+            BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
+            cachedData = null;
+            invalidation.structureDirty = true;
+            return runImpl(voltageInitializer, reportNode, true);
+        }
+        if (out.length > n + 2 && (int) out[n + 2] <= GpuAcSolverStatus.REJECTED) {
+            // The kernel rejected the scenario (status -2, or -3 when the robust retry failed too): a linear solve that did not solve (the
+            // structure does not factor unpivoted), the straggler exit, the outer-loop budget, an
+            // unrealistic state or a device-loop reject. The chunk solver routes such a scenario
+            // to the CPU; the batch-of-one does the same - the CPU Newton-Raphson reruns it and
+            // OLF's loops (deferred by the engine) decide.
+            throw new PowsyblException("GPU driver rejected the base solve (status -2: a failed linear solve (the structure does not factor unpivoted), straggler exit, outer-loop budget, "
+                    + "unrealistic state or a device-loop reject - OLF_GPU_REJECT_TRACE=1 names the gate)");
+        }
+        return null;
+    }
+
+    /** The device's solution given back to OLF's network and equation system, and OLF's own stopping criteria on it. */
+    private AcSolverStatus acceptDeviceSolution(double[] out, int n, int iterations) {
+        // The driver ran OLF's outer loops, which MUTATE TARGETS on the device. OLF's world
+        // still holds the pre-loop ones, so without this the converged state is measured
+        // against stale targets and the run is declared MAX_ITERATION_REACHED — measured as
+        // 170 BUS_TARGET_P rows and 14 BUS_TARGET_V rows over 1e-4, where the same solve with
+        // the driver off leaves none. Give the distribution back to the network, exactly as
+        // OLF's own DistributedSlack does by setting generator targetP.
+        applyDeviceDecisionsToNetwork(cachedData);
+        // write the device solution back; the equation vector re-evaluates from it
+        equationSystem.getStateVector().set(Arrays.copyOf(out, n));
+        equationVector.minus(targetVector);
+        NewtonRaphsonStoppingCriteria.TestResult result =
+                parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
+        // OLF's NewtonRaphson.run reports MAX_ITERATION_REACHED whenever iterations >= maxIterations, a
+        // test passing after the last allowed step included; the device applies the same rule and its
+        // verdict is kept. OLF's own criterion on the returned state decides the rest.
+        boolean deviceBudgetOut = out.length > n + 2 && (int) out[n + 2] == GpuAcSolverStatus.MAX_ITERATION_REACHED;
+        AcSolverStatus status = result.isStop() && !deviceBudgetOut ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
+        lastRunOnDevice = true;                          // the DRIVER decided the loops of this solve
+
+        // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
+        // numerical failure (e.g. the open zero-impedance-with-loaded-far-bus-behind-a-remote-member shape,
+        // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
+        // and in the batch context — see GpuSeqBaseFallbackTest). Returning it would poison
+        // OLF's outer loops and fail the whole run (an SA base would come back FAILED where the
+        // stock CPU provider succeeds); throw into the CPU-fallback path instead, so the solve
+        // reruns on the CPU Newton-Raphson: never wrong, only un-accelerated. Ordinary
+        // non-convergence (a plausible norm) is NOT retried — the CPU would reproduce it.
+        if (status == AcSolverStatus.MAX_ITERATION_REACHED
+                && (!Double.isFinite(result.getNorm()) || result.getNorm() > 1e2)) {
+            throw new PowsyblException("GPU Newton-Raphson returned a device-broken state (|f(x)|="
+                    + result.getNorm() + ")");
+        }
+        LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
+        return status;
+    }
+
+    /** Anything the device path cannot handle: the context dropped, and the solve re-run on OLF's CPU Newton-Raphson. */
+    private AcSolverResult fallBackToCpu(RuntimeException e, int n, VoltageInitializer voltageInitializer, ReportNode reportNode) {
+        CPU_FALLBACK_COUNT.incrementAndGet();
+        lastRunOnDevice = false;
+        driverFallbackForRun = true;
+        // the native context may be mid-iteration inconsistent — rebuild next run
+        BatchSolveNative.destroyBatchContext(context.handle.getAndSet(0));
+        cachedData = null;
+        invalidation.structureDirty = true;
+        if (GpuTrace.BATCH_TRACE.isOn()) {
+            System.err.println("GPU_BASE_FALLBACK " + e);   // test logback is broken — stderr lever
+            // "equation row N has no diagonal pairing" names a row INDEX, which on its own says
+            // nothing about which equation could not be paired. Resolve it against the CURRENT
+            // active index -- and read it as a hint, not an identification: activation changes
+            // between solves, so the same row index is a different equation on a later fallback.
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("equation row (\\d+) (?:of \\d+ )?has no diagonal pairing").matcher(String.valueOf(e.getMessage()));
+            if (m.find()) {
+                int row = Integer.parseInt(m.group(1));
+                var eq = equationSystem.getIndex().getEquationAtColumn(row);
+                var elem = eq == null ? null
+                        : network.getElement(eq.getType().getElementType(), eq.getElementNum());
+                System.err.printf("GPU_BASE_FALLBACK   row=%d of n=%d eq=%s elem=%d id=%s"
+                        + " (activation-dependent: verify before trusting)%n", row, n,
+                        eq == null ? "?" : eq.getType(), eq == null ? -1 : eq.getElementNum(),
+                        elem == null ? "?" : elem.getId());
+            }
+            e.printStackTrace();
+        }
+        // Graceful degradation: anything the GPU path cannot handle — an extractor validation rejection
+        // (unsupported variable/equation/term, remote control, zero-impedance shapes) or a native/device
+        // error — is re-run on the standard CPU Newton-Raphson with the SAME equation system and parameters:
+        // never wrong, only un-accelerated.
+        LOGGER.warn("GPU Newton-Raphson unavailable for this run ({}); falling back to the CPU Newton-Raphson",
+                e.toString());
+        return cpuNewtonRaphson(voltageInitializer, reportNode);
     }
 
     /** Install the run-constant outer-loop tables when they are dirty, and OLF's line-search budget in line-search

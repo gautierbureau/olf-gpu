@@ -29,6 +29,7 @@
 #include "../common/codes/gpu_two_sides.cuh"
 #include "../solver/linear_solver_settings.cuh"
 #include "structure_build.cuh"
+#include "distr_q_columns.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -83,7 +84,8 @@ RC resolveHvdcAcEmulation(const HvdcAcEmulationScatter& s, const int* ix) {     
 // the solution dx needs no back-permutation.
 std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIndices, int nOpenBranch, const int* openBranchIndices,
                              int nShunt, const int* shuntIndices, int nHvdcAcEmulation, const int* hvdcAcEmulationIndices,
-                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices) {
+                             int nDistrQ, const int* distrQRow, int nZeroImpedanceBranch, const int* zeroImpedanceBranchIndices,
+                             int nIdentityRows, const int* identityRows) {
     std::vector<int> rowMap(n, -1);
     auto pairRc = [&](int row, int col) {
         if (row < 0 || col < 0) return;
@@ -187,6 +189,12 @@ std::vector<int> buildRowMap(int n, int nClosedBranch, const int* closedBranchIn
             pairRc(zeroPhiRowOf(ix), zeroPhiRowOf(ix));
         }
     }
+    // Rows that hold an identity and nothing else: the DUMMY_P / DUMMY_Q of a base-open switch to a dead bus, which no
+    // family packs (the switch only couples once an action closes it, never on the device). Their own variable is the
+    // diagonal the row-mode mask writes 1.0 at.
+    for (int i = 0; i < nIdentityRows; i++) {
+        pairRc(identityRows[i], identityRows[i]);
+    }
     std::vector<char> colUsed(n, 0);
     for (int r = 0; r < n; r++) {
         if (rowMap[r] < 0) {                                 // every index in [0,n) is an active equation
@@ -256,20 +264,11 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             if (pass == 1) {
                 pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
             }
-            if (distrQKind[c] == GpuReactiveTermKind::SHUNT_COMPENSATOR_REACTIVE_FLOW) {  // shunt q: bus V column
-                pat.emplace_back(mappedRow, shuntIndices[static_cast<size_t>(distrQElement[c]) * 5 + 2]);
-            } else if (distrQKind[c] == GpuReactiveTermKind::OPEN_BRANCH_REACTIVE_FLOW) {  // half-open: connected-side V column
-                const int* openBranch = openBranchIndices + static_cast<size_t>(distrQElement[c]) * 6;
-                pat.emplace_back(mappedRow, distrQSide[c] == GpuTwoSides::ONE ? openBranch[4] : openBranch[5]);
-            } else if (distrQKind[c] == GpuReactiveTermKind::DUMMY_Q) {  // zero-imp DUMMY_Q column
-                pat.emplace_back(mappedRow, distrQElement[c]);
-            } else {                                         // closed branch: v1 v2 ph1 ph2 r1
-                const int* q = closedBranchIndices + static_cast<size_t>(distrQElement[c]) * 12;
-                pat.emplace_back(mappedRow, q[5]);
-                pat.emplace_back(mappedRow, q[7]);
-                pat.emplace_back(mappedRow, q[4]);
-                pat.emplace_back(mappedRow, q[6]);
-                if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+            int columns[5];
+            const int count = distrQTermColumns(distrQKind[c], distrQElement[c], distrQSide[c], closedBranchIndices,
+                                                openBranchIndices, shuntIndices, columns);
+            for (int k = 0; k < count; k++) {
+                pat.emplace_back(mappedRow, columns[k]);
             }
         }
     }

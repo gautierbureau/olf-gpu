@@ -45,7 +45,19 @@ final class ActionSeed {
             GpuBatchedSecurityAnalysisSolver.LAST_BROUGHT_BACK_EQUATIONS.set(broughtBackEquations);
         }
         java.util.Set<LfBus> broughtBack = new java.util.HashSet<>();
+        java.util.List<LfBranch> outOfTree = contingencies.get(ci).stickyNonSpanningTreeBranches();
+        int switchClosesOutOfTree = 0;
+        int switchCloses = 0;
         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
+            if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                switchCloses++;
+            }
+            if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC) && outOfTree.contains(reclosed)) {
+                // a switch close OLF's tree for the pair leaves out (another close of the pair already joins its two
+                // buses): its DUMMY_TARGET identities stay, holding its dummies at 0, and it couples nothing more
+                switchClosesOutOfTree++;
+                continue;
+            }
             if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 Integer ze = rs.zeroImpedanceElementByBranchNumChunk.get(reclosed.getNum());
                 rs.zeroImpedanceBranchCloseScenarioElementList.add(s);
@@ -64,6 +76,9 @@ final class ActionSeed {
                     bringBack(ctx, s, end);
                 }
             }
+        }
+        if (switchCloses > 0) {
+            GpuBatchedSecurityAnalysisSolver.LAST_SWITCH_CLOSES_OUT_OF_TREE.set(switchClosesOutOfTree);
         }
         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
             rs.closedBranchParameterOverrideScenarioElementList.add(s);

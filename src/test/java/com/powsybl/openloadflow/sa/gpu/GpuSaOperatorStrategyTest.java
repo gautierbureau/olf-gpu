@@ -1231,6 +1231,53 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(withDeadSectionAndLine(420.), 2);
     }
 
+    /** One strategy closing the coupler C (open at base: BBS1 and BBS2 apart) and BD, which brings BBS4 and BBS7 back across
+     *  LX: two switch closes in one pair, both edges of OLF's tree. */
+    @Test
+    void couplerAndDeadSectionClosedByOneStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        network.getSwitch("C").setOpen(true);
+        assertSwitchClosesMatchCpu(network, List.of("BD", "C"));
+    }
+
+    /** One strategy closing the couplers C and C2, both open at base between BBS1 and BBS2: OLF's tree takes one of them
+     *  and leaves the other out, whose dummies its DUMMY_TARGET identities hold at 0, so the device keeps that one out of the
+     *  coupling too. Coupled both, the two ZERO_PHI / ZERO_V pairs are redundant: the buses come out the same (the device
+     *  copes with the singular split), but it is not OLF's system, and OLF reports no switch flow to tell them apart. */
+    @Test
+    void parallelCouplersClosedByOneStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        network.getSwitch("C").setOpen(true);
+        network.getVoltageLevel("VL1").getNodeBreakerView().newBreaker().setId("C2").setNode1(0).setNode2(1).setOpen(true).add();
+        var leftOut = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.LAST_SWITCH_CLOSES_OUT_OF_TREE;
+        leftOut.set(-1);
+        assertSwitchClosesMatchCpu(network, List.of("C", "C2"));
+        assertEquals(1, leftOut.get(), "one of C and C2 out of OLF's tree for the pair");
+        leftOut.set(-1);
+        Network withDeadSection = withDeadSectionAndLine(420.);
+        withDeadSection.getSwitch("C").setOpen(true);
+        assertSwitchClosesMatchCpu(withDeadSection, List.of("BD", "C"));
+        assertEquals(0, leftOut.get(), "C and BD both in OLF's tree for the pair");
+    }
+
+    /** The contingency L1 with one strategy closing {@code switchIds}: the contingency and the pair on the device. */
+    private void assertSwitchClosesMatchCpu(Network network, List<String> switchIds) {
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = switchIds.stream()
+                .map(id -> (com.powsybl.action.Action) new com.powsybl.action.SwitchAction("close" + id, id, false)).toList();
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sClose",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(),
+                        actions.stream().map(com.powsybl.action.Action::getId).toList()));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
     /** OLF's equation count, behind its stopping threshold sqrt(eps^2 * count), takes the active and reactive power balances
      *  of every bus a pair brings back (each switch keeps two equations, ZERO_PHI / ZERO_V closed and DUMMY_TARGET_P /
      *  DUMMY_TARGET_Q open): BBS4 merged into BBS3, BBS4 and BBS7 on their rows past OLF's, BBS5 and BBS6 coupling BBS1 and

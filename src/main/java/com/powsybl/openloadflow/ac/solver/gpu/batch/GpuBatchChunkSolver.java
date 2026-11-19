@@ -464,7 +464,8 @@ final class GpuBatchChunkSolver {
 
         // The two phases' scenario lists and what the pair phase reads of the contingency phase.
         private void prepareRun() {
-            rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
+            rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop(),
+                    in.base().olfRowCount());
             // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
             // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
             // solved state (x0PerScenario) and PV/PQ states (reactiveLimitsSeedState), so the strategy

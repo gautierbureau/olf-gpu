@@ -94,8 +94,7 @@ public final class DeadBusRows {
                 connectivity.undoTemporaryChanges();
                 connectivity.setMainComponentVertex(slack);
             }
-            boolean impedant = edges.stream().anyMatch(b -> !b.isZeroImpedance(LoadFlowModel.AC));
-            if (!island.contains(deadEnd) || !impedant) {
+            if (!island.contains(deadEnd) || !needsRows(island, edges)) {
                 continue;                                    // switches alone: merged by the pairs, no rows
             }
             withRows.addAll(island);
@@ -112,6 +111,17 @@ public final class DeadBusRows {
             indexOfBusNum[ordered.get(k).getNum()] = k;
         }
         return new DeadBusRows(olfRowCount, Collections.unmodifiableList(ordered), indexOfBusNum, switchOf);
+    }
+
+    /**
+     * Whether an island needs OLF's own equations on rows: it holds an impedant branch or a shunt, whose terms depend on
+     * their buses' own voltages, which OLF starts from each bus's own value (merged into the switch's bus, the first
+     * Newton step would be evaluated elsewhere). Switches alone carry nothing that depends on a voltage.
+     */
+    private static boolean needsRows(Set<LfBus> island, Set<LfBranch> edges) {
+        return edges.stream().anyMatch(b -> !b.isZeroImpedance(LoadFlowModel.AC))
+                || island.stream().anyMatch(bus -> bus.getShunt().isPresent() || bus.getControllerShunt().isPresent()
+                        || bus.getSvcShunt().isPresent());
     }
 
     public boolean isEmpty() {

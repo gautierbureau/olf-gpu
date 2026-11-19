@@ -211,14 +211,21 @@ final class GpuAcFamilyPacker {
         int[] shuntElementOf = new int[nBuses];                    // shunt element index per bus (-1 = none)
         java.util.Arrays.fill(shuntElementOf, -1);
         for (LfBus bus : network.getBuses()) {
+            // A bus out of the network at base with rows past OLF's (DeadBusRows): its shunts on those rows, masked in every
+            // lane until a pair brings the bus back (deadShuntElements, ActionSeed). Any other bus: its extraction's rows.
+            boolean withRows = bus.isDisabled() && deadBusRows.phiRow(bus) >= 0;
+            int busPRow = withRows ? pRowOf(bus, columns, deadBusRows) : pRow[bus.getNum()];
+            int busQRow = withRows ? qRowOf(bus, columns, deadBusRows) : qRow[bus.getNum()];
+            int busVCol = withRows ? vColOf(bus, columns, deadBusRows) : vCol[bus.getNum()];
+            int busAlternateQRow = withRows ? -1 : alternateQRow[bus.getNum()];
             // Fixed (non-controlling) shunt: b is a constant (bRow = -1, idx 3). shuntElementOf points DISTR_Q's
             // reactive contribution at the fixed shunt.
             bus.getShunt().ifPresent(shunt -> {
                 shuntElementOf[bus.getNum()] = shuntParameters.size();
                 shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
-                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
-                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    busPRow, busQRow, busVCol, -1,
+                    busAlternateQRow});                            // [4]: alternate Q row (dyn reloc)
             });
             // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
             // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
@@ -226,8 +233,8 @@ final class GpuAcFamilyPacker {
             bus.getControllerShunt().ifPresent(shunt -> {
                 shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
-                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[shunt.getNum()],
-                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    busPRow, busQRow, busVCol, shuntBCol[shunt.getNum()],
+                    busAlternateQRow});                            // [4]: alternate Q row (dyn reloc)
             });
             // SVC stand-by shunt (StandbyAutomaton b0): a permanent fixed susceptance the SVC injects
             // whether standing by or active — a plain fixed-shunt element (silently dropping it was a
@@ -235,8 +242,8 @@ final class GpuAcFamilyPacker {
             bus.getSvcShunt().ifPresent(shunt -> {
                 shuntParameters.add(new double[] {shunt.getG(), shunt.getB()});
                 shuntIndices.add(new int[] {
-                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
-                    alternateQRow[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+                    busPRow, busQRow, busVCol, -1,
+                    busAlternateQRow});                            // [4]: alternate Q row (dyn reloc)
             });
             packLoadModels(bus, pRow, qRow, vCol, loadModelParameters, loadModelIndices);
         }

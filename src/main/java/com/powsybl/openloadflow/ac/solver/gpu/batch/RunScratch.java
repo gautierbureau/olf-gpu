@@ -66,7 +66,7 @@ final class RunScratch {
     private final int[] deadShuntElements;
 
     RunScratch(int chunkSize, int nElements, GpuAcData gpuData, GpuAcElementMapper elementMapper, int[] baseRowMode,
-               boolean distributedSlackOuterLoop) {
+               boolean distributedSlackOuterLoop, int olfRowCount) {
         this.disabledMask = new boolean[chunkSize][nElements];
         this.disabledIdx = new int[chunkSize][];
         this.elementsAtVCol = new java.util.HashMap<>();
@@ -109,7 +109,7 @@ final class RunScratch {
         this.distributedSlackOverrideMaxDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.distributedSlackOverrideMinDelta = hasDistributedSlack ? new double[chunkSize] : new double[0];
         this.baseOpenClosedBranchElements = gpuData.baseOpenBranches().closedBranchElements();
-        this.deadShuntElements = gpuData.deadShuntElements();
+        this.deadShuntElements = gpuData.deadShuntElements(olfRowCount);
     }
 
     /** Clear the run-scope lists a chunk rebuilds, and the distributed-slack reweight. */

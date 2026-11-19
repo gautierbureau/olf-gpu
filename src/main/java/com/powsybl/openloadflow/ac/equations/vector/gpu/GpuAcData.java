@@ -210,10 +210,16 @@ public record GpuAcData(ClosedBranchPack closedBranch, OpenBranchPack openBranch
      * the fill would otherwise read the voltage at column -1.
      */
     public int[] deadShuntElements() {
+        return deadShuntElements(Integer.MAX_VALUE);
+    }
+
+    /** As above, with rows past OLF's {@code olfRowCount} (DeadBusRows): a shunt on such a bus's rows is out too until a
+     *  strategy brings its bus back. */
+    public int[] deadShuntElements(int olfRowCount) {
         int offset = getClosedBranchCount() + getOpenBranchCount();
         int[] ix = shunt.indices();
         return java.util.stream.IntStream.range(0, getShuntCount())
-                .filter(e -> ix[e * 5 + 2] < 0)
+                .filter(e -> ix[e * 5 + 2] < 0 || ix[e * 5 + 2] >= olfRowCount)
                 .map(e -> offset + e)
                 .toArray();
     }

@@ -646,16 +646,19 @@ final class GpuStrategyComposer {
         return null;
     }
 
-    /** The island buses the device cannot hold: a generator, a shunt, an HVDC, a load model or a branch open at one side;
-     *  a load at a bus with rows past OLF's. */
+    /** The island buses the device cannot hold: a generator, a shunt with a voltage control or an SVC's stand-by one, a
+     *  fixed shunt on a bus without rows, an HVDC, a load model or a branch open at one side; a load at a bus with rows. */
     private static String refusedIslandBus(java.util.Set<LfBus> island,
                                            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         for (LfBus bus : island) {
             if (!bus.getGenerators().isEmpty()) {
                 return "SWITCH_CLOSE_DEAD_ISLAND_WITH_GENERATOR";
             }
-            if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
-                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_SHUNT";
+            if (bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_CONTROLLED_SHUNT";   // a voltage control, or an SVC's stand-by
+            }
+            if (bus.getShunt().isPresent() && deadBusRows.phiRow(bus) < 0) {
+                return "SWITCH_CLOSE_DEAD_ISLAND_WITH_SHUNT";    // a fixed shunt on a bus without rows
             }
             if (!bus.getHvdcs().isEmpty()) {
                 return "SWITCH_CLOSE_DEAD_ISLAND_WITH_HVDC";

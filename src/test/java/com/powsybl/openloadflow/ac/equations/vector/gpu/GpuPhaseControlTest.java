@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *       {@code BRANCH_TARGET_ALPHA1} (the a1−target identity) stays active for the whole run —
  *       a1 is a variable HELD at its tap value and the outer loop moves TAPS between solves.
  *       That is the row this test exercises on the GPU.</li>
- *   <li>CONTINUOUS_WITH_DISCRETISATION with control enabled: {@code BRANCH_TARGET_P} on the
+ *   <li>CONTINUOUS_WITH_DISCRETISATION with control enabled: {@code BRANCH_TARGET_P1}/{@code P2} on the
  *       CONTROLLED branch instead — a branch-owned power row the GPU packs no family for, so
  *       the extractor throws and the solver falls back to CPU. Asserted here too: the run must
  *       still produce CPU-identical results, never a silently dropped control.</li>
@@ -140,7 +140,7 @@ class GpuPhaseControlTest {
 
     @Test
     void continuousWithDiscretisationSolvesOnGpuAndMatches() {
-        // CONTINUOUS: BRANCH_TARGET_P activates on the controlled branch (row mode BRANCH_TARGET_P). Since the
+        // CONTINUOUS: BRANCH_TARGET_P1/P2 activates on the controlled branch (row mode BRANCH_TARGET_P). Since the
         // batch-of-1 route (2026-09-08) the sequential solver carries BRANCH_TARGET_P rows on-device — this
         // shape used to fall back to the CPU NR; now it must SOLVE on the GPU and stay CPU-identical.
         compare(GpuPhaseControlTest::regulatingPst,

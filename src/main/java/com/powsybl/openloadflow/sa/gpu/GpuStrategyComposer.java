@@ -477,12 +477,68 @@ final class GpuStrategyComposer {
                 }
             }
         }
+        keepCutOff(net, ctgCut, ctgBranches, contingencyZeroImpedanceBranchOutages, branches, zeroImpedanceOutages, reclosed, reenabled, deadIslandCloses);
         return new BatchContingency(pairId(contingencyId, strategy, actionIds),
                 // the parent's one-side openings and the zero-impedance tree OLF reaches the strategy with: the pair is
                 // the contingency's topology plus the actions (dropping them solved another network: 0.52 kV at B4 on a
                 // three-winding transformer outage)
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, zeroImpedanceOutages, ctgHvdcs, ctgSideOpens,
                 contingencyStickyNonSpanningTreeBranches, generatorActions, acEmulationOff, broughtBackBuses);
+    }
+
+    /**
+     * What a contingency cuts off stays cut off but for what the strategy's actions enable: OLF applies the actions on the
+     * post-contingency connectivity, from which the contingency removed every branch between two buses it lost
+     * (AbstractLfBranchAction.getNetworkActivations: its disabled network), and adds back only the branches the actions
+     * close, so a close onto one of those buses brings back that bus and what it reaches through the closed branches alone.
+     * The device's islanding of the pair reads its outages: when the actions touch a bus the contingency lost, those branches
+     * become the pair's outages too (the impedant ones in {@code branches}, the switches in {@code zeroImpedanceOutages}).
+     */
+    @SuppressWarnings("java:S107")
+    private static void keepCutOff(LfNetwork net, List<LfBranch> ctgCut, List<LfBranch> ctgBranches, List<LfBranch> ctgZeroImpedanceOutages,
+                                   List<LfBranch> branches, List<LfBranch> zeroImpedanceOutages, List<LfBranch> reclosed,
+                                   List<LfBranch> reenabled, List<LfBranch> deadIslandCloses) {
+        java.util.Set<LfBranch> enabled = new java.util.HashSet<>(reclosed);
+        enabled.addAll(reenabled);
+        enabled.addAll(deadIslandCloses);
+        ctgBranches.stream().filter(b -> !branches.contains(b)).forEach(enabled::add);                       // reclosed outages
+        ctgZeroImpedanceOutages.stream().filter(b -> !zeroImpedanceOutages.contains(b)).forEach(enabled::add);
+        if (enabled.isEmpty()) {
+            return;
+        }
+        java.util.Set<LfBus> lost = lostBuses(net, ctgCut);
+        if (lost.isEmpty() || enabled.stream().noneMatch(b -> lost.contains(b.getBus1()) || lost.contains(b.getBus2()))) {
+            return;                                          // the actions touch nothing the contingency cut off
+        }
+        for (LfBus bus : lost) {
+            for (LfBranch b : bus.getBranches()) {
+                // PropagatedContingency.toLfContingency disables fully a lost bus's branch whose other end is lost too; one to
+                // a bus still in the network is opened at the lost side only (the pair's side openings keep it so)
+                if (b.getBus1() == null || b.getBus2() == null || b.isDisabled() || enabled.contains(b)
+                        || !lost.contains(b.getBus1()) || !lost.contains(b.getBus2())) {
+                    continue;
+                }
+                List<LfBranch> outages = b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC) ? zeroImpedanceOutages : branches;
+                if (!outages.contains(b)) {
+                    outages.add(b);
+                }
+            }
+        }
+    }
+
+    /** The buses a contingency removes from the main component (its cut and the slack's component, as broughtBack). */
+    private static java.util.Set<LfBus> lostBuses(LfNetwork net, List<LfBranch> ctgCut) {
+        com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> connectivity = net.getConnectivity();
+        LfBus slack = net.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+        connectivity.startTemporaryChanges();
+        try {
+            ctgCut.forEach(connectivity::removeEdge);
+            connectivity.setMainComponentVertex(slack);
+            return new java.util.HashSet<>(connectivity.getVerticesRemovedFromMainComponent());
+        } finally {
+            connectivity.undoTemporaryChanges();
+            connectivity.setMainComponentVertex(slack);
+        }
     }
 
     /** The closes of switches within one zero-impedance network at base: a loop at base, but the contingency's and the

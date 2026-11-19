@@ -744,10 +744,11 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         // off; closing C23 brings BBS2 back (OLF adds C23 to the post-contingency connectivity, from which the contingency
         // also removed C12: BBS1 stays out). The islanding analysis never added the strategy's closes back and reused the
         // contingency's verdict, the cut being the same: the pair passed for one bringing nothing back, and the device
-        // solved it with BBS2 still out. Seen now, the pair goes to the CPU (PAIR:RECLOSE_INTO_ISLAND)
+        // solved it with BBS2 still out; then the pair went to the CPU (PAIR:RECLOSE_INTO_ISLAND). The pair now outages C12
+        // as OLF's disabled network has it (GpuStrategyComposer.keepCutOff): BBS2 back, BBS1 frozen, on the device
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        var cpu = assertTwoCouplerTreesStrategyMatchesCpu("L1", List.of("closeC23"), 1);
+        var cpu = assertTwoCouplerTreesStrategyMatchesCpu("L1", List.of("closeC23"), 2);
         assertEquals(3, cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults().stream()
                 .filter(b -> b.getVoltageLevelId().equals("VL1")).count(), "the strategy brings BBS2 back, not BBS1");
     }
@@ -1906,7 +1907,8 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
      *  end comes back, the rest of the island stays out. ieee14 with a radial chain B14 - B15 - B16, a load on each:
      *  losing L15-16-1 islands B16 alone, which its reclose brings back whole, on the device as in OLF (and a B16
      *  load the contingency names stays lost); losing L14-15-1 islands B15 and B16, and its reclose brings back B15
-     *  only, where the device would reconnect both (rte6515 LINE-3273-1812: 154.7 MW, 3 kV): CPU. */
+     *  only, where the device used to reconnect both (rte6515 LINE-3273-1812: 154.7 MW, 3 kV): the pair outages L15-16-1,
+     *  as OLF's disabled network has it (GpuStrategyComposer.keepCutOff), and B16 stays frozen, on the device. */
     @Test
     void recloseIntoAnIslandMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1934,8 +1936,8 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("s-close15",
                 com.powsybl.contingency.ContingencyContext.specificContingency("L14-15-1"),
                 new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("close15")));
-        // the three contingencies and the two single-bus reclosures; the two-bus one is OLF's
-        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 5);
+        // the three contingencies and the three reclosures
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 6);
     }
 
     /** A synchronous condenser switched to PQ at its reactive limit in the base, islanded by the contingency. A pair keeping

@@ -195,7 +195,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         for (com.powsybl.iidm.network.Generator g : List.of(g3, g3b)) {
             g.newReactiveCapabilityCurve()
                     .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
-                    .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                    .beginPoint().setP(200).setMinQ(-50).setMaxQ(-45).endPoint()
                     .add();
         }
         network.getGenerator("B1-G").newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
@@ -258,7 +258,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
         // MVAr per MW of slack — a difference no tolerance hides.
         g3.newReactiveCapabilityCurve()
                 .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
-                .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                .beginPoint().setP(200).setMinQ(-50).setMaxQ(-45).endPoint()
                 .add();
         g3b.newReactiveCapabilityCurve()
                 .beginPoint().setP(0).setMinQ(-60).setMaxQ(60).endPoint()

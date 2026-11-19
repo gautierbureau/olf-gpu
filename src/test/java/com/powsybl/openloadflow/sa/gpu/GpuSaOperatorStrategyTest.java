@@ -954,7 +954,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         g3.setTargetP(40).setMinP(0).setMaxP(200);
         g3.newReactiveCapabilityCurve()
                 .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
-                .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                .beginPoint().setP(200).setMinQ(-50).setMaxQ(-45).endPoint()
                 .add();
         // regulator off: a constant targetQ in B3's box, low enough that B3 sits at its max Q
         network.getVoltageLevel("VL3").newGenerator().setId("B3-G2").setBus("B3").setConnectableBus("B3")
@@ -1001,7 +1001,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         g6.setMinP(0).setMaxP(100);
         g6.newReactiveCapabilityCurve()
                 .beginPoint().setP(0).setMinQ(-6).setMaxQ(5).endPoint()
-                .beginPoint().setP(100).setMinQ(-6).setMaxQ(-20).endPoint()
+                .beginPoint().setP(100).setMinQ(-26).setMaxQ(-20).endPoint()
                 .add();
         g6.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class).withParticipate(false).add();
         String loadId = loadAtBus(network, "B9").getId();

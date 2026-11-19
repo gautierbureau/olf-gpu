@@ -62,6 +62,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
      *  sections, branches first, then the other kinds once parity holds. Real network data: never
      *  read its content, only run it. */
     private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_GPU_SA_CASE_FILE", "rte6515_full.xiidm.gz"));
+
+    /** The case file, its reactive capability curves with a point whose max Q is below its min Q repaired as the importer
+     *  repairs them (powsybl-core 7.4 rejects such a curve otherwise; the comparison's two arms read the same network). */
+    private static Network readCase() {
+        java.util.Properties parameters = new java.util.Properties();
+        parameters.setProperty("iidm.import.repair-invalid-reactive-curve-limits", "true");
+        return Network.read(CASE_FILE, com.powsybl.computation.local.LocalComputationManager.getDefault(),
+                com.powsybl.iidm.network.ImportConfig.load(), parameters);
+    }
+
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
     GpuVsCpuRte6515SaTest(CommonTestConfig commonTestConfig) {
@@ -768,7 +778,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
     @Test
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
-        Network network = Network.read(CASE_FILE);
+        Network network = readCase();
         List<Contingency> contingencies = allBranchContingencies(network);
         // OLF_GPU_SA_CTG_FIRST=<id>[,<id>]: move these to the FRONT of the list, keeping the list
         // itself intact (so the retained switches, and therefore the network both arms solve, are
@@ -870,13 +880,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // contingencies had already executed — which is exactly the shape of the "busbar 8.176e-06 kV
         // on a 0%-batched kind" that stood recorded as a GPU/CPU difference. Read before timing, so a
         // second parse never lands inside a measured region.
-        Network networkGpuCold = Network.read(CASE_FILE);
-        Network networkGpuWarm = Network.read(CASE_FILE);
+        Network networkGpuCold = readCase();
+        Network networkGpuWarm = readCase();
         // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the
         // JVM's first SA and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio
         // flatters the GPU. The ratios are then quoted against CPU warm.
         boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
-        Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
+        Network networkCpuWarm = cpuWarmRun ? readCase() : null;
 
         // OLF_GPU_SA_STRATEGIES=1: operator strategies on every k-th contingency (OLF_GPU_SA_STRATEGY_EVERY, default 20),
         // one per action kind the device composes, built from the network's own elements (syntheticStrategies)

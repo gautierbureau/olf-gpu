@@ -195,7 +195,7 @@ final class GpuBatchPrecomputer {
                 SolveGroup group = groups.get(g);
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
                         group.withoutStrategies().contains(contingencyId) ? List.of() : strategiesByContingency.get(contingencyId),
-                        group.settings().config(), actions, pairsOnViolations, deadBusRows);
+                        group.settings().config(), group.settings().distributedSlack(), actions, pairsOnViolations, deadBusRows);
             }
             int batchSize = batches.stream().mapToInt(List::size).sum();
             if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -403,7 +403,7 @@ final class GpuBatchPrecomputer {
                                           final AcLoadFlowContext context, final ZeroImpedanceTreeReplay ziTree,
                                           final List<BatchContingency> batch,
                                           final List<OperatorStrategy> strategies, final BatchConfig config,
-                                          final List<Action> actions,
+                                          final boolean distributedSlack, final List<Action> actions,
                                           final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations,
                                           final com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, propagatedContingency);
@@ -557,8 +557,9 @@ final class GpuBatchPrecomputer {
                         pair = null;                     // the bus's split of the parent share is not known: CPU
                     }
                     // A GeneratorAction re-checks its generator's participation at the new target. A generator that
-                    // did not participate and now does would have to join the device's generator pack: CPU.
-                    if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDistributedSlackParameters.factor(m.generator()) == 0
+                    // did not participate and now does would have to join the device's generator pack: CPU. Without a
+                    // distribution nobody's participation moves anything.
+                    if (pair != null && distributedSlack && pair.generatorActions().stream().anyMatch(m -> pairDistributedSlackParameters.factor(m.generator()) == 0
                             && m.participatesAt() != null
                             && m.participatesAt().test(m.newTargetP(m.generator().getTargetP())))) {
                         GpuBatchScopeCensus.record("PAIR:ACTION_STARTS_PARTICIPATION");

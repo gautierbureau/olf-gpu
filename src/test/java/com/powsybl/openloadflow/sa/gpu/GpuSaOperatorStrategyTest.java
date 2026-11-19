@@ -1581,6 +1581,34 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .withGeneratorId("B6-G").withActivePowerRelativeValue(false).withActivePowerValue(40).build(), false);
     }
 
+    /** Without a slack distribution a generator's participation changes nothing: B6-G, out of OLF's participation at P 0
+     *  and in it at 40 MW, does not keep the pair off the device. */
+    @Test
+    void generatorActionWithoutDistributionStrategyBatchMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertCurveGeneratorActionMatchesCpu(withCurveOnB6(), new com.powsybl.action.GeneratorActionBuilder().withId("up6")
+                .withGeneratorId("B6-G").withActivePowerRelativeValue(false).withActivePowerValue(40).build(), false);
+    }
+
+    /** With a distribution, B6-G (out of OLF's participation at P 0, so out of the device's slack pack) joins it at 40 MW:
+     *  the device cannot add a generator to its pack, and the pair stays on the CPU. */
+    @Test
+    void generatorActionStartingParticipationRunsOnCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withCurveOnB6();
+        String loadId = loadAtBus(network, "B9").getId();
+        List<Contingency> contingencies = List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId)));
+        com.powsybl.action.Action action = new com.powsybl.action.GeneratorActionBuilder().withId("up6")
+                .withGeneratorId("B6-G").withActivePowerRelativeValue(false).withActivePowerValue(40).build();
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sUp6",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(loadId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("up6")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, List.of(action), 1, true);
+    }
+
     /** IEEE 14 with a reactive capability curve on B6-G (P 0 at base): its max Q falls 1 MVAr per MW from 30 MVAr, room
      *  to hold B6's voltage at base, not after a 40 MW action. */
     private static Network withCurveOnB6() {

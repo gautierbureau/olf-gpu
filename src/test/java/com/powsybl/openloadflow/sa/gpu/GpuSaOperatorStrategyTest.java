@@ -1134,6 +1134,28 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertDeadSectionCloseMatchesCpu(network, 2);
     }
 
+    /** The contingency also loses SH7, out of the network at base with BBS7: OLF's toLfContingency keeps a shunt on a disabled bus
+     *  and LfContingency.apply takes its admittance off all the same, so when closing BD brings BBS7 back, SH7 comes back
+     *  without it. The mapper refused such a shunt (MAPPER:shunt-shift-unresolvable), the whole contingency on the CPU. */
+    @Test
+    void shuntLostOnADeadBusStaysLostWhenTheStrategyBringsItBack() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(420.);
+        var vl3 = network.getVoltageLevel("VL3");
+        vl3.getNodeBreakerView().newInternalConnection().setNode1(0).setNode2(2).add();
+        vl3.newShuntCompensator().setId("SH7").setNode(2).setSectionCount(1)
+                .newLinearModel().setBPerSection(-1e-3).setGPerSection(1e-5).setMaximumSectionCount(1).add().add();
+        List<Contingency> contingencies = List.of(new Contingency("L1+SH7", new BranchContingency("L1"),
+                new com.powsybl.contingency.ShuntCompensatorContingency("SH7")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseBD", com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeBD")));
+        var cpu = assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(), "the strategy has a result");
+    }
+
     /** A section out of the network at base (BBS4, which a strategy on L1 may bring back) has no voltage row: the
      *  contingency without a strategy (L3) is still answered from its state on the device, the comparison deciding each
      *  answer from the written-back network too. OLF disables the branches of such a bus with it, so nothing reads its

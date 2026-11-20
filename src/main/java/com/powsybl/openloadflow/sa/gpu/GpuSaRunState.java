@@ -131,6 +131,9 @@ final class GpuSaRunState {
      *  result for the same contingency. */
     com.powsybl.security.results.PostContingencyResult withoutNetwork;
     String withoutNetworkFor;
+    /** Its operator strategies' results answered without the network while the comparison is on, by strategy id, compared
+     *  with the usual path's (the ones left once its strategies ran were not answered there). */
+    Map<String, com.powsybl.security.results.OperatorStrategyResult> withoutNetworkStrategies = Map.of();
     /** The excluded slack buses after the pre-contingency load flow: a contingency answered without the network restores
      *  them only if its toLfContingency changed them. */
     java.util.Set<LfBus> baseExcludedSlackBuses = java.util.Set.of();

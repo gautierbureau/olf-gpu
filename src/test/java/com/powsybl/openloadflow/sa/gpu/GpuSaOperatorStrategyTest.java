@@ -22,6 +22,7 @@ import java.util.List;
 
 import static com.powsybl.openloadflow.sa.gpu.GpuSaTestNetworks.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * GPU-batched security analysis against the CPU: operator strategies and their actions.
@@ -203,29 +204,7 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     void reclosingIntoAnIslandBringsBackItsDanglingBranchesLikeCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = Network.create("reclose-dangling", "code");
-        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
-        for (String vl : List.of("vl0", "vl1", "vx", "vy")) {
-            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
-                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
-        }
-        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
-                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
-        network.getVoltageLevel("vl1").newLoad().setId("ld1").setBus("vl1_b").setConnectableBus("vl1_b").setP0(250).setQ0(60).add();
-        network.getVoltageLevel("vx").newLoad().setId("ldx").setBus("vx_b").setConnectableBus("vx_b").setP0(10).setQ0(2).add();
-        network.getVoltageLevel("vy").newLoad().setId("ldy").setBus("vy_b").setConnectableBus("vy_b").setP0(5).setQ0(1).add();
-        java.util.function.BiConsumer<String, String[]> line = (id, e) -> network.newLine().setId(id)
-                .setVoltageLevel1(e[0]).setBus1(e[0] + "_b").setConnectableBus1(e[0] + "_b")
-                .setVoltageLevel2(e[1]).setBus2(e[1] + "_b").setConnectableBus2(e[1] + "_b")
-                .setR(2).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
-        line.accept("l01a", new String[] {"vl0", "vl1"});
-        line.accept("l01b", new String[] {"vl0", "vl1"});
-        line.accept("l0y", new String[] {"vl0", "vy"});
-        line.accept("la", new String[] {"vl1", "vx"});
-        // lh: connected at vx only, charged
-        network.newLine().setId("lh").setVoltageLevel1("vx").setBus1("vx_b").setConnectableBus1("vx_b")
-                .setVoltageLevel2("vy").setConnectableBus2("vy_b")
-                .setR(4).setX(40).setG1(0).setB1(5e-4).setG2(0).setB2(5e-4).add();
+        Network network = recloseDangling();
         List<Contingency> ctgs = List.of(new Contingency("la-lh", new BranchContingency("la"), new BranchContingency("lh")));
         List<com.powsybl.action.Action> actions = List.of(
                 new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close-la").withNetworkElementId("la").withOpen(false).build());
@@ -1431,6 +1410,166 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
 
     /** OLF's node-breaker network with a third line L3 from BBS1 (breaker B5) to BBS3 (breaker B6): with the coupler C
      *  open, VL1 splits into BBS1 (L1 and L3) and BBS2 (G and L2). */
+    /**
+     * A contingency whose strategies all open switches is answered with them without applying anything to the network
+     * (resultsWithoutNetwork): each strategy's condition is checked on the contingency's violations, and each answered
+     * strategy's violations are detected from its state in the topology its actions leave.
+     */
+    @Test
+    void strategiesAnsweredWithoutTheNetworkMatchTheUsualPathAndCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        // every bus below its low voltage limit and every line above a tight limit: each state has violations
+        network.getVoltageLevelStream().forEach(vl -> vl.setHighVoltageLimit(1.3 * vl.getNominalV()).setLowVoltageLimit(1.2 * vl.getNominalV()));
+        network.getLineStream().forEach(line -> {
+            line.newCurrentLimits1().setPermanentLimit(1).add();
+            line.newCurrentLimits2().setPermanentLimit(1).add();
+        });
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        // opening B5 and B6 islands L3 and its two end buses: their violations must not be reported
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openC", "C", true),
+                new com.powsybl.action.SwitchAction("openB5", "B5", true), new com.powsybl.action.SwitchAction("openB6", "B6", true));
+        com.powsybl.contingency.ContingencyContext l1 = com.powsybl.contingency.ContingencyContext.specificContingency("L1");
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC", l1,
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sIsolateL3", l1,
+                        new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("openB5", "openB6")),
+                // its condition does not hold: no result
+                new com.powsybl.contingency.strategy.OperatorStrategy("sNever", l1,
+                        new com.powsybl.contingency.strategy.condition.AllViolationCondition(List.of("absent")), List.of("openC")));
+        SecurityAnalysisResult cpu = assertStrategiesAnsweredWithoutTheNetwork(network, contingencies, strategies, actions, 2,
+                parametersWithoutPropagation());
+        var isolated = cpu.getOperatorStrategyResults().get(1).getConditionalActionsResults().get(0).getLimitViolationsResult()
+                .getLimitViolations();
+        assertTrue(isolated.stream().noneMatch(v -> v.getSubjectId().equals("L3")), "L3 is out after sIsolateL3");
+        // and so are the low voltages of its two end buses, out of the network
+        assertEquals(cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getLimitViolationsResult()
+                .getLimitViolations().size() - 3, isolated.size(), "the violations of L3 and of its two end buses are gone");
+    }
+
+    /** A strategy answered without the network that brings back what its contingency cut off: the reclosed la, vx and the
+     *  dangling lh are in the strategy's topology again (OLF's activations enable them after the contingency disabled
+     *  them), so their violations are reported. The contingency also takes l01b: la's current ends up above the base case's,
+     *  which OLF reports (any increase of a flow, with a threshold of 0). */
+    @Test
+    void reclosingIntoAnIslandAnsweredWithoutTheNetworkReportsItsViolations() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = recloseDangling();
+        network.getVoltageLevelStream().forEach(vl -> vl.setHighVoltageLimit(1.3 * vl.getNominalV()).setLowVoltageLimit(1.2 * vl.getNominalV()));
+        network.getLineStream().forEach(line -> {
+            line.newCurrentLimits1().setPermanentLimit(1).add();
+            line.newCurrentLimits2().setPermanentLimit(1).add();
+        });
+        List<Contingency> ctgs = List.of(new Contingency("la-lh-l01b", new BranchContingency("la"), new BranchContingency("lh"),
+                new BranchContingency("l01b")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionActionBuilder().withId("close-la").withNetworkElementId("la").withOpen(false).build());
+        com.powsybl.security.SecurityAnalysisParameters sap = parametersWithoutPropagation();
+        sap.getIncreasedViolationsParameters().setFlowProportionalThreshold(0);
+        SecurityAnalysisResult cpu = assertStrategiesAnsweredWithoutTheNetwork(network, ctgs, strategiesOf("la-lh-l01b", "close-la"),
+                actions, 1, sap);
+        var reclosed = cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getLimitViolationsResult()
+                .getLimitViolations();
+        assertTrue(reclosed.stream().anyMatch(v -> v.getSubjectId().equals("la")), "la is back in");
+    }
+
+    /**
+     * Runs the analysis on the CPU, then on the device with the comparison on: the contingencies and their strategies are
+     * answered without the network, and each result is also answered the usual way (contingency and actions applied,
+     * restored after) and compared bit for bit. Then without the comparison: {@code expectedStrategies} strategies are
+     * answered without the network, and the results match OLF's. No state monitor: one asks for results read on the
+     * network.
+     *
+     * @return the CPU arm's result
+     */
+    private SecurityAnalysisResult assertStrategiesAnsweredWithoutTheNetwork(Network network, List<Contingency> contingencies,
+                                                                       List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
+                                                                       List<com.powsybl.action.Action> actions, int expectedStrategies,
+                                                                       com.powsybl.security.SecurityAnalysisParameters sap) {
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, List.of(), sap, strategies, actions,
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        assertEquals(expectedStrategies, cpu.getOperatorStrategyResults().size(), "strategies with a result");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        GpuStateViewCheck.compareInTests(true);
+        try {
+            long compared = GpuStateViewCheck.RESULTS_COMPARED.sum();
+            runSecurityAnalysis(network, contingencies, List.of(), sap, strategies, actions, com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(contingencies.size() + expectedStrategies, GpuStateViewCheck.RESULTS_COMPARED.sum() - compared,
+                    "every contingency and strategy answered without the network, each compared with the usual path");
+            GpuStateViewCheck.compareInTests(false);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, List.of(), sap, strategies, actions,
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(contingencies.size(), GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.get());
+            assertEquals(expectedStrategies, GpuBatchedAcSecurityAnalysis.LAST_STRATEGIES_ANSWERED_WITHOUT_NETWORK_COUNT.get());
+            assertEquals(cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size());
+            for (int r = 0; r < cpu.getOperatorStrategyResults().size(); r++) {
+                var c = cpu.getOperatorStrategyResults().get(r);
+                var g = gpu.getOperatorStrategyResults().get(r);
+                String id = c.getOperatorStrategy().getId();
+                assertEquals(id, g.getOperatorStrategy().getId());
+                var cs = c.getConditionalActionsResults().get(0);
+                var gs = g.getConditionalActionsResults().get(0);
+                assertEquals(cs.getStatus(), gs.getStatus(), "status of " + id);
+                assertEquals(cs.getDistributedActivePower(), gs.getDistributedActivePower(), 1e-9, "distributed active power of " + id);
+                var cv = cs.getLimitViolationsResult().getLimitViolations();
+                var gv = gs.getLimitViolationsResult().getLimitViolations();
+                assertEquals(cv.size(), gv.size(), "violation count of " + id);
+                for (int v = 0; v < cv.size(); v++) {
+                    assertEquals(cv.get(v).getSubjectId(), gv.get(v).getSubjectId(), id + " violation " + v);
+                    assertEquals(cv.get(v).getLimitType(), gv.get(v).getLimitType(), id + " violation " + v);
+                    assertEquals(cv.get(v).getValue(), gv.get(v).getValue(), 1e-9 * Math.abs(cv.get(v).getValue()), id + " violation " + v);
+                }
+            }
+            return cpu;
+        } finally {
+            GpuStateViewCheck.compareInTests(false);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    /** No contingency propagation, reactive limits on. */
+    private static com.powsybl.security.SecurityAnalysisParameters parametersWithoutPropagation() {
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.addExtension(com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.class,
+                new com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters().setContingencyPropagation(false));
+        sap.setLoadFlowParameters(new com.powsybl.loadflow.LoadFlowParameters().setUseReactiveLimits(true));
+        return sap;
+    }
+
+    /** vl0 (generator gs) feeds vl1 (ld1) by l01a and l01b and vy (ldy) by l0y; la runs from vl1 to vx (ldx), and lh, charged,
+     *  hangs from vx, open at vy. */
+    private static Network recloseDangling() {
+        Network network = Network.create("reclose-dangling", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl1", "vx", "vy")) {
+            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl1").newLoad().setId("ld1").setBus("vl1_b").setConnectableBus("vl1_b").setP0(250).setQ0(60).add();
+        network.getVoltageLevel("vx").newLoad().setId("ldx").setBus("vx_b").setConnectableBus("vx_b").setP0(10).setQ0(2).add();
+        network.getVoltageLevel("vy").newLoad().setId("ldy").setBus("vy_b").setConnectableBus("vy_b").setP0(5).setQ0(1).add();
+        java.util.function.BiConsumer<String, String[]> line = (id, e) -> network.newLine().setId(id)
+                .setVoltageLevel1(e[0]).setBus1(e[0] + "_b").setConnectableBus1(e[0] + "_b")
+                .setVoltageLevel2(e[1]).setBus2(e[1] + "_b").setConnectableBus2(e[1] + "_b")
+                .setR(2).setX(20).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l01a", new String[] {"vl0", "vl1"});
+        line.accept("l01b", new String[] {"vl0", "vl1"});
+        line.accept("l0y", new String[] {"vl0", "vy"});
+        line.accept("la", new String[] {"vl1", "vx"});
+        // lh: connected at vx only, charged
+        network.newLine().setId("lh").setVoltageLevel1("vx").setBus1("vx_b").setConnectableBus1("vx_b")
+                .setVoltageLevel2("vy").setConnectableBus2("vy_b")
+                .setR(4).setX(40).setG1(0).setB1(5e-4).setG2(0).setB2(5e-4).add();
+        return network;
+    }
+
     private static Network coupledSectionsWithThirdLine() {
         Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
         var vl1 = network.getVoltageLevel("VL1");

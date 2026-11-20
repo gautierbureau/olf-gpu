@@ -302,6 +302,7 @@ final class GpuBatchPrecomputer {
             Map<String, double[]> states = stateSink != null ? stateSink : new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
+            java.util.Set<String> unrealistic = new java.util.HashSet<>();
             Map<String, Double> preDistributed = new HashMap<>();
             Map<String, Double> distributed = new HashMap<>();
             Map<String, int[]> automationSystemSwitched = new HashMap<>();
@@ -309,16 +310,12 @@ final class GpuBatchPrecomputer {
             Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 if (r.generatorTargets() != null && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0
-                        && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED)) {
+                        && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
+                            || r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE)) {
                     generatorTargets.put(r.contingencyId(), r.generatorTargets());
                 }
                 GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.put(r.contingencyId(), r.finalMismatch());
-                if (GpuTrace.QUALIFY_TRACE.isOn()) {
-                    System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
-                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
-                            + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
-                                    ? " (never batched: refused at plan time)" : ""));
-                }
+                traceQualify(r);
                 if (r.hasConverged()) {
                     if (r.state() != null) {                 // null: already in the sink
                         states.put(r.contingencyId(), r.state());
@@ -347,6 +344,8 @@ final class GpuBatchPrecomputer {
                     // pre-distribution whatever the status), so the device's total is carried for these too.
                     recordDistributed(r, preDistributed, distributed);
                     GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
+                } else if (r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE) {
+                    recordUnrealistic(r, unrealistic, exhausted, preDistributed, distributed);
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
                     if (GpuTrace.REJECT_TRACE.isOn()) {
@@ -369,7 +368,7 @@ final class GpuBatchPrecomputer {
             System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batchSize + " batched scenarios on device"
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
-            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
+            return new PrecomputedBatch(states, islandedBuses, exhausted, unrealistic, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
                     handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
                     limitTable, violationScreen, handback != null ? handback.possibleTypes : Map.of(), deadBusVariableRows(es, deadBusRows));
@@ -661,6 +660,29 @@ final class GpuBatchPrecomputer {
         return rows;
     }
 
+    private static void traceQualify(BatchScenarioResult r) {
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {
+            System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
+                    + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
+                    + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
+                            ? " (never batched: refused at plan time)" : ""));
+        }
+    }
+
+    /** OLF's realistic-voltage check stopped the run where the device checks it: OLF's answer is UNREALISTIC_STATE, which the
+     *  security analysis reports FAILED without violations or network results, for a contingency (with the no-result
+     *  treatment of the exhausted ones) and for a strategy alike. The distribution reported is what the slack passes placed
+     *  before the stop. */
+    private static void recordUnrealistic(BatchScenarioResult r, java.util.Set<String> unrealistic, java.util.Set<String> exhausted,
+                                          Map<String, Double> preDistributed, Map<String, Double> distributed) {
+        unrealistic.add(r.contingencyId());
+        if (r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
+            exhausted.add(r.contingencyId());
+        }
+        recordDistributed(r, preDistributed, distributed);
+        GpuBatchScopeCensus.record("DEVICE:UNREALISTIC_STATE");
+    }
+
     private static List<BatchScenarioResult> retryRejectedOnDevice(
             List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
             double[] baseState, EquationSystem<AcVariableType, AcEquationType> es,
@@ -729,7 +751,8 @@ final class GpuBatchPrecomputer {
         for (BatchScenarioResult r : retried) {
             retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
             boolean ok = r.convergenceStatus() == GpuAcSolverStatus.CONVERGED
-                    || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED;
+                    || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
+                    || r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE;
             if (ok) {
                 better.put(r.contingencyId(), r);
                 recovered++;

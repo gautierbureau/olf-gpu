@@ -9,6 +9,7 @@
 namespace GpuAcSolverStatus {
 constexpr int CONVERGED = 0;               // OLF's CONVERGED
 constexpr int MAX_ITERATION_REACHED = 1;   // OLF's MAX_ITERATION_REACHED
+constexpr int UNREALISTIC_STATE = 2;       // OLF's UNREALISTIC_STATE: a converged state out of the realistic band
 constexpr int DIVERGED = -1;               // NaN/Inf mismatch
 constexpr int REJECTED = -2;               // not solved on the device: the CPU replays it
 constexpr int LINEAR_SOLVE_FAILED = -3;    // first linear solve failed: the pivoted retry may fix it

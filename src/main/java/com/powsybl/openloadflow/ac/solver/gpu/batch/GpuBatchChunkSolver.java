@@ -1003,7 +1003,8 @@ final class GpuBatchChunkSolver {
                 double[] row = chunkResults[s];
                 if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
                     ChunkArrays.setRowStatus(row, GpuAcSolverStatus.REJECTED);   // the census names the reason where it is decided
-                } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED) {
+                } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED
+                        && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.UNREALISTIC_STATE) {
                     // a pair the device solved and did not converge: a device failure wherever OLF converges it
                     GpuBatchScopeCensus.pairDeviceFailed(
                             contingencies.get(harvested[s].index()).contingencyId());
@@ -1706,7 +1707,7 @@ final class GpuBatchChunkSolver {
                     parent = ChunkArrays.fullRow(resultsByIndex[pIdx], n, config.stateSink(),
                             contingencies.get(pIdx).contingencyId());
                     pairParentConverged[s] = true;
-                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED || parentStatus == GpuAcSolverStatus.UNREALISTIC_STATE) {
                     parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                 }
                 if (parent != null) {
@@ -2139,12 +2140,14 @@ final class GpuBatchChunkSolver {
             }
         }
         if (!pairPhase && !pairIdxList.isEmpty()) {
-            // A contingency that ran out of Newton iterations on the device (OLF's MAX_ITERATION_REACHED):
-            // OLF still runs its strategies, from what the failed run left - the voltages of its last
-            // converged solve (NewtonRaphson updates the network only then), and the targets and bus
-            // types its outer loops had moved, which the captures below read as they read a converged one.
+            // A contingency that ran out of Newton iterations on the device (OLF's MAX_ITERATION_REACHED), or whose
+            // state OLF's realistic-voltage check stopped (UNREALISTIC_STATE): OLF still runs its strategies, from
+            // what the failed run left - the voltages of its last converged solve (NewtonRaphson updates the network
+            // only then; the unrealistic state is that solve's), and the targets and bus types its outer loops had
+            // moved, which the captures below read as they read a converged one.
             for (int s = 0; s < harvestedCount; s++) {
-                if (ChunkArrays.rowStatus(chunkResults[s], n) == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                int status = ChunkArrays.rowStatus(chunkResults[s], n);
+                if (status == GpuAcSolverStatus.MAX_ITERATION_REACHED || status == GpuAcSolverStatus.UNREALISTIC_STATE) {
                     exhaustedStartByIndex.put(harvested[s].index(),
                             BatchReadbackNative.readBatchLastConvergedState(handle, s));
                 }

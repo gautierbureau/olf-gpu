@@ -26,10 +26,10 @@ namespace olfgpu {
 // minNominalVoltageRealisticVoltageCheck ends the outer-loop cycle with UNREALISTIC_STATE — the run
 // FAILS and reports no violations. The device only ever checked the FINAL restored state, so a
 // scenario that passed through an unrealistic state and recovered came back CONVERGED where OLF
-// reports FAILED. Flagged here after every inner solve and routed to the CPU replay, which applies
-// OLF's own rule about WHICH solve the check belongs to (it depends on the configured loop order and
-// on robust mode) instead of the device guessing at it. Rejecting is always sound: it changes the
-// route, never the answer.
+// reports FAILED. Flagged here on the states OLF checks (checkSolvedScenarios: the solves of the loops
+// after the last one able to fix the state, and the state that loop leaves at the end of a sweep), and
+// answered as OLF answers it: UNREALISTIC_STATE, the scenario's loops stopped and its state kept, the
+// state OLF's network holds when its strategies start.
 __global__ void realisticCheckBatch(int n, int nScenarios, const char* rowChecked, const double* x,
                                     const char* live, double minV, double maxV, char* bad) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -71,7 +71,7 @@ void rejectUnrealistic(BatchSolverContext* ctx, DriverPass& drv, const std::vect
                              s, outer, loopOrder[loopIdx], ctx->realisticVoltage.realisticMinV, ctx->realisticVoltage.realisticMaxV);
             }
             traceReject(s, "unrealistic-state", outer, 0);
-            res.status[s] = GpuAcSolverStatus::REJECTED;          // the CPU replays it
+            res.status[s] = GpuAcSolverStatus::UNREALISTIC_STATE; // OLF's answer: the run stops, its state kept
             live[s] = 0;
             active[s] = 0;
         }

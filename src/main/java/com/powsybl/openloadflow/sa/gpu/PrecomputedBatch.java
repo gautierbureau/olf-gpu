@@ -42,6 +42,10 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                          *  (status -2: an extractor gate or the straggler exit) is not in here and
                          *  still replays on the CPU. */
                         java.util.Set<String> exhausted,
+                        /** The contingencies and strategy pairs whose state OLF's realistic-voltage check stops
+                         *  (UNREALISTIC_STATE), reported FAILED without violations or network results. Its contingencies
+                         *  are in {@code exhausted} too. */
+                        java.util.Set<String> unrealistic,
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
@@ -69,7 +73,7 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
                 Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of());
     }
 

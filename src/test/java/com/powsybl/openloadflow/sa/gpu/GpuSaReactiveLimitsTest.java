@@ -560,7 +560,8 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
      *  TransformerVoltageControl) leaves at the end of EVERY sweep, not only on the final state. Under the T2wT
      *  outage an intermediate sweep ends with a bus at 1.0240039 pu, the final state peaks at 1.0239403 pu and the
      *  base at 1.0227 pu: with maxRealisticVoltage 1.02397 the CPU reports FAILED. The device checked only the
-     *  solves of the loops after the fixing one - none here - and the final state, so it reported CONVERGED. */
+     *  solves of the loops after the fixing one - none here - and the final state, so it reported CONVERGED. The device
+     *  answers it FAILED itself. */
     @Test
     void deviceUnrealisticStateAtTransformerLoopEndMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -579,6 +580,7 @@ class GpuSaReactiveLimitsTest extends AbstractGpuSaTest {
                 runSecurityAnalysis(sharedThreeMemberTvcNetwork(), ctgs, List.of(), sap,
                         com.powsybl.commons.report.ReportNode.NO_OP).getPostContingencyResults().get(0).getStatus());
         assertGpuMatchesCpu(sharedThreeMemberTvcNetwork(), ctgs, 1e-12, lfp, false);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_UNREALISTIC_ANSWERED_COUNT.get(), "the device answers it FAILED");
     }
 
     /** voltageRemoteControlRobustMode — OLF's DEFAULT — now a criterion of the RL kernel. g1 controls

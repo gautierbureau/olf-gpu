@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.codes;
 
 /**
  * A scenario's status at the end of a device solve ({@code BatchScenarioResult#convergenceStatus()}, the
- * {@code n + 2} column of the solve result). The first two are OLF's {@code AcSolverStatus}; the three negative ones
+ * {@code n + 2} column of the solve result). The non-negative ones are OLF's {@code AcSolverStatus}; the three negative ones
  * are the device's (docs/gpu-vs-olf.md, section 6). Mirrored by native/cuda/common/codes/gpu_ac_solver_status.cuh.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -20,6 +20,9 @@ public final class GpuAcSolverStatus {
     public static final int CONVERGED = 0;
     /** OLF's MAX_ITERATION_REACHED: the scenario hit the iteration cap without converging. */
     public static final int MAX_ITERATION_REACHED = 1;
+    /** OLF's UNREALISTIC_STATE: a converged state out of the realistic voltage band where OLF checks it (the security
+     *  analysis reports FAILED). The scenario's loops stopped there, and its strategies start from that state. */
+    public static final int UNREALISTIC_STATE = 2;
     /** The scenario diverged (NaN/Inf mismatch). */
     public static final int DIVERGED = -1;
     /**

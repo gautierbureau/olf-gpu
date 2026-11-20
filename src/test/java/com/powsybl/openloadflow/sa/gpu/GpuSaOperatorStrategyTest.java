@@ -1543,10 +1543,9 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
     /** A strategy whose state leaves the realistic band FAILS like OLF's. 20 MVar more at B14's load after the L2-5-1
      *  outage take B14 to 0.974 pu, while the base and the contingency stay at 1.01 pu or above: with a minimum
      *  realistic voltage of 1.0 pu, OLF's load flow ends UNREALISTIC_STATE, which the security analysis reports FAILED,
-     *  without violations or network results. The host builds a device-answered pair's result as CONVERGED, so the pair
-     *  must never come back answered: the device checks the band where OLF does (at the end of the last loop able to
-     *  fix the state, then after every later solve) and rejects it, and the CPU replays it. Only the contingency is
-     *  answered on the device. */
+     *  without violations or network results. The device checks the band where OLF does (at the end of the last loop
+     *  able to fix the state, then after every later solve) and answers the pair FAILED itself; it used to reject it to
+     *  the CPU replay. */
     @Test
     void strategyWithAnUnrealisticStateFailsLikeCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1565,6 +1564,37 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
         assertEquals(com.powsybl.security.PostContingencyComputationStatus.FAILED,
                 cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getStatus(),
                 "the strategy's state is unrealistic");
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_UNREALISTIC_ANSWERED_COUNT.get(), "the device answers the strategy");
+    }
+
+    /** The CONTINGENCY's state is unrealistic: 10 MVar more at B14's load keep the base at 1.010 pu, the L2-5-1 outage takes
+     *  B14 to 1.0087 pu, under a minimum realistic voltage of 1.009 pu, and OLF reports the contingency FAILED. It still runs
+     *  the strategy, from the state its check stopped on, and 20 MVar less at B14 bring it back to 1.010 pu: CONVERGED.
+     *  The device rejected the contingency to the CPU, and its strategy with it (no parent state on the device); it now
+     *  answers the contingency FAILED and starts the strategy from that state. */
+    @Test
+    void strategyAfterAnUnrealisticContingencyMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String lineId = network.getLineStream().skip(4).findFirst().orElseThrow().getId();
+        com.powsybl.iidm.network.Load load14 = loadAtBus(network, "B14");
+        load14.setQ0(load14.getQ0() + 10);
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("q14").withLoadId(load14.getId())
+                        .withRelativeValue(true).withReactivePowerValue(-20).build());
+        com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus.reset();
+        SecurityAnalysisResult cpu = assertStrategyMatchesCpu(network, contingencies, strategiesOf(lineId, "q14"), actions,
+                1, true, p -> p.setMinNominalVoltageRealisticVoltageCheck(0).setMinRealisticVoltage(1.009));
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.FAILED,
+                cpu.getPostContingencyResults().get(0).getStatus(), "the contingency's state is unrealistic");
+        assertEquals(com.powsybl.security.PostContingencyComputationStatus.CONVERGED,
+                cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getStatus(),
+                "the strategy brings it back into the band");
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_UNREALISTIC_ANSWERED_COUNT.get(), "the device answers the contingency");
+        org.junit.jupiter.api.Assertions.assertFalse(com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus.snapshot().containsKey("PAIR:PARENT_NOT_ON_DEVICE"),
+                "census=" + com.powsybl.openloadflow.ac.solver.gpu.batch.plan.GpuBatchScopeCensus.snapshot());
     }
 
     @Test

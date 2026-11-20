@@ -155,6 +155,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_ANSWERED_WITHOUT_NETWORK_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
+    /** How many contingencies and strategies of the last run were answered FAILED from the device's UNREALISTIC_STATE. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_UNREALISTIC_ANSWERED_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** How many post-strategy restores of the last run were targeted (see restorePostContingencyState). */
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_STRATEGY_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -735,7 +739,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                   SecurityAnalysisParameters securityAnalysisParameters) {
         PrecomputedBatch precomputed = run.precomputed;
         // an existence test: with the state store a get reads the whole state from its file
-        if (!precomputed.isReady() || !precomputed.answered(pairId)) {
+        if (!precomputed.isReady() || !precomputed.answered(pairId) && !precomputed.unrealistic().contains(pairId)) {
             return null;
         }
         // a contingency's own load flow parameters, when they hold for its strategies too, decide the distribution
@@ -1301,6 +1305,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     securityAnalysisParameters, lfActionById, createResultExtension, lfContingency, contingency,
                     preContingencyNetworkResult, networkParameters, limitScalings);
         }
+        if (precomputed.unrealistic().contains(scId)) {
+            // OLF's realistic-voltage check stopped the strategy's load flow (UNREALISTIC_STATE): OLF reports it FAILED,
+            // without violations or network results (it updates them only for CONVERGED), with the distributed power
+            // its load flow placed. The full restore that follows puts the post-contingency network back.
+            runState.get().strategyRetappedOnly = null;
+            LAST_UNREALISTIC_ANSWERED_COUNT.incrementAndGet();
+            return new OperatorStrategyResult(operatorStrategy,
+                    List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
+                            PostContingencyComputationStatus.FAILED, new LimitViolationsResult(List.of()),
+                            new NetworkResult(List.of(), List.of(), List.of()), distributed * PerUnit.SB)));
+        }
         // Apply the actions' NETWORK effects (topology/limits bookkeeping — no solve), inject the
         // precomputed post-action state, and reuse the engine's result building — the same pattern
         // as the post-contingency injection.
@@ -1572,8 +1587,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // (its targets, its bus types), which only that run produces: the contingency then runs on the CPU. So does
             // one whose strategy is conditioned on a threshold: the condition reads the flows of the failed run's last
             // Newton iterate (a plateau's last sample is a lottery, which the device does not hand back) or its targets.
+            // OLF's realistic-voltage check stopping the run (UNREALISTIC_STATE) is reported FAILED, with the same empty
+            // results (AcSecurityAnalysis.postContingencyStatusFromAcLoadFlowResult).
             logPostContingencyStart(network, lfContingency);
-            return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
+            if (precomputed.unrealistic().contains(contingency.getId())) {
+                LAST_UNREALISTIC_ANSWERED_COUNT.incrementAndGet();
+            }
+            return new PostContingencyResult(contingency, precomputed.unrealistic().contains(contingency.getId())
+                    ? PostContingencyComputationStatus.FAILED : PostContingencyComputationStatus.MAX_ITERATION_REACHED,
                     new LimitViolationsResult(List.of()),
                     new NetworkResult(List.of(), List.of(), List.of()),
                     new ConnectivityResult(lfContingency.getCreatedSynchronousComponentsCount(), 0,

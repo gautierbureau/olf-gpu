@@ -773,7 +773,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             invalidation.structureDirty = true;
             return runImpl(voltageInitializer, reportNode, true);
         }
-        if (out.length > n + 2 && (int) out[n + 2] <= GpuAcSolverStatus.REJECTED) {
+        if (out.length > n + 2 && ((int) out[n + 2] <= GpuAcSolverStatus.REJECTED || (int) out[n + 2] == GpuAcSolverStatus.UNREALISTIC_STATE)) {
             // The kernel rejected the scenario (status -2, or -3 when the robust retry failed too): a linear solve that did not solve (the
             // structure does not factor unpivoted), the straggler exit, the outer-loop budget, an
             // unrealistic state or a device-loop reject. The chunk solver routes such a scenario

@@ -1723,6 +1723,13 @@ final class GpuBatchChunkSolver {
                     rejectAfterSolve[s] = true;
                     if (s < realCount) {
                         GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                        // ...and why: the parent's own refusal (mapper or plan), or its status on the device
+                        String parentId = pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP));
+                        String parentTag = GpuBatchScopeCensus.planRefusalTag(parentId);
+                        GpuBatchScopeCensus.record("PAIR:PARENTWHY_" + (!"?".equals(parentTag) ? "TAG_" + parentTag.replaceAll("[^A-Za-z_]", "_")
+                                : pIdx == null ? "NOTINBATCH" : "STATUS_" + (parentStatus == GpuAcSolverStatus.REJECTED ? "REJECTED"
+                                : parentStatus == GpuAcSolverStatus.DIVERGED ? "DIVERGED" : parentStatus == GpuAcSolverStatus.LINEAR_SOLVE_FAILED
+                                ? "LINEARSOLVEFAILED" : resultsByIndex[pIdx] == null ? "NORESULT" : "OTHER")));
                     }
                 }
             }

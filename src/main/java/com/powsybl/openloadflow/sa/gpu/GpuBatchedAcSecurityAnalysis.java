@@ -1560,8 +1560,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     /**
      * Whether a strategy pair the conditions select can be answered without the network: the device answered it, and,
-     * unless OLF's realistic-voltage check stopped it, its actions are all valid branch actions (their topology is
-     * derived without applying them; an action on an injection, a tap or an HVDC writes the network), and the device
+     * unless OLF's realistic-voltage check stopped it, its actions are all branch actions (their topology is derived
+     * without applying them, an invalid one, on a switch or branch OLF's network does not hold, changing nothing as in
+     * OLF's connectivity update; an action on an injection, a tap or an HVDC writes the network), and the device
      * moved no tap, switched no branch, and brought back no bus out of the network at base (its voltage is written to
      * the bus) for it.
      */
@@ -1579,8 +1580,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return scenario != null && scenario.broughtBackBuses().isEmpty()
                 && precomputed.deviceTapMoves().get(pairId) == null
                 && precomputed.automationSystemSwitched().get(pairId) == null
-                && lfActions.stream().allMatch(a -> a instanceof com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?> branchAction
-                        && branchAction.isValid());
+                && lfActions.stream().allMatch(com.powsybl.openloadflow.network.action.AbstractLfBranchAction.class::isInstance);
     }
 
     /** The result {@link #runActionSimulation} would answer for a strategy pair from its state, nothing applied. */

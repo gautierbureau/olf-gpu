@@ -1449,6 +1449,41 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .getLimitViolations().size() - 3, isolated.size(), "the violations of L3 and of its two end buses are gone");
     }
 
+    /** A switch action on a switch OLF's network does not hold (here in a voltage level outside the main component): OLF's
+     *  LfSwitchAction is invalid, its connectivity update reports the failure and changes nothing, and the strategy's other
+     *  actions apply. Such strategies are answered without the network too, alone or beside a valid switch action. */
+    @Test
+    void switchActionsOutsideTheNetworkAreAnsweredWithoutTheNetwork() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = coupledSectionsWithThirdLine();
+        com.powsybl.iidm.network.VoltageLevel island = network.newSubstation().setId("SI").add().newVoltageLevel().setId("VLI")
+                .setNominalV(network.getVoltageLevel("VL1").getNominalV())
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        island.getBusBreakerView().newBus().setId("BI1").add();
+        island.getBusBreakerView().newBus().setId("BI2").add();
+        island.getBusBreakerView().newSwitch().setId("SWI").setBus1("BI1").setBus2("BI2").setOpen(false).add();
+        network.getVoltageLevelStream().forEach(vl -> vl.setHighVoltageLimit(1.3 * vl.getNominalV()).setLowVoltageLimit(1.2 * vl.getNominalV()));
+        network.getLineStream().forEach(line -> {
+            line.newCurrentLimits1().setPermanentLimit(1).add();
+            line.newCurrentLimits2().setPermanentLimit(1).add();
+        });
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("openC", "C", true),
+                new com.powsybl.action.SwitchAction("openSWI", "SWI", true));
+        com.powsybl.contingency.ContingencyContext l1 = com.powsybl.contingency.ContingencyContext.specificContingency("L1");
+        com.powsybl.contingency.strategy.condition.TrueCondition always = new com.powsybl.contingency.strategy.condition.TrueCondition();
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenC", l1, always, List.of("openC")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOpenCAndOutside", l1, always, List.of("openC", "openSWI")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("sOutsideOnly", l1, always, List.of("openSWI")));
+        SecurityAnalysisResult cpu = assertStrategiesAnsweredWithoutTheNetwork(network, contingencies, strategies, actions, 3,
+                parametersWithoutPropagation());
+        assertEquals(cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getLimitViolationsResult()
+                .getLimitViolations().size(), cpu.getOperatorStrategyResults().get(1).getConditionalActionsResults().get(0)
+                .getLimitViolationsResult().getLimitViolations().size(), "the action outside the network changes nothing");
+    }
+
     /** A strategy answered without the network that brings back what its contingency cut off: the reclosed la, vx and the
      *  dangling lh are in the strategy's topology again (OLF's activations enable them after the contingency disabled
      *  them), so their violations are reported. The contingency also takes l01b: la's current ends up above the base case's,

@@ -127,6 +127,9 @@ final class GpuSaRunState {
     int[] tableIndexOfBranchNum;
     /** The detection's inputs read from the device state array (OLF_GPU_STATE_VIEW_CHECK), for these base rows. */
     GpuStateView stateView;
+    /** Per bus with device rows past OLF's, its voltage and angle rows, for {@link #deadBusRowsFor}. */
+    java.util.Map<Integer, int[]> deadBusRows;
+    PrecomputedBatch deadBusRowsFor;
     /** A contingency's result answered without the network while the comparison is on, compared with the usual path's
      *  result for the same contingency. */
     com.powsybl.security.results.PostContingencyResult withoutNetwork;

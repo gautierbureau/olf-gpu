@@ -1484,6 +1484,46 @@ class GpuSaOperatorStrategyTest extends AbstractGpuSaTest {
                 .getLimitViolationsResult().getLimitViolations().size(), "the action outside the network changes nothing");
     }
 
+    /** A strategy bringing back BBS4 and BBS7, out of the network at base, across the line LX is answered without the
+     *  network: the two buses are read at their device rows past OLF's (BBS4 at BBS3's voltage through BD, as the usual
+     *  path copies it), and both BBS7's high voltage and LX's current are reported as OLF reports them. */
+    @Test
+    void deadIslandWithALineBroughtBackIsAnsweredWithoutTheNetwork() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSectionAndLine(380.);
+        network.getLine("LX").newCurrentLimits1().setPermanentLimit(1).add();
+        network.getLine("LX").newCurrentLimits2().setPermanentLimit(1).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        SecurityAnalysisResult cpu = assertStrategiesAnsweredWithoutTheNetwork(network, contingencies,
+                strategiesOf("L1", "closeBD"), actions, 1, parametersWithoutPropagation());
+        var violations = cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getLimitViolationsResult()
+                .getLimitViolations();
+        assertTrue(violations.stream().anyMatch(v -> "VL3".equals(v.getSubjectId())
+                && v.getLimitType() == com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE), "BBS7's high voltage");
+        assertTrue(violations.stream().anyMatch(v -> "LX".equals(v.getSubjectId())), "LX's current");
+    }
+
+    /** A strategy bringing back the loaded section BBS4 through BD alone is answered without the network: BBS4 is merged into
+     *  BBS3 on the device and takes BBS3's voltage, as the usual path copies it, and its low voltage is reported. */
+    @Test
+    void deadSectionMergedByAStrategyIsAnsweredWithoutTheNetwork() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = withDeadSection(true, false);
+        network.getVoltageLevelStream().forEach(vl -> vl.setHighVoltageLimit(1.3 * vl.getNominalV()).setLowVoltageLimit(1.2 * vl.getNominalV()));
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeBD", "BD", false));
+        SecurityAnalysisResult cpu = assertStrategiesAnsweredWithoutTheNetwork(network, contingencies,
+                strategiesOf("L1", "closeBD"), actions, 1, parametersWithoutPropagation());
+        long vl2AfterContingency = cpu.getPostContingencyResults().get(0).getLimitViolationsResult().getLimitViolations().stream()
+                .filter(v -> "VL2".equals(v.getSubjectId())).count();
+        long vl2AfterStrategy = cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0)
+                .getLimitViolationsResult().getLimitViolations().stream().filter(v -> "VL2".equals(v.getSubjectId())).count();
+        assertEquals(vl2AfterContingency + 1, vl2AfterStrategy, "BBS4's low voltage is reported too");
+    }
+
     /** A strategy answered without the network that brings back what its contingency cut off: the reclosed la, vx and the
      *  dangling lh are in the strategy's topology again (OLF's activations enable them after the contingency disabled
      *  them), so their violations are reported. The contingency also takes l01b: la's current ends up above the base case's,

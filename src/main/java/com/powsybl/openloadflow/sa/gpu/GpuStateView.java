@@ -108,6 +108,32 @@ final class GpuStateView {
         usable = kindsKnown && rowsComplete && vectorized;
     }
 
+    private GpuStateView(GpuStateView base, int[] vRow, int[] phiRow) {
+        this.baseRows = base.baseRows;
+        this.vRow = vRow;
+        this.phiRow = phiRow;
+        this.r1Row = base.r1Row;
+        this.a1Row = base.a1Row;
+        this.usable = base.usable;
+    }
+
+    /** True when {@code bus} has its voltage row in the base system. */
+    boolean hasRows(LfBus bus) {
+        return vRow[bus.getNum()] >= 0;
+    }
+
+    /** This view, but for the buses of {@code rows} (bus num to its voltage and angle rows), read at those rows: buses out
+     *  of the network at base that a strategy brings back, which the base rows do not hold. */
+    GpuStateView withBusRows(Map<Integer, int[]> rows) {
+        int[] v = vRow.clone();
+        int[] phi = phiRow.clone();
+        rows.forEach((num, r) -> {
+            v[num] = r[0];
+            phi[num] = r[1];
+        });
+        return new GpuStateView(this, v, phi);
+    }
+
     /**
      * True when the view can stand for the written-back objects on this run: every bus has its voltage and angle rows but
      * one out of the network at base (disabled with every branch touching it),

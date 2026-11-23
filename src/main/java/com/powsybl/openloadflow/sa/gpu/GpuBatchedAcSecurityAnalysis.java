@@ -787,6 +787,88 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return true;
     }
 
+    /** The buses in service in {@code topology} without a row in the base system ({@code view}): those a strategy's actions
+     *  bring back from out of the network, in bus order, as the usual path finds them on the applied network. */
+    private static java.util.Set<LfBus> busesWithoutBaseRow(LfNetwork network, GpuStateView view, GpuContingencyTopology topology) {
+        java.util.Set<LfBus> withoutBaseRow = new java.util.LinkedHashSet<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!topology.busOut(bus) && !view.hasRows(bus)) {
+                withoutBaseRow.add(bus);
+            }
+        }
+        return withoutBaseRow;
+    }
+
+    /** Per bus with device rows past OLF's (PrecomputedBatch#deadBusVariableRows), its voltage and angle rows; built once a
+     *  run. */
+    private static Map<Integer, int[]> deadBusRows(GpuSaRunState run) {
+        if (run.deadBusRows == null || run.deadBusRowsFor != run.precomputed) {
+            Map<Integer, int[]> rows = new java.util.HashMap<>();
+            run.precomputed.deadBusVariableRows().forEach((variable, row) -> {
+                int[] r = rows.computeIfAbsent(variable.getElementNum(), k -> new int[] {-1, -1});
+                if (variable.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V) {
+                    r[0] = row;
+                } else if (variable.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI) {
+                    r[1] = row;
+                }
+            });
+            run.deadBusRows = rows;
+            run.deadBusRowsFor = run.precomputed;
+        }
+        return run.deadBusRows;
+    }
+
+    /**
+     * The pair's state with what the usual path writes for the buses it brings back ({@code reenergized}): each bus the
+     * walk of {@link #copyVoltageToReenergizedBuses} reaches takes the voltage and angle of the bus it hangs from (the
+     * values that bus's {@code getV}/{@code getAngle} return), held in two slots appended to the state; a bus it does not
+     * reach is read at its device rows past OLF's ({@code deadBusRows}). {@code rows} receives each bus's voltage and
+     * angle rows.
+     */
+    @SuppressWarnings("java:S107")
+    private static double[] withBroughtBackBuses(LfNetwork network, GpuStateView view, GpuContingencyTopology topology,
+                                                 java.util.Set<LfBus> reenergized, Map<Integer, int[]> deadBusRows,
+                                                 double[] state, Map<Integer, int[]> rows) {
+        double[] withSlots = java.util.Arrays.copyOf(state, state.length + 2 * reenergized.size());
+        int slot = state.length;
+        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>(reenergized);
+        java.util.ArrayDeque<LfBus> todo = new java.util.ArrayDeque<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!topology.busOut(bus) && !withoutBaseRow.contains(bus)) {
+                todo.add(bus);
+            }
+        }
+        while (!todo.isEmpty() && !withoutBaseRow.isEmpty()) {
+            LfBus bus = todo.poll();
+            for (LfBranch branch : bus.getBranches()) {
+                if (topology.branchOut(branch) || !branch.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus other = branch.getBus1() == bus ? branch.getBus2() : branch.getBus1();
+                if (other != null && withoutBaseRow.remove(other)) {
+                    GpuStateView current = view.withBusRows(rows);
+                    withSlots[slot] = current.busV(withSlots, bus);
+                    withSlots[slot + 1] = current.busAngle(withSlots, bus);
+                    rows.put(other.getNum(), new int[] {slot, slot + 1});
+                    slot += 2;
+                    todo.add(other);
+                }
+            }
+        }
+        for (LfBus bus : withoutBaseRow) {                  // not reached: its rows past OLF's, else nothing (NaN)
+            int[] dead = deadBusRows.get(bus.getNum());
+            if (dead != null && dead[0] >= 0 && dead[1] >= 0) {
+                rows.put(bus.getNum(), dead);
+            } else {
+                withSlots[slot] = Double.NaN;
+                withSlots[slot + 1] = Double.NaN;
+                rows.put(bus.getNum(), new int[] {slot, slot + 1});
+                slot += 2;
+            }
+        }
+        return withSlots;
+    }
+
     /** The buses in the network without a row in the base system: those an action brought back from out of the network, in
      *  bus order. */
     private static java.util.Set<LfBus> busesWithoutBaseRow(LfNetwork network,
@@ -1066,8 +1148,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
                                   GpuContingencyTopology topology, java.util.Set<LfBus> busesInFull) {
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, fromState, topology,
+                busesInFull, null);
+    }
+
+    /** As above, {@code fromState} read through {@code pairView} when non-null: a strategy pair's view, its brought-back
+     *  buses read at rows of their own. */
+    @SuppressWarnings("java:S107")
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
+                                  GpuContingencyTopology topology, java.util.Set<LfBus> busesInFull, GpuStateView pairView) {
         GpuSaRunState run = runState.get();
-        GpuStateView view = fromState != null ? run.stateView : null;
+        GpuStateView view = fromState != null ? (pairView != null ? pairView : run.stateView) : null;
         if (run.limitScanner == null) {
             GpuLimitTable table = GpuLimitTable.build(network, LimitScalingManager.create(limitScalings));
             run.limitScanner = new GpuLimitScanner(table);
@@ -1112,7 +1205,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         saParameters.getIncreasedViolationsParameters());
                 // of the full state, when the answer came from the gathered rows (P4): a missing row is then a lost
                 // violation too
-                double[] full = fromState != null ? run.precomputed.states().get(contingencyId) : null;
+                double[] full = fromState != null && pairView == null ? run.precomputed.states().get(contingencyId) : null;
                 run.limitScanner.detectViolations(network, fullScan, view, full != null ? full : fromState, topology);
                 GpuStateViewCheck.compareScreen(manager.getLimitViolations(), fullScan.getLimitViolations());
                 if (view != null && scanInFull == null) {    // the screen's open-branch values against the exact ones
@@ -1563,8 +1656,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * unless OLF's realistic-voltage check stopped it, its actions are all branch actions (their topology is derived
      * without applying them, an invalid one, on a switch or branch OLF's network does not hold, changing nothing as in
      * OLF's connectivity update; an action on an injection, a tap or an HVDC writes the network), and the device
-     * moved no tap, switched no branch, and brought back no bus out of the network at base (its voltage is written to
-     * the bus) for it.
+     * moved no tap and switched no branch for it. A bus out of the network at base the pair brings back is read from the
+     * pair's state as the usual path writes it ({@link #withBroughtBackBuses}).
      */
     private static boolean pairAnsweredWithoutNetwork(GpuSaRunState run, String contingencyId, String pairId,
                                                       List<com.powsybl.openloadflow.network.action.LfAction> lfActions,
@@ -1577,7 +1670,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return true;
         }
         BatchContingency scenario = precomputed.scenarios().get(pairId);
-        return scenario != null && scenario.broughtBackBuses().isEmpty()
+        return scenario != null
                 && precomputed.deviceTapMoves().get(pairId) == null
                 && precomputed.automationSystemSwitched().get(pairId) == null
                 && lfActions.stream().allMatch(com.powsybl.openloadflow.network.action.AbstractLfBranchAction.class::isInstance);
@@ -1621,8 +1714,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             double[] state = answerState(run, pairId);
             var manager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                     securityAnalysisParameters.getIncreasedViolationsParameters());
-            detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
-                    pairId, scanInFull, state, topology, java.util.Set.of());
+            // only a pair whose actions bring back buses out of the network at base has buses without a base row
+            java.util.Set<LfBus> reenergized = precomputed.scenarios().get(pairId).broughtBackBuses().isEmpty()
+                    ? java.util.Set.of() : busesWithoutBaseRow(network, run.stateView, topology);
+            if (reenergized.isEmpty()) {
+                detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
+                        pairId, scanInFull, state, topology, java.util.Set.of());
+            } else {
+                Map<Integer, int[]> rows = new java.util.HashMap<>();
+                double[] withSlots = withBroughtBackBuses(network, run.stateView, topology, reenergized,
+                        deadBusRows(run), state, rows);
+                detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
+                        pairId, scanInFull, withSlots, topology, reenergized, run.stateView.withBusRows(rows));
+            }
             result = new OperatorStrategyResult.ConditionalActionsResult(strategy.getId(), PostContingencyComputationStatus.CONVERGED,
                     new LimitViolationsResult(manager.getLimitViolations()),
                     GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(pairId), pairId,

@@ -4,7 +4,7 @@ name: CI
 # core: the extension carries its CuDssMatrixFactory). It builds against two forks that are not on Maven Central, each
 # built from its branch on github.com/gautierbureau and installed in the local repository first:
 #   powsybl-math-native   cudss_solver_1        1.6.0-SNAPSHOT        (KLU natives; the cuDSS binding is opt-in, not built)
-#   powsybl-open-loadflow gb/main-olf-gpu-port  2.5.0-SNAPSHOT-gpu    (OLF main + the extension points it builds on)
+#   powsybl-open-loadflow gb/main-gpu-integration  2.5.0-SNAPSHOT-gpu (OLF main + the extension points + the fork fixes)
 # The installed forks are cached under the two branch heads, so they are rebuilt only when one of them moves. The
 # runner has no GPU and the CUDA library is not built: the GPU tests skip themselves, the rest of the suite runs.
 
@@ -34,7 +34,7 @@ jobs:
         id: forks
         run: |
           mathNative=$(git ls-remote https://github.com/gautierbureau/powsybl-math-native.git refs/heads/cudss_solver_1 | cut -f1)
-          olf=$(git ls-remote https://github.com/gautierbureau/powsybl-open-loadflow.git refs/heads/gb/main-olf-gpu-port | cut -f1)
+          olf=$(git ls-remote https://github.com/gautierbureau/powsybl-open-loadflow.git refs/heads/gb/main-gpu-integration | cut -f1)
           echo "mathNative=$mathNative" >> "$GITHUB_OUTPUT"
           echo "olf=$olf" >> "$GITHUB_OUTPUT"
 
@@ -61,7 +61,7 @@ jobs:
           cmake --build build --parallel --config Release
           ./mvnw --batch-mode install -DskipTests
 
-      - name: Checkout powsybl-open-loadflow (gb/main-olf-gpu-port)
+      - name: Checkout powsybl-open-loadflow (gb/main-gpu-integration)
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:

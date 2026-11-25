@@ -885,6 +885,10 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // second parse never lands inside a measured region.
         Network networkGpuCold = readCase();
         Network networkGpuWarm = readCase();
+        if (secondaryVoltageControl) {
+            shiftSvcPilotTargets(networkGpuCold);
+            shiftSvcPilotTargets(networkGpuWarm);
+        }
 
         // OLF_GPU_SA_STRATEGIES=1: operator strategies on every k-th contingency (OLF_GPU_SA_STRATEGY_EVERY, default 20),
         // one per action kind the device composes, built from the network's own elements (syntheticStrategies)
@@ -1190,15 +1194,23 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     private static void applySvcScope(final LoadFlowParameters lfp, final Network network) {
         com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
         System.out.println("  SVC enabled");
+        shiftSvcPilotTargets(network);
+    }
+
+    /**
+     * Moves every zone's pilot-point target by {@link #SVC_PILOT_SHIFT_KV}. Every arm's network needs it: the arms each
+     * read their own network, and a GPU network left at the case's own targets solves a different case (its pilots
+     * already sit at target, so the loop never fires and the base differs by the shift itself).
+     */
+    private static void shiftSvcPilotTargets(final Network network) {
         var secondaryVoltageControl = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
         if (secondaryVoltageControl != null) {
             for (var zone : secondaryVoltageControl.getControlZones()) {
                 var pilot = zone.getPilotPoint();
-                double before = pilot.getTargetV();
-                pilot.setTargetV(before + SVC_PILOT_SHIFT_KV);
-                System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
-                        zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
+                pilot.setTargetV(pilot.getTargetV() + SVC_PILOT_SHIFT_KV);
             }
+            System.out.printf("  SVC pilot targets moved by %.3f kV in %d zones%n", SVC_PILOT_SHIFT_KV,
+                    secondaryVoltageControl.getControlZones().size());
         }
     }
 

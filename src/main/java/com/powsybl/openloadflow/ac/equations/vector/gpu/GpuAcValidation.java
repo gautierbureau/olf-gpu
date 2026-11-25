@@ -74,7 +74,7 @@ final class GpuAcValidation {
             // reads a1 from the state vector when the branch derives it (closedBranchIndices[8]) and already emits
             // dp1da1/dq1da1/dp2da1/dq2da1. Which ROW pairs with that column is decided in
             // extractActivation: BRANCH_TARGET_ALPHA1 (identity, INCREMENTAL mode) is packed,
-            // BRANCH_TARGET_P (CONTINUOUS mode with control enabled) throws there.
+            // BRANCH_TARGET_P1/P2 (CONTINUOUS mode with control enabled) goes to the row mode BRANCH_TARGET_P.
             AcVariableType vtype = v.getType();
             if (vtype != AcVariableType.BUS_V && vtype != AcVariableType.BUS_PHI
                     && vtype != AcVariableType.BRANCH_RHO1
@@ -159,8 +159,8 @@ final class GpuAcValidation {
                         }
                     }
                 }
-                case BRANCH_TARGET_P -> {
-                    // CONTINUOUS phase control: the controlled branch's P-flow as its own equation row
+                case BRANCH_TARGET_P1, BRANCH_TARGET_P2 -> {
+                    // CONTINUOUS phase control: the controlled branch's P-flow at the controlled side as its own equation row
                     // (re-emitted by the cb family at the a1 row, row mode BRANCH_TARGET_P). Accept the flow term.
                 }
                 default -> throw new PowsyblException("GPU AC solver: unsupported equation type " + e.getType());

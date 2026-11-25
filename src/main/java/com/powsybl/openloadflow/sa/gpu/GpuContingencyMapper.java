@@ -179,13 +179,17 @@ final class GpuContingencyMapper {
     }
 
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the
-     *  admittance REMOVED), or null when a shunt is unresolvable. */
+     *  admittance REMOVED), as OLF's toLfContingency resolves them: a shunt not in the LfNetwork is skipped ("could be
+     *  in another component"), and a shunt on a bus out of the network keeps its shift, which OLF applies to the shunt
+     *  all the same (LfContingency.apply sets its g and b). The device packs that shunt masked, so its shift only counts
+     *  once a strategy brings its bus back, as on OLF. Refusing either sent the whole contingency to the CPU. */
     static List<ShuntShift> shuntShifts(LfNetwork net, PropagatedContingency propagatedContingency) {
         List<ShuntShift> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.AdmittanceShift> e : propagatedContingency.getShuntIdsToShift().entrySet()) {
             LfShunt shunt = net.getShuntById(e.getKey());
-            if (shunt == null || shunt.isDisabled()) {
-                return null;
+            if (shunt == null) {
+                trace(propagatedContingency, "skipped shunt " + e.getKey() + " not in the LfNetwork (OLF drops it too)");
+                continue;
             }
             out.add(new ShuntShift(shunt, -e.getValue().getG(), -e.getValue().getB()));
         }

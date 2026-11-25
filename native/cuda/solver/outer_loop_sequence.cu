@@ -70,11 +70,10 @@ void checkSolvedScenarios(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSeq
     // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
     // OLF re-checks after every solver run once the last loop that can fix an unrealistic state has
     // run, and an unrealistic state ends the outer-loop cycle with UNREALISTIC_STATE: the run FAILS
-    // and reports no violations. Which solve the check belongs to depends on the configured loop
-    // order and on robust mode, so rather than reproduce that ordering the device routes any
-    // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
-    // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
-    // can cost batching share and can never change an answer.
+    // and reports no violations. AcloadFlowEngine checks a solve once the last loop able to fix the
+    // state has run in the current sweep (checkUnrealisticStates, reset at the top of each sweep): here,
+    // the solves a loop past that one triggered. The state that loop leaves is checked below, at its
+    // index. The scenario ends UNREALISTIC_STATE on the device, as on OLF.
     if (ctx->realisticVoltage.realisticCheck) {
         std::vector<char> gate(nS);
         bool anyGate = false;
@@ -164,7 +163,7 @@ void checkSolvedScenarios(BatchSolverContext* ctx, DriverPass& drv, OuterLoopSeq
             }
             int next = i + 1;
             if (!live[s]) {
-                next = -1;                                  // unrealistic at the fixing loop: routed to the CPU
+                next = -1;                                  // unrealistic at the fixing loop: the run ends
             } else if (next == nLoops) {                    // the end of the sweep
                 if (seq.sweepResolved[s]) {
                     seq.sweepResolved[s] = 0;

@@ -1094,7 +1094,7 @@ final class GpuSaTestNetworks {
         for (String id : new String[] {"T2wT", "T2wT2", "T2wT3"}) {
             com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
             t.getRatioTapChanger().setTargetDeadband(0).setTapPosition(0)
-                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setRegulating(true);
         }
         com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
@@ -1693,7 +1693,7 @@ final class GpuSaTestNetworks {
                 .setId("svc4").setConnectableBus("b4").setBus("b4")
                 .setBmin(-0.008).setBmax(0.008)
                 .setVoltageSetpoint(400)
-                .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulating(true)
                 .add();
         network.getStaticVarCompensator("svc4")

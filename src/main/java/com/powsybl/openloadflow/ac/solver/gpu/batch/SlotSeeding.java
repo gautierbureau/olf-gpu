@@ -28,5 +28,5 @@ record SlotSeeding(int chunkSize, boolean pairPhase, int n, GpuAcData gpuData, G
                    List<BatchContingency> contingencies, GpuBatchQualification.ScenarioPlan plan, double[] baseState,
                    double[] baseTargets, int[] baseRowMode, Map<LfHvdc, Integer> hvdcElemIndex, int[] baseNonSpanningTreeBranches,
                    int nDistributedSlackBuses, ReactiveCapabilityCurves.Channel reactiveCapabilityCurves, Map<Integer, int[]> curveEntriesByPRow, RunScratch rs,
-                   ChunkLists cl) {
+                   ChunkLists cl, com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
 }

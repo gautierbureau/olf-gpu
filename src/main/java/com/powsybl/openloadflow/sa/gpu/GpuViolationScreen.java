@@ -471,6 +471,20 @@ final class GpuViolationScreen {
         return out;
     }
 
+    /**
+     * Per scenario of the last {@link #screenHandedBack}, the types of the violations OLF may report once its reference
+     * filtering against the base case is applied (GpuBaseViolations' bits), from the branches and buses the screen covers;
+     * null without the base case's violations ({@link #withBaseViolations}) or when the device refused.
+     */
+    int[] possibleTypes(int nScenarios) {
+        return deviceTable == 0 || baseViolations == null ? null : ViolationScreenNative.readPossibleTypes(deviceTable, nScenarios);
+    }
+
+    /** Screens against the base case's violations too, leaving the types each scenario may report ({@link #possibleTypes}). */
+    void withBaseViolations(GpuBaseViolations base) {
+        baseViolations = base;
+    }
+
     /** Values of the handed-back states (see {@link #screenHandedBack}): row {@code gatherRow[k]} of handed-back scenario
      *  {@code gatherScenario[k]}; null when the device refused. */
     double[] gatherHandedBack(long batchHandle, int[] gatherScenario, int[] gatherRow) {
@@ -533,6 +547,7 @@ final class GpuViolationScreen {
     }
 
     private long deviceTable;
+    private GpuBaseViolations baseViolations;
     private int overflows;
     private int onDevice;
 
@@ -580,6 +595,11 @@ final class GpuViolationScreen {
         deviceTable = ViolationScreenNative.uploadViolationTable(family, branchElem, branchBaseOpen, groupStart, groupEnd,
                 groupSide, groupQuantity, groupLimitStart, groupLimitEnd, thresholds,
                 busVRow, busHigh, busLow, closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices);
+        if (deviceTable != 0 && baseViolations != null && !ViolationScreenNative.uploadBaseViolations(deviceTable,
+                baseViolations.limitKind, baseViolations.limitValue, baseViolations.busHighKind, baseViolations.busHighValue,
+                baseViolations.busLowKind, baseViolations.busLowValue)) {
+            baseViolations = null;                           // no possible types: every pair is solved
+        }
         return deviceTable;
     }
 

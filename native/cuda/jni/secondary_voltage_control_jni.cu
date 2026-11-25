@@ -15,6 +15,7 @@ extern "C" JNIEXPORT jint JNICALL
 OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltageControl)(
         JNIEnv* env, jclass, jlong handle,
         jintArray jControlledBusVRow, jintArray jControllerBusVRow, jintArray jSecondaryVoltageControlReactiveLimitEntry, jdoubleArray jBaseTargetV,
+        jdoubleArray jControlledBusNominalV,
         jdoubleArray jMinQ, jdoubleArray jMaxQ, jdoubleArray jLoadQ,
         jintArray jReactiveTermStart, jintArray jReactiveTermKind, jintArray jReactiveTermSide, jintArray jReactiveTermElement, jintArray jReactiveTermShuntBRow,
         jintArray jZoneStart, jintArray jZoneControllerBus, jintArray jZonePilotBusVRow, jdoubleArray jZoneTargetV,
@@ -39,11 +40,12 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
         env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
     };
     std::vector<int> busVRow, reactiveLimitEntry, qPtr, reactiveTermKind, reactiveTermSide, reactiveTermElement, reactiveTermShuntBRow, zoneStart, zoneControllerBus, zonePilotBusVRow;
-    std::vector<double> minQ, maxQ, loadQ, zoneTargetV;
+    std::vector<double> minQ, maxQ, loadQ, zoneTargetV, controlledBusNominalV;
     readI(jControlledBusVRow, ctx->secondaryVoltageControl.hSecondaryVoltageControlControlledBusVRow);
     readI(jControllerBusVRow, busVRow);
     readI(jSecondaryVoltageControlReactiveLimitEntry, reactiveLimitEntry);
     readD(jBaseTargetV, ctx->secondaryVoltageControl.hSecondaryVoltageControlBaseTargetV);
+    readD(jControlledBusNominalV, controlledBusNominalV);
     readD(jMinQ, minQ);
     readD(jMaxQ, maxQ);
     readD(jLoadQ, loadQ);
@@ -80,6 +82,7 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusVRow.upload(busVRow.data(), nC * sizeof(int));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitEntry.upload(reactiveLimitEntry.data(), nC * sizeof(int));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlBaseTargetV.upload(ctx->secondaryVoltageControl.hSecondaryVoltageControlBaseTargetV.data(), nC * sizeof(double));
+    ctx->secondaryVoltageControl.dSecondaryVoltageControlControlledBusNominalV.upload(controlledBusNominalV.data(), nC * sizeof(double));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlMinQ.upload(minQ.data(), nC * sizeof(double));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlMaxQ.upload(maxQ.data(), nC * sizeof(double));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlLoadTargetQ.upload(loadQ.data(), nC * sizeof(double));
@@ -100,6 +103,10 @@ OLF_JNI(ac_outerloop_gpu, SecondaryVoltageControlNative, setBatchSecondaryVoltag
     ctx->secondaryVoltageControl.dSecondaryVoltageControlControllerBusEnabled.ensure(nS * nC * sizeof(char));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlNeedsAdjustment.ensure(nS * sizeof(char));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlRejected.ensure(nS * sizeof(char));
+    ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneLastPilotDv.ensure(nS * nZ * sizeof(double));
+    ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneLastDk.ensure(nS * nZ * sizeof(double));
+    ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneNoProgress.ensure(nS * nZ * sizeof(int));
+    ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneStalled.ensure(nS * nZ * sizeof(char));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlReactiveLimitTargetV.ensure(nS * std::max(ctx->reactiveLimits.nReactiveLimitEntries, 1) * sizeof(double));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneMatrix.ensure(nS * static_cast<size_t>(nC) * nC * sizeof(double));
     ctx->secondaryVoltageControl.dSecondaryVoltageControlZoneRightHandSide.ensure(nS * nC * sizeof(double));

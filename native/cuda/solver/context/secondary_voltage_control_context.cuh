@@ -27,6 +27,11 @@ struct SecondaryVoltageControlContext {
     // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
     // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
     DeviceBuf dSecondaryVoltageControlZoneMatrix, dSecondaryVoltageControlZoneRightHandSide, dSecondaryVoltageControlZoneMatrixPointers, dSecondaryVoltageControlZoneRightHandSidePointers, dSecondaryVoltageControlZonePivots, dSecondaryVoltageControlZoneFactorizationInfo, dSecondaryVoltageControlControllerBusZone;
+    // Each controller's CONTROLLED bus nominal voltage (kV): OLF clips a target voltage step in kV. And per (scenario, zone),
+    // OLF's ContextData of one load flow: the zone's error at its last adjustment (NaN: none since its last reset), its
+    // count of adjustments without progress, and whether it was given up as stalled.
+    DeviceBuf dSecondaryVoltageControlControlledBusNominalV;
+    DeviceBuf dSecondaryVoltageControlZoneLastPilotDv, dSecondaryVoltageControlZoneLastDk, dSecondaryVoltageControlZoneNoProgress, dSecondaryVoltageControlZoneStalled;
     cublasHandle_t secondaryVoltageControlBlasHandle = nullptr;
     std::vector<int> hSecondaryVoltageControlControlledBusVRow;
     std::vector<double> hSecondaryVoltageControlBaseTargetV;

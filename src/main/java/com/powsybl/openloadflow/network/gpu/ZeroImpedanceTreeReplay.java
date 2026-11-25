@@ -111,16 +111,25 @@ public final class ZeroImpedanceTreeReplay {
      * the four contingencies whose apply re-elects.
      */
     public List<LfBranch> applyAndRevert(PropagatedContingency propagatedContingency) {
-        return applyAndRevert(propagatedContingency, List.of(), List.of());
+        return applyAndRevert(lfContingency(propagatedContingency), List.of(), List.of());
     }
 
     /**
-     * The same for a strategy pair: the contingency, then the strategy's coupler openings ({@code opened}) and
-     * closings ({@code closed}: a coupler the contingency opened, or one open at base), the tree read, everything
-     * reverted. A pair otherwise inherits its contingency's tree, which still holds a reclosed coupler out of it.
+     * The contingency as OLF applies it ({@code toLfContingency}, without its side effects): what {@link #applyAndRevert}
+     * replays, computed once per contingency and shared by its strategy pairs, since its connectivity analysis is the
+     * expensive part and depends on the contingency alone. Empty when the contingency has no impact.
      */
-    public List<LfBranch> applyAndRevert(PropagatedContingency propagatedContingency, List<LfBranch> opened, List<LfBranch> closed) {
-        Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(network, false, ZeroImpedanceTreeReplay::connectivityLoss);
+    public Optional<LfContingency> lfContingency(PropagatedContingency propagatedContingency) {
+        return propagatedContingency.toLfContingency(network, false, ZeroImpedanceTreeReplay::connectivityLoss);
+    }
+
+    /**
+     * The same for a strategy pair: the contingency ({@link #lfContingency}), then the strategy's coupler openings
+     * ({@code opened}) and closings ({@code closed}: a coupler the contingency opened, or one open at base), the tree
+     * read, everything reverted. A pair otherwise inherits its contingency's tree, which still holds a reclosed coupler
+     * out of it.
+     */
+    public List<LfBranch> applyAndRevert(Optional<LfContingency> lfContingency, List<LfBranch> opened, List<LfBranch> closed) {
         if (lfContingency.isEmpty() && opened.isEmpty() && closed.isEmpty()) {
             return nonTree();                                // no impact: OLF never applies it
         }

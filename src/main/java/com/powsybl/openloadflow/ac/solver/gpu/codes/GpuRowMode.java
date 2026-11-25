@@ -22,7 +22,8 @@ public final class GpuRowMode {
     public static final int EQUATION = 1;
     /** BUS_TARGET_V with the slope terms (a static var compensator with a voltage slope). */
     public static final int BUS_TARGET_V_WITH_SLOPE = 2;
-    /** BRANCH_TARGET_P of the controlled branch, on a phase controller's a1 row (PhaseControl, CONTROLLER mode). */
+    /** OLF's BRANCH_TARGET_P1 or BRANCH_TARGET_P2 of the controlled branch (the controlled side's, packed in
+     *  closedBranchPhaseControlSide), on a phase controller's a1 row (PhaseControl, CONTROLLER mode). */
     public static final int BRANCH_TARGET_P = 3;
     /** The bus's own BUS_TARGET_Q: after a PV -> PQ switch (target = the limit), or a remote member's own Q balance. */
     public static final int BUS_TARGET_Q = 4;

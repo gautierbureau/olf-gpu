@@ -88,6 +88,15 @@ public final class GpuAcDataExtractor {
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     java.util.Set<String> baseOpenBranchIds,
                                     java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDistributedSlackParameters distributedSlackParameters) {
+        return extract(network, es, baseOpenBranchIds, baseOpenZeroImpedanceBranchIdList, distributedSlackParameters, DeadBusRows.none());
+    }
+
+    /** As above, a base-open branch of an island a strategy may bring back packed between its ends as {@code deadBusRows}
+     *  resolves them (DeadBusRows#packable). */
+    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    java.util.Set<String> baseOpenBranchIds,
+                                    java.util.Set<String> baseOpenZeroImpedanceBranchIdList, GpuDistributedSlackParameters distributedSlackParameters,
+                                    DeadBusRows deadBusRows) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         // A coupler disabled after OLF built its equation system (an action or an automation system opened it) keeps its
@@ -101,7 +110,7 @@ public final class GpuAcDataExtractor {
                 zeroImpedanceBaseOpen.add(branch.getId());
             }
         }
-        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, zeroImpedanceBaseOpen);
+        GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, zeroImpedanceBaseOpen, deadBusRows);
         ReactiveLimitEntries reactiveLimitEntries = ReactiveLimitsPacker.reactiveLimitsPack(network, es, columns);
         DistrQPacker.Pack distrQ = DistrQPacker.distrQPack(network, es, columns, family, reactiveLimitEntries);
         LinearDistributionTerms distrRho = DistrRhoPacker.distrRhoPack(network, es, columns);

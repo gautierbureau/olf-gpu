@@ -117,4 +117,72 @@ class GpuSecondaryVoltageControlTest {
                 + "secondary voltage control would leave it near the uncontrolled 12.611 kV");
         assertTrue(worstV < 1e-6, "bus voltages must match CPU (max dV = " + worstV + " kV)");
     }
+
+    /** A zone whose only control unit, B8-G, is very far from its pilot point B12 (OLF's
+     *  SecondaryVoltageControlTest#testFarPilotPointTargetVoltageChangeIsClipped): each target voltage step is clipped to
+     *  2 kV, and the load flow converges where an unclipped step left the plausible range. */
+    @Test
+    void farPilotPointTargetStepsAreClippedLikeOlf() {
+        assertFarZoneMatchesCpu(11.5, p -> { });
+    }
+
+    /** The pilot point target out of the control unit's reach (#testStalledZoneIsDetected): the controlled bus target sits
+     *  on the plausible bound, the zone makes no more progress and is given up instead of being adjusted until the
+     *  outer loop's iteration limit. */
+    @Test
+    void stalledZoneIsGivenUpLikeOlf() {
+        assertFarZoneMatchesCpu(20, p -> p.setMaxPlausibleTargetVoltage(1.1));
+    }
+
+    /** A tighter plausible range (#testTargetVClippedToPlausibleRange): the new target is clipped to the range's bound
+     *  instead of the whole adjustment being refused. */
+    @Test
+    void targetClippedToThePlausibleRangeLikeOlf() {
+        assertFarZoneMatchesCpu(11.5, p -> p.setMinPlausibleTargetVoltage(1.0));
+    }
+
+    private static Network farZoneIeee14(double pilotTargetV) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone()
+                    .withName("z1")
+                    .newPilotPoint().withTargetV(pilotTargetV).withBusbarSectionsOrBusesIds(List.of("B12")).add()
+                    .newControlUnit().withId("B8-G").add()
+                .add()
+                .add();
+        return network;
+    }
+
+    private static void assertFarZoneMatchesCpu(double pilotTargetV, java.util.function.Consumer<OpenLoadFlowParameters> customize) {
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        Network cpuNetwork = farZoneIeee14(pilotTargetV);
+        LoadFlowParameters cpuParameters = new LoadFlowParameters().setUseReactiveLimits(false);
+        customize.accept(OpenLoadFlowParameters.create(cpuParameters).setSecondaryVoltageControl(true).setNewtonRaphsonConvEpsPerEq(1e-8));
+        LoadFlowResult cpuResult = runner.run(cpuNetwork, cpuParameters);
+
+        Network gpuNetwork = farZoneIeee14(pilotTargetV);
+        LoadFlowParameters gpuParameters = new LoadFlowParameters().setUseReactiveLimits(false);
+        customize.accept(OpenLoadFlowParameters.create(gpuParameters).setSecondaryVoltageControl(true).setNewtonRaphsonConvEpsPerEq(1e-8)
+                .setAcSolverType(GpuNewtonRaphsonFactory.NAME));
+        long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        long adjustedBefore = GpuSecondaryVoltageControlOuterLoop.ADJUSTED_CONTROLLED_BUS_TARGETS.sum();
+        LoadFlowResult gpuResult = runner.run(gpuNetwork, gpuParameters);
+        assertEquals(0, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() - fallbacksBefore, "the GPU must solve it");
+        assertTrue(GpuSecondaryVoltageControlOuterLoop.ADJUSTED_CONTROLLED_BUS_TARGETS.sum() > adjustedBefore,
+                "the device's SecondaryVoltageControl phase must move the controlled bus target");
+
+        var cpuComponent = cpuResult.getComponentResults().get(0);
+        var gpuComponent = gpuResult.getComponentResults().get(0);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, cpuComponent.getStatus(), "OLF converges");
+        assertEquals(cpuComponent.getStatus(), gpuComponent.getStatus(), "status");
+        assertEquals(cpuComponent.getIterationCount(), gpuComponent.getIterationCount(), "iteration count");
+        double worstV = 0;
+        for (Bus cpuBus : cpuNetwork.getBusView().getBuses()) {
+            Bus gpuBus = gpuNetwork.getBusView().getBus(cpuBus.getId());
+            if (gpuBus != null && !Double.isNaN(cpuBus.getV())) {
+                worstV = Math.max(worstV, Math.abs(cpuBus.getV() - gpuBus.getV()));
+            }
+        }
+        assertTrue(worstV < 1e-6, "bus voltages must match CPU (max dV = " + worstV + " kV)");
+    }
 }

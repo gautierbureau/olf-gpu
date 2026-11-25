@@ -55,6 +55,14 @@ constexpr int ENTRY_IN = 2;
 constexpr int ENTRY_ROW = 4;
 constexpr int ENTRY_OPEN_1 = 8;
 constexpr int ENTRY_OPEN_2 = 16;
+// What a limit entry's violation is against the base case's violation under OLF's same key (GpuBaseViolations): a new or
+// worse violation, one OLF's reference filtering always drops (1, never reported), or one it drops while the value stays
+// within a threshold.
+constexpr int BASE_NEW = 0;
+constexpr int BASE_VALUE = 2;
+// The possible-types bits (GpuBaseViolations): a branch group's quantity q is bit q, then the bus voltages.
+constexpr int TYPE_HIGH_VOLTAGE = 1 << 3;
+constexpr int TYPE_LOW_VOLTAGE = 1 << 4;
 
 inline int grid(int nThreads) {
     return (nThreads + BLOCK - 1) / BLOCK;
@@ -100,12 +108,15 @@ struct ViolationTable {
     Buf limThreshold;
     Buf busVRow, busHigh, busLow;
     Buf closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices;
+    // The base case's violations, per limit entry and per bus side (uploadBaseViolations): absent, no possible types.
+    bool hasBase = false;
+    Buf limBaseKind, limBaseValue, busHighKind, busHighValue, busLowKind, busLowValue;
     // Scratch, grown on demand: the states of one chunk, its scenario entries and its records; for a batch context's
     // handed-back states, their slots, and the rows gathered from them.
-    Buf states, records, counts;
+    Buf states, records, counts, possible;
     Buf entryStart, entryBranch, entryKind, entryRow;
     Buf slots, gatherScenario, gatherRow, gathered;
-    size_t statesCap = 0, recordsCap = 0, countsCap = 0;
+    size_t statesCap = 0, recordsCap = 0, countsCap = 0, possibleCap = 0;
     size_t entryStartCap = 0, entryBranchCap = 0, entryKindCap = 0, entryRowCap = 0;
     size_t slotsCap = 0, gatherScenarioCap = 0, gatherRowCap = 0, gatheredCap = 0;
 };
@@ -138,6 +149,14 @@ __device__ inline void emit(int* records, int* counts, int scenario, int capacit
     }
 }
 
+/**
+ * Whether OLF may report value, over a limit, as a violation its reference filtering keeps (GpuBaseViolations): new or
+ * worse than the base case's under the same key, decided with the band on the side of reporting it.
+ */
+__device__ inline bool mayBeReported(int kind, double baseValue, double value, double band) {
+    return kind == BASE_NEW || kind == BASE_VALUE && value > baseValue - fabs(baseValue) * band;
+}
+
 /** Scenario s's entry for table branch b (its entries are ascending by branch), or -1. */
 __device__ inline int entryOf(const int* entryStart, const int* entryBranch, int s, int b) {
     for (int k = entryStart[s]; k < entryStart[s + 1] && entryBranch[k] <= b; k++) {
@@ -152,10 +171,10 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
                                const int* brFamily, const int* brElem, const int* brBaseOpen, const int* brGroupStart,
                                const int* brGroupEnd,
                                const int* grpSide, const int* grpQty, const int* grpLimStart, const int* grpLimEnd,
-                               const double* limThreshold,
+                               const double* limThreshold, const int* limBaseKind, const double* limBaseValue,
                                const double* closedBranchParameters, const int* closedBranchIndices, const double* openBranchParameters, const int* openBranchIndices,
                                const int* entryStart, const int* entryBranch, const int* entryKind, const double* entryRow,
-                               const double* x, const int* slotOf, int* records, int* counts) {
+                               const double* x, const int* slotOf, int* records, int* counts, int* possible) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBranches * nScenarios) {
         return;
@@ -257,6 +276,10 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
             double threshold = limThreshold[l];
             if (value > threshold - fabs(threshold) * band) {
                 emit(records, counts, s, capacity, l);
+                // the limit OLF may report for the group: whether its reference filtering keeps it
+                if (possible != nullptr && mayBeReported(limBaseKind[l], limBaseValue[l], value, band)) {
+                    atomicOr(possible + s, 1 << grpQty[g]);
+                }
                 // Exceeded BEYOND the band: the host's exact re-test (its value differs from ours by up to 2.1e-10
                 // relative, measured on currents; the band is 1e-7) confirms this limit, and it reports the first
                 // confirmed limit of a group and never looks further — so the group's remaining limits can never be
@@ -271,7 +294,9 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
 
 __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, double band, int busRecordBase,
                             const int* busVRow, const double* busHigh, const double* busLow,
-                            const double* x, const int* slotOf, int* records, int* counts) {
+                            const int* busHighKind, const double* busHighValue, const int* busLowKind,
+                            const double* busLowValue, const double* x, const int* slotOf, int* records, int* counts,
+                            int* possible) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nBuses * nScenarios) {
         return;
@@ -288,9 +313,16 @@ __global__ void screenBuses(int nBuses, int nScenarios, int n, int capacity, dou
     // A NaN limit makes the comparison false, which is exactly what OLF's !isNaN(limit) guard does.
     if (v > high - fabs(high) * band) {
         emit(records, counts, s, capacity, busRecordBase + i * 2);
+        if (possible != nullptr && mayBeReported(busHighKind[i], busHighValue[i], v, band)) {
+            atomicOr(possible + s, TYPE_HIGH_VOLTAGE);
+        }
     }
     if (v < low + fabs(low) * band) {
         emit(records, counts, s, capacity, busRecordBase + i * 2 + 1);
+        // a low voltage is worse below the base case's: the same test on the negated values
+        if (possible != nullptr && mayBeReported(busLowKind[i], -busLowValue[i], -v, band)) {
+            atomicOr(possible + s, TYPE_LOW_VOLTAGE);
+        }
     }
 }
 
@@ -381,6 +413,60 @@ OLF_JNI(sa_gpu, ViolationScreenNative, uploadViolationTable)(
     return reinterpret_cast<jlong>(t);
 }
 
+/**
+ * The base case's violations against which OLF's reference filtering decides (GpuBaseViolations): per limit entry and per
+ * bus side, its kind (new, filtered, filtered within a value) and that value, in the table's units. From then on every
+ * screen also leaves, per scenario, the types it may report (readPossibleTypes). False on any failure.
+ */
+JNIEXPORT jboolean JNICALL
+OLF_JNI(sa_gpu, ViolationScreenNative, uploadBaseViolations)(
+        JNIEnv* env, jclass, jlong handle, jintArray jLimKind, jdoubleArray jLimValue, jintArray jBusHighKind,
+        jdoubleArray jBusHighValue, jintArray jBusLowKind, jdoubleArray jBusLowValue) {
+    auto* t = reinterpret_cast<ViolationTable*>(handle);
+    if (t == nullptr || env->GetArrayLength(jLimKind) != t->nLimits || env->GetArrayLength(jLimValue) != t->nLimits
+            || env->GetArrayLength(jBusHighKind) != t->nBuses || env->GetArrayLength(jBusLowKind) != t->nBuses) {
+        return JNI_FALSE;
+    }
+    auto uploadI = [&](jintArray a, Buf& buf) {
+        jint* p = env->GetIntArrayElements(a, nullptr);
+        bool ok = buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(int));
+        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
+        return ok;
+    };
+    auto uploadD = [&](jdoubleArray a, Buf& buf) {
+        jdouble* p = env->GetDoubleArrayElements(a, nullptr);
+        bool ok = buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(double));
+        env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
+        return ok;
+    };
+    t->hasBase = uploadI(jLimKind, t->limBaseKind) && uploadD(jLimValue, t->limBaseValue)
+            && uploadI(jBusHighKind, t->busHighKind) && uploadD(jBusHighValue, t->busHighValue)
+            && uploadI(jBusLowKind, t->busLowKind) && uploadD(jBusLowValue, t->busLowValue);
+    return t->hasBase ? JNI_TRUE : JNI_FALSE;
+}
+
+/** Per scenario of the last screen, the types it may report (the possible-types bits), or null without a base. */
+JNIEXPORT jintArray JNICALL
+OLF_JNI(sa_gpu, ViolationScreenNative, readPossibleTypes)(
+        JNIEnv* env, jclass, jlong handle, jint nScenarios) {
+    auto* t = reinterpret_cast<ViolationTable*>(handle);
+    if (t == nullptr || !t->hasBase || (size_t) nScenarios * sizeof(int) > t->possibleCap) {
+        return nullptr;
+    }
+    jintArray out = env->NewIntArray(nScenarios);
+    if (out == nullptr || nScenarios == 0) {
+        return out;
+    }
+    jint* host = env->GetIntArrayElements(out, nullptr);
+    cudaError_t err = cudaMemcpy(host, t->possible.p, (size_t) nScenarios * sizeof(int), cudaMemcpyDeviceToHost);
+    env->ReleaseIntArrayElements(out, host, 0);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "olfgpu violations: possible types readback: %s\n", cudaGetErrorString(err));
+        return nullptr;
+    }
+    return out;
+}
+
 JNIEXPORT void JNICALL
 OLF_JNI(sa_gpu, ViolationScreenNative, destroyViolationTable)(
         JNIEnv*, jclass, jlong handle) {
@@ -398,6 +484,7 @@ static bool prepareChunk(JNIEnv* env, ViolationTable* t, jint nScenarios, jint c
     size_t nEntries = (size_t) env->GetArrayLength(jEntryBranch);
     // The chunk buffers are reused across chunks and only ever grow, so a run pays one allocation.
     if (!grow(t->records, t->recordsCap, recordBytes) || !grow(t->counts, t->countsCap, countBytes)
+            || !grow(t->possible, t->possibleCap, countBytes)
             || !grow(t->entryStart, t->entryStartCap, ((size_t) nScenarios + 1) * sizeof(int))
             || !grow(t->entryBranch, t->entryBranchCap, nEntries * sizeof(int))
             || !grow(t->entryKind, t->entryKindCap, nEntries * sizeof(int))
@@ -426,7 +513,7 @@ static bool prepareChunk(JNIEnv* env, ViolationTable* t, jint nScenarios, jint c
         std::fprintf(stderr, "olfgpu violations: scenario entries upload failed\n");
         return false;
     }
-    return cudaMemset(t->counts.p, 0, countBytes) == cudaSuccess;
+    return cudaMemset(t->counts.p, 0, countBytes) == cudaSuccess && cudaMemset(t->possible.p, 0, countBytes) == cudaSuccess;
 }
 
 /** Screen nScenarios states of n doubles (x, row s or bank slot slotOf[s]) into the chunk's counts and records; the
@@ -438,15 +525,16 @@ static bool launchScreen(ViolationTable* t, jint nScenarios, jint n, jdouble ban
             t->brFamily.as<int>(), t->brElem.as<int>(), t->brBaseOpen.as<int>(), t->brGroupStart.as<int>(),
             t->brGroupEnd.as<int>(),
             t->grpSide.as<int>(), t->grpQty.as<int>(), t->grpLimStart.as<int>(), t->grpLimEnd.as<int>(),
-            t->limThreshold.as<double>(),
+            t->limThreshold.as<double>(), t->limBaseKind.as<int>(), t->limBaseValue.as<double>(),
             t->closedBranchParameters.as<double>(), t->closedBranchIndices.as<int>(), t->openBranchParameters.as<double>(), t->openBranchIndices.as<int>(),
             t->entryStart.as<int>(), t->entryBranch.as<int>(), t->entryKind.as<int>(), t->entryRow.as<double>(),
-            x, slotOf, t->records.as<int>(), t->counts.as<int>());
+            x, slotOf, t->records.as<int>(), t->counts.as<int>(), t->hasBase ? t->possible.as<int>() : nullptr);
     if (t->nBuses > 0) {
         screenBuses<<<grid(t->nBuses * nScenarios), BLOCK>>>(
                 t->nBuses, nScenarios, n, capacity, band, t->nLimits,
                 t->busVRow.as<int>(), t->busHigh.as<double>(), t->busLow.as<double>(),
-                x, slotOf, t->records.as<int>(), t->counts.as<int>());
+                t->busHighKind.as<int>(), t->busHighValue.as<double>(), t->busLowKind.as<int>(), t->busLowValue.as<double>(),
+                x, slotOf, t->records.as<int>(), t->counts.as<int>(), t->hasBase ? t->possible.as<int>() : nullptr);
         if (realistic) {
             screenRealistic<<<grid(t->nBuses * nScenarios), BLOCK>>>(
                     t->nBuses, nScenarios, n, capacity, minV, maxV, t->nLimits + 2 * t->nBuses,

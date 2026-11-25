@@ -236,46 +236,12 @@ public final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
-            // Reclosing into a multi-bus island. OLF's reclose re-adds the reclosed branch to the post-contingency
-            // connectivity, from which the contingency removed the island's own branches too (both their ends were
-            // lost), so only the reclosed branch's end comes back and the rest of the island stays out. The device
-            // reconnects the whole island (rte6515 LINE-3273-1812, a 10-bus island reclosed: the device redistributed
-            // 154.7 MW of the island's load, OLF nothing, 3 kV at VL-1812). A pair that brings back any other bus: CPU.
-            Set<Integer> islandedHere = new java.util.HashSet<>();
-            q.islandedBuses().forEach(b -> islandedHere.add(b.getNum()));
-            int strategySep = c.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP);
-            if (strategySep < 0) {
-                pb.islandedByContingency.put(c.contingencyId(), islandedHere);
-                pb.openedByContingency.put(c.contingencyId(), c.outagedBranches());
-            } else {
-                String parentId = c.contingencyId().substring(0, strategySep);
-                Set<Integer> parentIslanded = pb.islandedByContingency.getOrDefault(parentId, Set.of());
-                Set<Integer> reclosedEnds = new java.util.HashSet<>();
-                for (LfBranch b : pb.openedByContingency.getOrDefault(parentId, List.of())) {
-                    if (!c.outagedBranches().contains(b)) {
-                        if (b.getBus1() != null) {
-                            reclosedEnds.add(b.getBus1().getNum());
-                        }
-                        if (b.getBus2() != null) {
-                            reclosedEnds.add(b.getBus2().getNum());
-                        }
-                    }
-                }
-                if (parentIslanded.stream().anyMatch(num -> !islandedHere.contains(num) && !reclosedEnds.contains(num))) {
-                    refuse(c, "PAIR:RECLOSE_INTO_ISLAND");
-                    continue;
-                }
-            }
+            // A pair's islanding is read off its own outages: the composer keeps cut off what the contingency cut off but for
+            // what the actions enable (GpuStrategyComposer.keepCutOff, OLF's disabled network), so a reclose into an island
+            // brings back what OLF brings back, and the rest of the island stays frozen.
             // A GeneratorAction moves its generator's target P, and with reactive limits its capability curve moves
-            // with it. The curve and forced-target-Q channels track a generator's P only when the run distributes the
-            // slack and it is in the distributed-slack generator pack (its anchor and its own move); any other curve
-            // generator keeps its limits at the base target P - CPU.
-            if (reactiveLimits && c.generatorActions().stream()
-                    .anyMatch(m -> VoltageControlReMerge.hasCurve(m.generator())
-                            && !(distributedSlack && VoltageControlReMerge.inGeneratorPack(gpuData, m.generator().getId())))) {
-                refuse(c, "PLAN:PAIR_ACTION_UNTRACKED_CURVE");
-                continue;
-            }
+            // with it: the curve channel follows a generator in the distributed-slack pack, and the pair's slot shifts the
+            // limits of any other (ActionSeed.shiftCurveLimits), whose P is the action's for the whole solve.
             // ...and re-checks its participation at the new target, which the device applies to the generator pack.
             // A participant outside a non-empty pack (its bus has no active P balance row) has nowhere to sit out. (In
             // a slack-only distribution there is no pack, and any action there moves the slack bus: SLACK_BUS.) Without the

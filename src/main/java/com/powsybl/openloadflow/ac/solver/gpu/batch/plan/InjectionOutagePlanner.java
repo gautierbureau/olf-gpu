@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDistributedSlackParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CrossIdentity;
+import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -53,22 +54,27 @@ final class InjectionOutagePlanner {
         java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenBranches().closedBranchElements())
                 .boxed().collect(java.util.stream.Collectors.toSet());
         java.util.Map<Integer, Integer> zeroImpedanceElementByBranchNum = gpuData.baseOpenBranches().zeroImpedanceElementByBranchNum();
-        boolean recloseOk = true;
-        int zeroImpedanceBranchCloses = 0;
+        // the reason a reclose leaves the pair to the CPU: a switch close that is not a packed base-open zero-impedance
+        // element, a branch close not packed base-open, or a switch onto a dead bus with rows past OLF's (its child)
+        // that OLF's tree for the pair leaves out (the child's rows hold that switch's ZERO_PHI / ZERO_V). Several switch
+        // closes are composed as OLF's tree for the pair has them (ActionSeed).
+        String recloseRefusal = null;
         for (LfBranch rb : c.reclosedBranches()) {
             if (rb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                // switch close: packed base-open zero-impedance element, exactly one per scenario
-                // (multi-switch closes can interact through the spanning tree — CPU)
-                if (!zeroImpedanceElementByBranchNum.containsKey(rb.getNum()) || ++zeroImpedanceBranchCloses > 1) {
-                    recloseOk = false;
+                Integer ze = zeroImpedanceElementByBranchNum.get(rb.getNum());
+                if (ze == null) {
+                    recloseRefusal = "PLAN:RECLOSE_UNPACKED_SWITCH";
+                } else if (CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]) != GpuTwoSides.NONE
+                        && c.stickyNonSpanningTreeBranches().contains(rb)) {
+                    recloseRefusal = "PLAN:RECLOSE_SWITCH_ONTO_A_DEAD_BUS_OUT_OF_TREE";
                 }
             } else if (!baseOpenSet.contains(elementMapper.getElementIndex(rb))) {
-                recloseOk = false;
+                recloseRefusal = "PLAN:RECLOSE_UNPACKED_BRANCH";
             }
-        }
-        if (!recloseOk) {
-            GpuBatchQualification.refuse(c, "PLAN:RECLOSE_UNPACKED_BASE_OPEN");
-            return;                                // reclose of an unpacked base-open branch — CPU
+            if (recloseRefusal != null) {
+                GpuBatchQualification.refuse(c, recloseRefusal);
+                return;                            // CPU
+            }
         }
         boolean tapOk = true;
         for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with FIXED ratio AND

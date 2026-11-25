@@ -38,7 +38,13 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
      *  and row modes, the state size, the element count, the variable types (MAX_VOLTAGE_CHANGE scaling only, else
      *  null) and each HVDC's element index. */
     record BaseCase(GpuAcElementMapper elementMapper, GpuAcData gpuData, double[] baseState, double[] baseTargets,
-                    int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex) {
+                    int[] baseRowMode, int n, int nElements, int[] varType, Map<LfHvdc, Integer> hvdcElemIndex,
+                    com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+
+        /** OLF's active equation count of a lane before any of its own changes: the device rows less the dead buses'. */
+        int olfRowCount() {
+            return deadBusRows.isEmpty() ? n : deadBusRows.olfRowCount();
+        }
     }
 
     /** The run's Newton-Raphson parameters, whether its outer loops hold OLF's DistributedSlackOuterLoop and
@@ -64,17 +70,19 @@ record ChunkInputs(List<BatchContingency> contingencies, ChunkInputs.BaseCase ba
 
     /** Where the results go, per contingency index: the result row (null = route to the CPU), the replayed loss
      *  pre-distribution, the total distributed active power (pu, NaN = unknown), the nums of the branches the
-     *  AutomationSystem phase switched (null = none), the taps the outer loops moved (DeviceTapMoves, null = none) and
-     *  each distributed-slack generator's final move (null = not read). */
+     *  AutomationSystem phase switched (null = none), the taps the outer loops moved (DeviceTapMoves, null = none),
+     *  each distributed-slack generator's final move (null = not read) and the strategy pairs left unsolved because OLF
+     *  never applies them (StateHandback#pairMayApply). */
     record ResultSinks(double[][] resultsByIndex, double[] preDistributedByIndex, double[] distributedByIndex,
                        int[][] automationSystemSwitchedByIndex, double[][] deviceTapMovesByIndex,
-                       double[][] distributedSlackGeneratorMovesByIndex) {
+                       double[][] distributedSlackGeneratorMovesByIndex, boolean[] notAppliedByIndex) {
     }
 
     /** The same inputs from another base state. */
     ChunkInputs withBaseState(double[] baseState) {
         return new ChunkInputs(contingencies, new BaseCase(base.elementMapper(), base.gpuData(), baseState,
-                base.baseTargets(), base.baseRowMode(), base.n(), base.nElements(), base.varType(), base.hvdcElemIndex()),
+                base.baseTargets(), base.baseRowMode(), base.n(), base.nElements(), base.varType(), base.hvdcElemIndex(),
+                base.deadBusRows()),
                 plan, settings, phases, sinks, config);
     }
 }

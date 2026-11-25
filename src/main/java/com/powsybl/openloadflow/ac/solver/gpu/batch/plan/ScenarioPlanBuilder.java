@@ -9,11 +9,9 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch.plan;
 
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
-import com.powsybl.openloadflow.network.LfBranch;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * The scenario plan being built by {@link GpuBatchQualification#planScenarios}: the batched contingency indices, the
@@ -60,9 +58,6 @@ final class ScenarioPlanBuilder {
     final int[] relocatedSlackRow;
     final double[] relocatedSlackShift;
     int islandingCount;
-    // per contingency id: the buses it islands, and the branches it opens itself
-    final java.util.Map<String, Set<Integer>> islandedByContingency;
-    final java.util.Map<String, List<LfBranch>> openedByContingency;
 
     @SuppressWarnings("unchecked")
     ScenarioPlanBuilder(int nContingencies, GpuAcData gpuData) {
@@ -87,8 +82,6 @@ final class ScenarioPlanBuilder {
         this.relocatedSlackRow = new int[nContingencies];
         java.util.Arrays.fill(relocatedSlackRow, -1);
         this.relocatedSlackShift = new double[nContingencies];
-        this.islandedByContingency = new java.util.HashMap<>();
-        this.openedByContingency = new java.util.HashMap<>();
     }
 
     /** The plan, once every contingency went through its planner. */

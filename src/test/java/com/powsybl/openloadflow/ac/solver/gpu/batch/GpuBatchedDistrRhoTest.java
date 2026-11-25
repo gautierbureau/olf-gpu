@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.report.ReportNode;
-import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.Terminal;
@@ -125,19 +124,20 @@ class GpuBatchedDistrRhoTest {
             sv.set(java.util.Arrays.copyOf(r.state(), n));
             AcSolverUtil.updateNetwork(net, es);
 
-            // CPU reference: OLF's own Newton on a FRESH equation system with the branch disconnected — the SAME
+            // CPU reference: OLF's own Newton on a FRESH equation system with the branch out of service — the SAME
             // continuous ratio-distribution (DISTR_RHO) the device solves, with the SAME voltage init / tolerance
             // / code path. (A full LoadFlow.run instead drives the ratio through the transformer-voltage-control
-            // OUTER LOOP — a different method, agreeing only to ~5e-4. Same-method, same-params is ~1e-9.)
-            Network cpu = sharedControlMeshed();
-            Branch<?> br = cpu.getBranch(c.contingencyId());
-            if (br == null) {
+            // OUTER LOOP — a different method, agreeing only to ~5e-4. Same-method, same-params is ~1e-9.) The branch is
+            // disabled in the loaded network, as a security analysis applies a contingency: disconnected in the IIDM
+            // network before loading, a transformer whose terminal its shared-control partner regulates takes that
+            // partner's control away with it (OLF finds no bus for the regulating terminal).
+            LfNetwork cpuLf = load(sharedControlMeshed());
+            LfBranch outaged = cpuLf.getBranchById(c.contingencyId());
+            if (outaged == null) {
                 continue;
             }
-            br.getTerminal1().disconnect();
-            br.getTerminal2().disconnect();
-            LfNetwork cpuLf = load(cpu);
             EquationSystem<AcVariableType, AcEquationType> cpuEs = new AcEquationSystemCreator(cpuLf).create();
+            outaged.setDisabled(true);
             enableTransformerControl(cpuLf);                 // same continuous DISTR_RHO control the device solves
             AcSolverUtil.initStateVector(cpuLf, cpuEs, new UniformValueVoltageInitializer());
             AcTargetVector cpuT = new AcTargetVector(cpuLf, cpuEs);
@@ -190,7 +190,7 @@ class GpuBatchedDistrRhoTest {
 
     private static void enableTransformerControl(LfNetwork net) {
         for (LfBranch b : net.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
-            if (b.isConnectedAtBothSides()) {
+            if (b.isConnectedAtBothSides() && !b.isDisabled()) {
                 b.setVoltageControlEnabled(true);
             }
         }

@@ -25,8 +25,8 @@ import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameterJsonSerializer;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
-import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
+import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 
@@ -82,7 +82,7 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
     }
 
     public GpuLoadFlowProvider(MatrixFactory matrixFactory) {
-        this(matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        this(matrixFactory, new DTreeGraphConnectivityFactory<>());
     }
 
     public GpuLoadFlowProvider(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory) {

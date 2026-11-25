@@ -14,9 +14,12 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.results.ConnectivityResult;
+import com.powsybl.security.results.NetworkResult;
+import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
@@ -211,8 +214,55 @@ final class GpuStateViewCheck {
             decisionMismatch("without the network: the network result differs");
             return;
         }
-        List<LimitViolation> fromState = withoutNetwork.getLimitViolationsResult().getLimitViolations();
-        List<LimitViolation> fromUsual = usual.getLimitViolationsResult().getLimitViolations();
+        compareViolationLists(withoutNetwork.getLimitViolationsResult().getLimitViolations(),
+                usual.getLimitViolationsResult().getLimitViolations());
+    }
+
+    /**
+     * An operator strategy's result answered without applying the contingency and the actions to the network and the
+     * result of the usual path, on the same device state: as {@link #compareResults(PostContingencyResult,
+     * PostContingencyResult)}, for each stage's result.
+     */
+    static void compareResults(OperatorStrategyResult withoutNetwork, OperatorStrategyResult usual) {
+        RESULTS_COMPARED.increment();
+        List<OperatorStrategyResult.ConditionalActionsResult> a = withoutNetwork.getConditionalActionsResults();
+        List<OperatorStrategyResult.ConditionalActionsResult> b = usual.getConditionalActionsResults();
+        if (a.size() != b.size()) {
+            decisionMismatch("without the network: strategy stage count " + a.size() + ", usual " + b.size());
+            return;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (!Objects.equals(a.get(i).getConditionalActionsId(), b.get(i).getConditionalActionsId())
+                    || a.get(i).getStatus() != b.get(i).getStatus()) {
+                decisionMismatch("without the network: strategy status " + a.get(i).getStatus() + ", usual " + b.get(i).getStatus());
+                return;
+            }
+            if (!same(a.get(i).getDistributedActivePower(), b.get(i).getDistributedActivePower())) {
+                decisionMismatch("without the network: strategy distributed active power "
+                        + Double.toHexString(a.get(i).getDistributedActivePower())
+                        + ", usual " + Double.toHexString(b.get(i).getDistributedActivePower()));
+                return;
+            }
+            NetworkResult x = a.get(i).getNetworkResult();
+            NetworkResult y = b.get(i).getNetworkResult();
+            if (x.getBranchResults().size() != y.getBranchResults().size() || x.getBusResults().size() != y.getBusResults().size()
+                    || x.getThreeWindingsTransformerResults().size() != y.getThreeWindingsTransformerResults().size()) {
+                decisionMismatch("without the network: the strategy network result differs");
+                return;
+            }
+            compareViolationLists(a.get(i).getLimitViolationsResult().getLimitViolations(),
+                    b.get(i).getLimitViolationsResult().getLimitViolations());
+        }
+    }
+
+    /** Strategy results answered without the network that the usual path did not answer (its condition did not hold). */
+    static void unansweredStrategies(Map<String, OperatorStrategyResult> left) {
+        if (!left.isEmpty()) {
+            decisionMismatch("without the network: " + left.size() + " strategy results the usual path did not answer");
+        }
+    }
+
+    private static void compareViolationLists(List<LimitViolation> fromState, List<LimitViolation> fromUsual) {
         if (fromState.size() != fromUsual.size()) {
             decisionMismatch("without the network: violation count " + fromState.size() + ", usual " + fromUsual.size());
             return;
@@ -241,7 +291,7 @@ final class GpuStateViewCheck {
         if (a.getAcceptableDuration() != b.getAcceptableDuration()) {
             return "acceptable duration";
         }
-        if (!same(a.getLimit(), b.getLimit()) || !same(a.getLimitReduction(), b.getLimitReduction())) {
+        if (!same(a.getLimit(), b.getLimit()) || !same(a.getLimitScaling(), b.getLimitScaling())) {
             return "limit or reduction";
         }
         if (!same(a.getValue(), b.getValue())) {

@@ -163,14 +163,20 @@ public final class GpuBatchContingencyValidator {
         if (closed.isEmpty()) {
             return Qualification.ok(contingency);
         }
-        List<Integer> cut = closed.stream().map(LfBranch::getNum).distinct().sorted().toList();
+        // The branches the scenario closes back (a strategy's switch closes, open at base or opened by the contingency) are
+        // edges again, as OLF's actions add them to its connectivity: a bus they keep in the network is not islanded. They
+        // are part of the key: a strategy pair has its contingency's cut and must not take its contingency's verdict.
+        List<LfBranch> reclosed = contingency.reclosedBranches().stream()
+                .filter(b -> b.getBus1() != null && b.getBus2() != null).toList();
+        List<Integer> cut = java.util.stream.Stream.concat(closed.stream().map(LfBranch::getNum).distinct().sorted(),
+                reclosed.stream().map(b -> -1 - b.getNum()).distinct().sorted()).toList();
         Qualification known = byCut.get(cut);
         if (known != null) {
             return known.qualified()
                     ? new Qualification(contingency, true, null, known.islandedBuses(), known.relocatedSlack())
                     : Qualification.rejected(contingency, known.reason());
         }
-        Qualification qualification = islandingQualification(network, connectivity, slackBuses, contingency, closed,
+        Qualification qualification = islandingQualification(network, connectivity, slackBuses, contingency, closed, reclosed,
                 handleIslanding, relocation);
         byCut.put(cut, qualification);
         return qualification;
@@ -180,13 +186,16 @@ public final class GpuBatchContingencyValidator {
      *  and whether OLF relocates the slack. */
     private static Qualification islandingQualification(LfNetwork network, GraphConnectivity<LfBus, LfBranch> connectivity,
                                                         Set<LfBus> slackBuses, BatchContingency contingency,
-                                                        List<LfBranch> closed, boolean handleIslanding,
+                                                        List<LfBranch> closed, List<LfBranch> reclosed, boolean handleIslanding,
                                                         SlackRelocation relocation) {
         LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
         connectivity.startTemporaryChanges();
         try {
             for (LfBranch branch : closed) {
                 connectivity.removeEdge(branch);
+            }
+            for (LfBranch branch : reclosed) {
+                connectivity.addEdge(branch.getBus1(), branch.getBus2(), branch);
             }
             // When the outage isolates the slack itself, CPU does NOT keep the slack's component as the
             // main one: PropagatedContingency RELOCATES the slack ("leads to an isolated slack bus:

@@ -176,7 +176,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         compareWithParams(() -> {
             Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
             com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
-            svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+            svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulating(true);
             svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                     .withHighVoltageThreshold(400).withLowVoltageThreshold(393)
@@ -192,7 +192,7 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
         // makes the SVC hold its bus at the LOW setpoint (394), far from the standing-by state
         Network check = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
         com.powsybl.iidm.network.StaticVarCompensator staticVarCompensator = check.getStaticVarCompensator("svc1");
-        staticVarCompensator.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+        staticVarCompensator.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                 .setRegulating(true);
         staticVarCompensator.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(393)

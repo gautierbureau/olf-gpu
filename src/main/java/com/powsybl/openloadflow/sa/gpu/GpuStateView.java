@@ -90,9 +90,13 @@ final class GpuStateView {
                 default -> kindsKnown = false;
             }
         }
+        // every bus has its rows but one out of the network at base: OLF's connectivity disabled it, with every branch
+        // touching it (Networks.restoreInitialTopology), so nothing reads its rows. The rows are the base's, whatever
+        // contingency the network holds when the view is built: a bus a contingency disabled still has them.
         boolean rowsComplete = true;
-        for (int b = 0; b < nBuses && rowsComplete; b++) {
-            rowsComplete = vRow[b] >= 0 && phiRow[b] >= 0;
+        for (LfBus bus : network.getBuses()) {
+            rowsComplete &= vRow[bus.getNum()] >= 0 && phiRow[bus.getNum()] >= 0
+                    || bus.isDisabled() && bus.getBranches().stream().allMatch(LfBranch::isDisabled);
         }
         boolean vectorized = true;
         for (LfBranch branch : network.getBranches()) {
@@ -104,8 +108,35 @@ final class GpuStateView {
         usable = kindsKnown && rowsComplete && vectorized;
     }
 
+    private GpuStateView(GpuStateView base, int[] vRow, int[] phiRow) {
+        this.baseRows = base.baseRows;
+        this.vRow = vRow;
+        this.phiRow = phiRow;
+        this.r1Row = base.r1Row;
+        this.a1Row = base.a1Row;
+        this.usable = base.usable;
+    }
+
+    /** True when {@code bus} has its voltage row in the base system. */
+    boolean hasRows(LfBus bus) {
+        return vRow[bus.getNum()] >= 0;
+    }
+
+    /** This view, but for the buses of {@code rows} (bus num to its voltage and angle rows), read at those rows: buses out
+     *  of the network at base that a strategy brings back, which the base rows do not hold. */
+    GpuStateView withBusRows(Map<Integer, int[]> rows) {
+        int[] v = vRow.clone();
+        int[] phi = phiRow.clone();
+        rows.forEach((num, r) -> {
+            v[num] = r[0];
+            phi[num] = r[1];
+        });
+        return new GpuStateView(this, v, phi);
+    }
+
     /**
-     * True when the view can stand for the written-back objects on this run: every bus has its voltage and angle rows,
+     * True when the view can stand for the written-back objects on this run: every bus has its voltage and angle rows but
+     * one out of the network at base (disabled with every branch touching it),
      * the system holds no variable kind the view does not know (BUS_V, BUS_PHI, BRANCH_RHO1, BRANCH_ALPHA1, and the
      * DUMMY_P/Q and SHUNT_B it ignores), and the closed branches' flows come from the vectorized network.
      */

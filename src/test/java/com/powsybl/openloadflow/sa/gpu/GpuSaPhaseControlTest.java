@@ -102,7 +102,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
         com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
         com.powsybl.iidm.network.RatioTapChangerAdder rtc = t2wt.newRatioTapChanger().setLowTapPosition(-10).setTapPosition(0)
                 .setLoadTapChangingCapabilities(true).setTargetDeadband(0).setRegulating(true)
-                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.REACTIVE_POWER)
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.REACTIVE_POWER)
                 .setRegulationTerminal(t2wt.getTerminal1()).setRegulationValue(-0.55);
         for (int t = -10; t <= 10; t++) {
             rtc.beginStep().setRho(1.0 + 0.03 * t).setR(0.3 * (t + 11)).setX(3.0 * (t + 11)).setG(0).setB(0).endStep();
@@ -133,7 +133,7 @@ class GpuSaPhaseControlTest extends AbstractGpuSaTest {
         com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
         t2wt.getRatioTapChanger()
                 .setTargetDeadband(0).setRegulating(true).setTapPosition(1)
-                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.REACTIVE_POWER)
+                .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.REACTIVE_POWER)
                 .setRegulationTerminal(t2wt.getTerminal1()).setRegulationValue(-0.55);
         com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
         network.newLine().setId(l0.getId() + "_BIS")

@@ -46,7 +46,8 @@ public record BatchSolveRequest(LfNetwork network, double[] baseState, List<Batc
                                 TargetVector<AcVariableType, AcEquationType> targetVector,
                                 NewtonRaphsonParameters parameters, double tol, boolean distributedSlack,
                                 boolean reactiveLimits, double reactiveLimitTol, double slackDistTol,
-                                double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+                                double convEpsPerEq, ReportNode reportNode, BatchConfig config,
+                                com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
 
     public static BatchSolveRequest of(LfNetwork network, double[] baseState, List<BatchContingency> contingencies,
                                        EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -54,31 +55,40 @@ public record BatchSolveRequest(LfNetwork network, double[] baseState, List<Batc
                                        NewtonRaphsonParameters parameters, ReportNode reportNode) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters,
                 GpuNewtonRaphson.GPU_TOLERANCE, true, true, GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL,
-                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, 0.0, reportNode, BatchConfig.DEVICE_DEFAULTS);
+                GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL, 0.0, reportNode, BatchConfig.DEVICE_DEFAULTS,
+                com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows.none());
     }
 
     public BatchSolveRequest withTol(double tol) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, deadBusRows);
     }
 
     public BatchSolveRequest withOuterLoops(boolean distributedSlack, boolean reactiveLimits) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, deadBusRows);
     }
 
     public BatchSolveRequest withOuterLoopTolerances(double reactiveLimitTol, double slackDistTol) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, deadBusRows);
     }
 
     public BatchSolveRequest withConvEpsPerEq(double convEpsPerEq) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, deadBusRows);
     }
 
     public BatchSolveRequest withConfig(BatchConfig config) {
         return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
-                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config, deadBusRows);
+    }
+
+    /** The request on the device rows past OLF's of {@code deadBusRows}: the base state must hold them already
+     *  (DeadBusRows.withStartValues). */
+    public BatchSolveRequest withDeadBusRows(com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        return new BatchSolveRequest(network, baseState, contingencies, equationSystem, targetVector,
+                parameters, tol, distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config,
+                deadBusRows);
     }
 }

@@ -881,7 +881,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
     /** How many times OLF's reactive-limit loop kept the strongest bus PV in a CPU run, read from its report. */
     private int cpuForcedPvElections(Network network, List<Contingency> ctgs, com.powsybl.loadflow.LoadFlowParameters lfp) {
         com.powsybl.commons.report.ReportNode report = com.powsybl.commons.report.ReportNode.newRootReportNode()
-                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withResourceBundles(com.powsybl.openloadflow.lf.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
                 .withMessageTemplate("olf.saReport").build();
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
@@ -1048,7 +1048,7 @@ class GpuSaRemoteVoltageControlTest extends AbstractGpuSaTest {
         for (String id : new String[] {"T2wT", "T2wT2"}) {
             com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
             t.getRatioTapChanger().setTargetDeadband(0).setTapPosition(0)
-                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE)
                     .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setRegulating(true);
         }
         List<Contingency> ctgs = List.of(

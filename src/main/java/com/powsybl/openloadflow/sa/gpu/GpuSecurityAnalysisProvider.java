@@ -15,9 +15,8 @@ import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.gpu.GpuLoadFlowProvider;
-import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
-import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
+import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
@@ -65,7 +64,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
     }
 
     public GpuSecurityAnalysisProvider() {
-        this(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        this(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>());
     }
 
     /** The last run's GPU engagement counter (see {@code GpuBatchedAcSecurityAnalysis}):
@@ -85,8 +84,10 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_STATE_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_WITHOUT_NETWORK_COUNT.set(0);
+        GpuBatchedAcSecurityAnalysis.LAST_STRATEGIES_ANSWERED_WITHOUT_NETWORK_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_ANSWERED_FROM_ROWS_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_STRATEGY_RESTORE_COUNT.set(0);
+        GpuBatchedAcSecurityAnalysis.LAST_UNREALISTIC_ANSWERED_COUNT.set(0);
     }
 
     /**
@@ -162,11 +163,13 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         OpenLoadFlowParameters.log(loadFlowParameters, loadFlowParametersExt);
 
         GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory;
-        if (runParameters.getOperatorStrategies().isEmpty() && !loadFlowParametersExt.isSimulateAutomationSystems()) {
-            selectedConnectivityFactory = connectivityFactory;
+        if ((!runParameters.getOperatorStrategies().isEmpty() || loadFlowParametersExt.isSimulateAutomationSystems())
+                && !connectivityFactory.supportsIncremental()) {
+            // as OpenSecurityAnalysisProvider: strategies and automation systems reconnect, which needs an incremental
+            // connectivity
+            selectedConnectivityFactory = new DTreeGraphConnectivityFactory<>();
         } else {
-            LOGGER.warn("Naive (and slow!!!) connectivity algorithm has been selected because at least one operator strategy is configured");
-            selectedConnectivityFactory = new NaiveGraphConnectivityFactory<>(LfBus::getNum);
+            selectedConnectivityFactory = connectivityFactory;
         }
 
         // GPU-batched AC security analysis (single-branch N-1 solved on the device in one
@@ -174,7 +177,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis securityAnalysis = new GpuBatchedAcSecurityAnalysis(
                 network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
         return securityAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
-                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions())
+                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitScalings())
                 .whenComplete((r, t) -> restoreThreadCount(runParameters.getSecurityAnalysisParameters(), requestedThreads));
     }
 }

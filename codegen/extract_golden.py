@@ -35,8 +35,10 @@ EXT_CALL = re.compile(r"\bHvdcUtils\.(getHvdcLineLosses)\b")
 
 # [MOD] static {double|boolean} NAME(PARAMS) { BODY }   (no nested braces in the body).
 # boolean helpers (HVDC isController) are inlined into the conditions they guard.
+# MOD may be absent: a static method of an interface (LfHvdc.getAbsActivePowerWithLosses) is
+# implicitly public and written without one; its MOD then reads "".
 METHOD = re.compile(
-    r"(public|protected|private)\s+static\s+(?:double|boolean)\s+(\w+)\s*\(([^)]*)\)\s*\{(.*?)\}",
+    r"(?:(public|protected|private)\s+)?static\s+(?:double|boolean)\s+(\w+)\s*\(([^)]*)\)\s*\{(.*?)\}",
     re.DOTALL)
 # REDUCTION methods (voltage-dependent load model): an accumulation loop over the load model's
 # ExpTerm records, `value += <per-term expr>; ... return value * <mult>`. The GPU packs ONE

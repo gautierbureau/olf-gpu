@@ -122,7 +122,7 @@ final class GpuBatchChunkSolver {
                 // only re-solves what is still missing), so a shrink costs one chunk, not the batch.
                 List<Integer> stillMissing = new ArrayList<>();
                 for (Integer idx : remaining) {
-                    if (resultsByIndex[idx] == null) {
+                    if (resultsByIndex[idx] == null && !in.sinks().notAppliedByIndex()[idx]) {
                         stillMissing.add(idx);
                     }
                 }
@@ -381,6 +381,9 @@ final class GpuBatchChunkSolver {
                 refillAtTest = refillAtForTests;
                 refillAt = refillAtTest != null ? refillAtTest : Math.max(1, bankSize / REFILL_SHARE);
                 for (List<Integer> phaseGroup : List.of(ctgIdxList, pairIdxList)) {
+                    if (phaseGroup == pairIdxList) {
+                        dropPairsThatCannotApply();
+                    }
                     group = phaseGroup;
                     solvePhase();
                 }
@@ -461,7 +464,8 @@ final class GpuBatchChunkSolver {
 
         // The two phases' scenario lists and what the pair phase reads of the contingency phase.
         private void prepareRun() {
-            rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop());
+            rs = new RunScratch(bankSize, nElements, gpuData, elementMapper, baseRowMode, in.settings().distributedSlackOuterLoop(),
+                    in.base().olfRowCount());
             // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
             // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
             // solved state (x0PerScenario) and PV/PQ states (reactiveLimitsSeedState), so the strategy
@@ -517,6 +521,24 @@ final class GpuBatchChunkSolver {
                     resultsByIndex, preDistributedByIndex);
         }
 
+        // The pairs OLF never applies, known once their contingencies were handed back (StateHandback#pairMayApply): a
+        // contingency without a violation selects no action a violation conditions. They are not solved, and the results
+        // leave them out.
+        private void dropPairsThatCannotApply() {
+            StateHandback handback = config.stateHandback();
+            if (handback == null) {
+                return;
+            }
+            boolean[] notApplied = in.sinks().notAppliedByIndex();
+            pairIdxList.removeIf(idx -> {
+                if (handback.pairMayApply(contingencies.get(idx).contingencyId())) {
+                    return false;
+                }
+                notApplied[idx] = true;
+                return true;
+            });
+        }
+
         // One phase: its scenarios queue for the bank's slots, each install a chunk.
         private void solvePhase() {
             pairPhase = group == pairIdxList;
@@ -569,10 +591,10 @@ final class GpuBatchChunkSolver {
                 }
                 GpuTransformerVoltageControlOuterLoop.uploadFixMasks(handle, phases.freeze(), slotOutaged, chunkSize);
             }
-            cl = new ChunkLists(chunkSize, n, gpuData, forcedTargetQ, nDistributedSlackGenerators);
+            cl = new ChunkLists(chunkSize, in.base().olfRowCount(), gpuData, forcedTargetQ, nDistributedSlackGenerators);
             seeding = new SlotSeeding(chunkSize, pairPhase, n, gpuData, elementMapper, contingencies,
                     plan, baseState, baseTargets, baseRowMode, hvdcElemIndex, baseNonSpanningTreeBranches, nDistributedSlackBuses, reactiveCapabilityCurves,
-                    curveEntriesByPRow, rs, cl);
+                    curveEntriesByPRow, rs, cl, in.base().deadBusRows());
             rs.resetChunk();
             for (int s = 0; s < chunkSize; s++) {
                 rs.resetSlot(s);
@@ -981,7 +1003,8 @@ final class GpuBatchChunkSolver {
                 double[] row = chunkResults[s];
                 if (harvested[s].rejectAfterSolve() || switchesUnread[s]) {
                     ChunkArrays.setRowStatus(row, GpuAcSolverStatus.REJECTED);   // the census names the reason where it is decided
-                } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED) {
+                } else if (pairPhase && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.CONVERGED
+                        && ChunkArrays.rowStatus(row, n) != GpuAcSolverStatus.UNREALISTIC_STATE) {
                     // a pair the device solved and did not converge: a device failure wherever OLF converges it
                     GpuBatchScopeCensus.pairDeviceFailed(
                             contingencies.get(harvested[s].index()).contingencyId());
@@ -1684,7 +1707,7 @@ final class GpuBatchChunkSolver {
                     parent = ChunkArrays.fullRow(resultsByIndex[pIdx], n, config.stateSink(),
                             contingencies.get(pIdx).contingencyId());
                     pairParentConverged[s] = true;
-                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                } else if (parentStatus == GpuAcSolverStatus.MAX_ITERATION_REACHED || parentStatus == GpuAcSolverStatus.UNREALISTIC_STATE) {
                     parent = exhaustedStartByIndex.get(pIdx);   // OLF's network after the failed run
                 }
                 if (parent != null) {
@@ -1700,6 +1723,13 @@ final class GpuBatchChunkSolver {
                     rejectAfterSolve[s] = true;
                     if (s < realCount) {
                         GpuBatchScopeCensus.record("PAIR:PARENT_NOT_ON_DEVICE");
+                        // ...and why: the parent's own refusal (mapper or plan), or its status on the device
+                        String parentId = pairId.substring(0, pairId.indexOf(BatchContingency.STRATEGY_KEY_SEP));
+                        String parentTag = GpuBatchScopeCensus.planRefusalTag(parentId);
+                        GpuBatchScopeCensus.record("PAIR:PARENTWHY_" + (!"?".equals(parentTag) ? "TAG_" + parentTag.replaceAll("[^A-Za-z_]", "_")
+                                : pIdx == null ? "NOTINBATCH" : "STATUS_" + (parentStatus == GpuAcSolverStatus.REJECTED ? "REJECTED"
+                                : parentStatus == GpuAcSolverStatus.DIVERGED ? "DIVERGED" : parentStatus == GpuAcSolverStatus.LINEAR_SOLVE_FAILED
+                                ? "LINEARSOLVEFAILED" : resultsByIndex[pIdx] == null ? "NORESULT" : "OTHER")));
                     }
                 }
             }
@@ -2117,12 +2147,14 @@ final class GpuBatchChunkSolver {
             }
         }
         if (!pairPhase && !pairIdxList.isEmpty()) {
-            // A contingency that ran out of Newton iterations on the device (OLF's MAX_ITERATION_REACHED):
-            // OLF still runs its strategies, from what the failed run left - the voltages of its last
-            // converged solve (NewtonRaphson updates the network only then), and the targets and bus
-            // types its outer loops had moved, which the captures below read as they read a converged one.
+            // A contingency that ran out of Newton iterations on the device (OLF's MAX_ITERATION_REACHED), or whose
+            // state OLF's realistic-voltage check stopped (UNREALISTIC_STATE): OLF still runs its strategies, from
+            // what the failed run left - the voltages of its last converged solve (NewtonRaphson updates the network
+            // only then; the unrealistic state is that solve's), and the targets and bus types its outer loops had
+            // moved, which the captures below read as they read a converged one.
             for (int s = 0; s < harvestedCount; s++) {
-                if (ChunkArrays.rowStatus(chunkResults[s], n) == GpuAcSolverStatus.MAX_ITERATION_REACHED) {
+                int status = ChunkArrays.rowStatus(chunkResults[s], n);
+                if (status == GpuAcSolverStatus.MAX_ITERATION_REACHED || status == GpuAcSolverStatus.UNREALISTIC_STATE) {
                     exhaustedStartByIndex.put(harvested[s].index(),
                             BatchReadbackNative.readBatchLastConvergedState(handle, s));
                 }

@@ -66,6 +66,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
      *  sections, branches first, then the other kinds once parity holds. Real network data: never
      *  read its content, only run it. */
     private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_GPU_SA_CASE_FILE", "rte6515_full.xiidm.gz"));
+
+    /** The case file, its reactive capability curves with a point whose max Q is below its min Q repaired as the importer
+     *  repairs them (powsybl-core 7.4 rejects such a curve otherwise; the comparison's two arms read the same network). */
+    private static Network readCase() {
+        java.util.Properties parameters = new java.util.Properties();
+        parameters.setProperty("iidm.import.repair-invalid-reactive-curve-limits", "true");
+        return Network.read(CASE_FILE, com.powsybl.computation.local.LocalComputationManager.getDefault(),
+                com.powsybl.iidm.network.ImportConfig.load(), parameters);
+    }
+
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
     GpuVsCpuRte6515SaTest(CommonTestConfig commonTestConfig) {
@@ -657,7 +667,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             return new PostContingencyResult(p.getContingency(), p.getStatus(), p.getLimitViolationsResult(),
                     new com.powsybl.security.results.NetworkResult(p.getNetworkResult().getBranchResults(), List.of(),
                             p.getNetworkResult().getThreeWindingsTransformerResults()),
-                    p.getConnectivityResult(), p.getDistributedActivePower());
+                    p.getConnectivityResult(), p.getDistributedActivePower(), p.getChangedPhaseTapChangers().stream().toList());
         }
 
         /** Drop an arm's post-contingency bus objects without keeping them anywhere (the warm arm). */
@@ -772,7 +782,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
     @Test
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
-        Network network = Network.read(CASE_FILE);
+        Network network = readCase();
         List<Contingency> contingencies = allBranchContingencies(network);
         // OLF_GPU_SA_CTG_FIRST=<id>[,<id>]: move these to the FRONT of the list, keeping the list
         // itself intact (so the retained switches, and therefore the network both arms solve, are
@@ -874,13 +884,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // contingencies had already executed — which is exactly the shape of the "busbar 8.176e-06 kV
         // on a 0%-batched kind" that stood recorded as a GPU/CPU difference. Read before timing, so a
         // second parse never lands inside a measured region.
-        Network networkGpuCold = Network.read(CASE_FILE);
-        Network networkGpuWarm = Network.read(CASE_FILE);
+        Network networkGpuCold = readCase();
+        Network networkGpuWarm = readCase();
         // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the
         // JVM's first SA and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio
         // flatters the GPU. The ratios are then quoted against CPU warm.
         boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
-        Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
+        Network networkCpuWarm = cpuWarmRun ? readCase() : null;
 
         // OLF_GPU_SA_STRATEGIES=1: operator strategies on every k-th contingency (OLF_GPU_SA_STRATEGY_EVERY, default 20),
         // one per action kind the device composes, built from the network's own elements (syntheticStrategies)
@@ -1475,8 +1485,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         Double base = preKeys.get(key);
                         System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e pre=%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
-                                v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                v.getLimit() * v.getLimitScaling(),
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()),
                                 base == null ? "NEW" : String.format("pre-existing base=%.6f", base));
                     }
                 }
@@ -1486,8 +1496,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         var subj = network.getIdentifiable(v.getSubjectId());   // the KIND of the element, not its data
                         System.out.printf("    GPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e kind=%s%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
-                                v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                v.getLimit() * v.getLimitScaling(),
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitScaling()),
                                 subj == null ? "?" : subj.getType(),
                                 subj instanceof com.powsybl.iidm.network.TwoWindingsTransformer t
                                         ? " rtc=" + t.hasRatioTapChanger() + " ptc=" + t.hasPhaseTapChanger()
@@ -1870,13 +1880,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 cByKey.forEach((k, v) -> {
                     if (!gByKey.containsKey(k)) {
                         System.out.printf("      CPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
-                                v.getLimitReduction());
+                                v.getLimitScaling());
                     }
                 });
                 gByKey.forEach((k, v) -> {
                     if (!cByKey.containsKey(k)) {
                         System.out.printf("      GPU_ONLY %s value=%.12f limit=%.12f reduction=%.6f%n", k, v.getValue(), v.getLimit(),
-                                v.getLimitReduction());
+                                v.getLimitScaling());
                     }
                 });
             }

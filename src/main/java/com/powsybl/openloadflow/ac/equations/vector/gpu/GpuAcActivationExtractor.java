@@ -220,16 +220,22 @@ public final class GpuAcActivationExtractor {
                         e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
-            if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
-                // CONTINUOUS phase control enabled: the controlled branch's P-flow equation sits at the
-                // CONTROLLER's a1-paired row (row mode BRANCH_TARGET_P — the cb family re-emits the P outputs there,
-                // closedBranchPhaseControlSide carrying the controller's a1 column, LOCAL and REMOTE alike).
+            if (e.getType() == AcEquationType.BRANCH_TARGET_P1 || e.getType() == AcEquationType.BRANCH_TARGET_P2) {
+                // CONTINUOUS phase control enabled: the controlled branch's P-flow equation (OLF's BRANCH_TARGET_P1 or
+                // BRANCH_TARGET_P2, the controlled side's) sits at the CONTROLLER's a1-paired row (row mode
+                // BRANCH_TARGET_P — the cb family re-emits the P outputs of the side packed in
+                // closedBranchPhaseControlSide there, with the controller's a1 column, LOCAL and REMOTE alike).
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
                 var phaseControl = branch.getPhaseControl().orElseThrow();
+                if (e.getType() != AcEquationType.branchTargetP(phaseControl.getControlledSide())) {
+                    // the packer emits the controlled side's P: an equation of the other side would be solved wrong
+                    throw new PowsyblException("GPU AC solver: " + e.getType() + " is not the controlled side "
+                            + phaseControl.getControlledSide() + " of the phase control");
+                }
                 int a1r = StableRowIndexing.col(es, phaseControl.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = GpuRowMode.BRANCH_TARGET_P;
-                assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
+                assign(es, targetMap, a1r, e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
             // IDENTITY rows (FIXED_VARIABLE): the device row-mode mask writes diag 1 and F = x − target.
@@ -325,8 +331,8 @@ public final class GpuAcActivationExtractor {
                               double maxRatio, double maxSusceptance, double eps) {
         double sb = 100.0;
         return switch (type) {
-            case BRANCH_TARGET_P, BUS_TARGET_P, DUMMY_TARGET_P, BUS_DISTR_SLACK_P -> maxP / sb;
-            case BRANCH_TARGET_Q, BUS_TARGET_Q, DISTR_Q, DUMMY_TARGET_Q -> maxQ / sb;
+            case BRANCH_TARGET_P1, BRANCH_TARGET_P2, BUS_TARGET_P, DUMMY_TARGET_P, BUS_DISTR_SLACK_P -> maxP / sb;
+            case BRANCH_TARGET_Q1, BRANCH_TARGET_Q2, BUS_TARGET_Q, DISTR_Q, DUMMY_TARGET_Q -> maxQ / sb;
             case BUS_TARGET_V, ZERO_V -> maxV;
             case BRANCH_TARGET_RHO1, DISTR_RHO -> maxRatio;
             case DISTR_SHUNT_B, SHUNT_TARGET_B -> maxSusceptance;

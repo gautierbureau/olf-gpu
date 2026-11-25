@@ -109,11 +109,13 @@ final class GpuBatchPrecomputer {
      * What the precompute needs to screen each handed-back scenario on the device and keep only what the host answers it
      * with (P4 of docs/device-final-results-plan.md, {@link GpuStateHandback}): the run's limit reductions (the screen's
      * table), which scenarios the host may answer from their state rows alone ({@code sparse}), whether the comparison
-     * also reads every full state, and the realistic-voltage band the screen reports buses outside of.
+     * also reads every full state, the realistic-voltage band the screen reports buses outside of, and the
+     * increased-violations thresholds of OLF's filtering against the base case (GpuBaseViolations).
      */
-    record HandbackSettings(List<com.powsybl.security.limitreduction.LimitReduction> limitReductions,
+    record HandbackSettings(List<com.powsybl.security.limitscaling.LimitScaling> limitScalings,
                             java.util.function.Predicate<String> sparse, boolean compare, double minRealisticV,
-                            double maxRealisticV) {
+                            double maxRealisticV,
+                            com.powsybl.security.SecurityAnalysisParameters.IncreasedViolationsParameters increasedViolations) {
     }
 
     /**
@@ -159,7 +161,8 @@ final class GpuBatchPrecomputer {
             // re-point the network's evaluables off the engine's system, breaking fall-through CPU solves).
             // After the converged base load flow the engine's state vector holds the base operating point.
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
-            double[] baseState = es.getStateVector().get().clone();
+            var deadBusRows = deadBusRows(net, es, strategies, actions);
+            double[] baseState = deadBusRows.withStartValues(es.getStateVector().get().clone());
             var target = context.getTargetVector();
 
             // one batch per group, the contingencies taken in OLF's order
@@ -178,6 +181,9 @@ final class GpuBatchPrecomputer {
             // the device extracted its structure on the base tree, and every coupler OLF has out of its
             // tree when it reaches a contingency must be held out of it there, ALL of them, not one per network.
             ZeroImpedanceTreeReplay ziTree = new ZeroImpedanceTreeReplay(net);
+            Map<String, List<OperatorStrategy>> strategiesByContingency = GpuStrategyComposer.byContingency(strategies, contingencies);
+            // the pairs whose application the contingency's violations decide, by id (GpuStrategyComposer.mayApply)
+            Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations = new HashMap<>();
             for (PropagatedContingency propagatedContingency : contingencies) {
                 String contingencyId = propagatedContingency.getContingency().getId();
                 if (leftToCpu.contains(contingencyId)) {
@@ -188,8 +194,8 @@ final class GpuBatchPrecomputer {
                 int g = groupIndex.getOrDefault(contingencyId, runGroupIndex);
                 SolveGroup group = groups.get(g);
                 addBatchScenarios(net, network, propagatedContingency, context, ziTree, batches.get(g),
-                        group.withoutStrategies().contains(contingencyId) ? List.of() : strategies,
-                        group.settings().config(), actions);
+                        group.withoutStrategies().contains(contingencyId) ? List.of() : strategiesByContingency.get(contingencyId),
+                        group.settings().config(), group.settings().distributedSlack(), actions, pairsOnViolations, deadBusRows);
             }
             int batchSize = batches.stream().mapToInt(List::size).sum();
             if (GpuTrace.BATCH_TRACE.isOn()) {
@@ -239,13 +245,20 @@ final class GpuBatchPrecomputer {
             GpuViolationScreen violationScreen = null;
             int fullStates = batchSize;
             if (handbackSettings != null && com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable()) {
-                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.sa.LimitReductionManager.create(
-                        handbackSettings.limitReductions()));
+                limitTable = GpuLimitTable.build(net, com.powsybl.openloadflow.network.LimitScalingManager.create(
+                        handbackSettings.limitScalings()));
                 violationScreen = GpuViolationScreen.build(net, limitTable, screenData, screenMapper, es, baseVariableRows);
+                // the base case's violations, for the types of those OLF may report per contingency: which strategy pairs
+                // its violations may select (pairsOnViolations)
+                if (!pairsOnViolations.isEmpty()) {
+                    violationScreen.withBaseViolations(GpuBaseViolations.of(net, limitTable, handbackSettings.limitScalings(),
+                            handbackSettings.increasedViolations()));
+                }
                 GpuStateView view = new GpuStateView(net, baseVariableRows);
                 java.util.function.Predicate<String> sparse = view.usable() ? handbackSettings.sparse() : id -> false;
                 handback = new GpuStateHandback(violationScreen, limitTable, view, net, scenarios, sparse,
-                        handbackSettings.compare(), true, handbackSettings.minRealisticV(), handbackSettings.maxRealisticV());
+                        handbackSettings.compare(), true, handbackSettings.minRealisticV(), handbackSettings.maxRealisticV(),
+                        pairsOnViolations);
                 if (!handbackSettings.compare()) {
                     fullStates = (int) scenarios.keySet().stream().filter(id -> !sparse.test(id)).count();
                 }
@@ -280,16 +293,16 @@ final class GpuBatchPrecomputer {
                                 .withOuterLoops(settings.distributedSlack(), settings.reactiveLimits())
                                 .withOuterLoopTolerances(settings.reactiveLimitTol(), settings.slackDistTol())
                                 .withConvEpsPerEq(settings.convEpsPerEq())
-                                .withConfig(config));
-                results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context,
-                        settings.distributedSlack(), settings.reactiveLimits(), settings.reactiveLimitTol(),
-                        settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config));
+                                .withConfig(config).withDeadBusRows(deadBusRows));
+                results.addAll(retryRejectedOnDevice(groupResults, batch, net, baseState, es, target, context, settings.distributedSlack(),
+                        settings.reactiveLimits(), settings.reactiveLimitTol(), settings.slackDistTol(), settings.convEpsPerEq(), reportNode, config, deadBusRows));
             }
             // the converged states: the sink when the run has one (every chunk put its states there as it
             // completed), a heap map otherwise
             Map<String, double[]> states = stateSink != null ? stateSink : new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
+            java.util.Set<String> unrealistic = new java.util.HashSet<>();
             Map<String, Double> preDistributed = new HashMap<>();
             Map<String, Double> distributed = new HashMap<>();
             Map<String, int[]> automationSystemSwitched = new HashMap<>();
@@ -297,16 +310,12 @@ final class GpuBatchPrecomputer {
             Map<String, BatchScenarioResult.GeneratorTargets> generatorTargets = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 if (r.generatorTargets() != null && r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0
-                        && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED)) {
+                        && (r.hasConverged() || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
+                            || r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE)) {
                     generatorTargets.put(r.contingencyId(), r.generatorTargets());
                 }
                 GpuBatchedAcSecurityAnalysis.LAST_DEVICE_FINAL_MISMATCH.put(r.contingencyId(), r.finalMismatch());
-                if (GpuTrace.QUALIFY_TRACE.isOn()) {
-                    System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
-                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
-                            + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
-                                    ? " (never batched: refused at plan time)" : ""));
-                }
+                traceQualify(r);
                 if (r.hasConverged()) {
                     if (r.state() != null) {                 // null: already in the sink
                         states.put(r.contingencyId(), r.state());
@@ -335,6 +344,8 @@ final class GpuBatchPrecomputer {
                     // pre-distribution whatever the status), so the device's total is carried for these too.
                     recordDistributed(r, preDistributed, distributed);
                     GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
+                } else if (r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE) {
+                    recordUnrealistic(r, unrealistic, exhausted, preDistributed, distributed);
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
                     if (GpuTrace.REJECT_TRACE.isOn()) {
@@ -357,10 +368,10 @@ final class GpuBatchPrecomputer {
             System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batchSize + " batched scenarios on device"
                     + " census=" + GpuBatchScopeCensus.snapshot());
 
-            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
+            return new PrecomputedBatch(states, islandedBuses, exhausted, unrealistic, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed, automationSystemSwitched, deviceTapMoves, generatorTargets, scenarios,
                     handback != null ? handback.candidates : Map.of(), handback != null ? handback.gathered : Map.of(),
-                    limitTable, violationScreen);
+                    limitTable, violationScreen, handback != null ? handback.possibleTypes : Map.of(), deadBusVariableRows(es, deadBusRows));
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
@@ -391,7 +402,9 @@ final class GpuBatchPrecomputer {
                                           final AcLoadFlowContext context, final ZeroImpedanceTreeReplay ziTree,
                                           final List<BatchContingency> batch,
                                           final List<OperatorStrategy> strategies, final BatchConfig config,
-                                          final List<Action> actions) {
+                                          final boolean distributedSlack, final List<Action> actions,
+                                          final Map<String, GpuStrategyComposer.StrategyPair> pairsOnViolations,
+                                          final com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, propagatedContingency);
         List<LfGenerator> gens = propagatedContingency.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net,
                                                           propagatedContingency, lostLfBusIds);
@@ -409,7 +422,8 @@ final class GpuBatchPrecomputer {
                 .toList();
         // The tree OLF SOLVES this contingency on: the one it reached it with, re-elected by this
         // contingency's own disabled couplers (opened, or sitting on a lost bus).
-        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(propagatedContingency);
+        java.util.Optional<com.powsybl.openloadflow.network.LfContingency> lfContingency = ziTree.lfContingency(propagatedContingency);
+        List<LfBranch> nonSpanningTreeBranches = ziTree.applyAndRevert(lfContingency, List.of(), List.of());
         if (GpuTrace.ZITREE_TRACE.isOn() && nonSpanningTreeBranches.size() > 40) {
             System.err.println("ZITREE_REPLAY_WIDE ctg=" + propagatedContingency.getContingency().getId() + " nonTree=" + nonSpanningTreeBranches.size());
         }
@@ -527,7 +541,7 @@ final class GpuBatchPrecomputer {
                 for (List<String> actionIds : GpuStrategyComposer.candidateActionLists(strategy)) {
                     BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, propagatedContingency.getContingency().getId(), strategy, actionIds, actions,
                             zeroImpedanceBranchOutages, branches, gens, loads, propagatedContingency.getLoadIdsToLose().keySet(), shifts, hvdcs,
-                            sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt);
+                            sideOpens, nonSpanningTreeBranches, context.getParameters().getNetworkParameters(), pairBt, deadBusRows);
                     if (pair == null) {
                         GpuBatchScopeCensus.record("PAIR:COMPOSE_REFUSED");
                     }
@@ -542,16 +556,20 @@ final class GpuBatchPrecomputer {
                         pair = null;                     // the bus's split of the parent share is not known: CPU
                     }
                     // A GeneratorAction re-checks its generator's participation at the new target. A generator that
-                    // did not participate and now does would have to join the device's generator pack: CPU.
-                    if (pair != null && pair.generatorActions().stream().anyMatch(m -> pairDistributedSlackParameters.factor(m.generator()) == 0
+                    // did not participate and now does would have to join the device's generator pack: CPU. Without a
+                    // distribution nobody's participation moves anything.
+                    if (pair != null && distributedSlack && pair.generatorActions().stream().anyMatch(m -> pairDistributedSlackParameters.factor(m.generator()) == 0
                             && m.participatesAt() != null
                             && m.participatesAt().test(m.newTargetP(m.generator().getTargetP())))) {
                         GpuBatchScopeCensus.record("PAIR:ACTION_STARTS_PARTICIPATION");
                         pair = null;
                     }
                     if (pair != null) {
-                        pair = withPairTree(pair, propagatedContingency, branches, zeroImpedanceBranchOutages, ziTree);
+                        pair = withPairTree(pair, lfContingency, branches, zeroImpedanceBranchOutages, ziTree);
                         batch.add(pair);
+                        if (GpuStrategyComposer.candidateActionLists(strategy, 0) != null) {
+                            pairsOnViolations.put(pair.contingencyId(), new GpuStrategyComposer.StrategyPair(strategy, actionIds));
+                        }
                     }
                 }
             }
@@ -619,13 +637,60 @@ final class GpuBatchPrecomputer {
      * <p>Cost, NOT yet measured: switching mode evicts the single-entry context cache, so the pass
      * pays one cuDSS analysis plus a solve over the rejected scenarios on every run.
      */
+    /** The device rows the last precompute added past OLF's (tests). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_DEAD_BUS_ROW_COUNT = new java.util.concurrent.atomic.AtomicInteger();
+
+    /** The dead buses a strategy's switch close can bring back, with device rows past OLF's (DeadBusRows). */
+    private static com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows(LfNetwork net,
+            EquationSystem<AcVariableType, AcEquationType> es, List<OperatorStrategy> strategies, List<Action> actions) {
+        var rows = com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows.of(net, es.getIndex().getSortedVariablesToFind().size(),
+                GpuStrategyComposer.switchClosesOntoDeadBuses(net, strategies, actions));
+        LAST_DEAD_BUS_ROW_COUNT.set(rows.rowCount() - rows.olfRowCount());
+        return rows;
+    }
+
+    /** The BUS_PHI and BUS_V variables of the buses with rows past OLF's, with those rows. */
+    private static Map<Variable<AcVariableType>, Integer> deadBusVariableRows(EquationSystem<AcVariableType, AcEquationType> es,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
+        Map<Variable<AcVariableType>, Integer> rows = new HashMap<>();
+        for (com.powsybl.openloadflow.network.LfBus bus : deadBusRows.buses()) {
+            rows.put(es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI), deadBusRows.phiRow(bus));
+            rows.put(es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V), deadBusRows.vRow(bus));
+        }
+        return rows;
+    }
+
+    private static void traceQualify(BatchScenarioResult r) {
+        if (GpuTrace.QUALIFY_TRACE.isOn()) {
+            System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
+                    + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
+                    + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
+                            ? " (never batched: refused at plan time)" : ""));
+        }
+    }
+
+    /** OLF's realistic-voltage check stopped the run where the device checks it: OLF's answer is UNREALISTIC_STATE, which the
+     *  security analysis reports FAILED without violations or network results, for a contingency (with the no-result
+     *  treatment of the exhausted ones) and for a strategy alike. The distribution reported is what the slack passes placed
+     *  before the stop. */
+    private static void recordUnrealistic(BatchScenarioResult r, java.util.Set<String> unrealistic, java.util.Set<String> exhausted,
+                                          Map<String, Double> preDistributed, Map<String, Double> distributed) {
+        unrealistic.add(r.contingencyId());
+        if (r.contingencyId().indexOf(BatchContingency.STRATEGY_KEY_SEP) < 0) {
+            exhausted.add(r.contingencyId());
+        }
+        recordDistributed(r, preDistributed, distributed);
+        GpuBatchScopeCensus.record("DEVICE:UNREALISTIC_STATE");
+    }
+
     private static List<BatchScenarioResult> retryRejectedOnDevice(
             List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
             double[] baseState, EquationSystem<AcVariableType, AcEquationType> es,
             com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> target,
             AcLoadFlowContext context,
             boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
-            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.DeadBusRows deadBusRows) {
         if (config.robustSolveMode()) {
             return results;
         }
@@ -652,7 +717,8 @@ final class GpuBatchPrecomputer {
                             .withOuterLoops(distributedSlack, reactiveLimits)
                             .withOuterLoopTolerances(reactiveLimitTol, slackDistTol)
                             .withConvEpsPerEq(convEpsPerEq)
-                            .withConfig(config.withRobustSolveMode()));
+                            .withConfig(config.withRobustSolveMode())
+                            .withDeadBusRows(deadBusRows));
         } catch (RuntimeException e) {
             // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
             // results, which are already correct for every scenario that converged.
@@ -685,7 +751,8 @@ final class GpuBatchPrecomputer {
         for (BatchScenarioResult r : retried) {
             retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
             boolean ok = r.convergenceStatus() == GpuAcSolverStatus.CONVERGED
-                    || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED;
+                    || r.convergenceStatus() == GpuAcSolverStatus.MAX_ITERATION_REACHED
+                    || r.convergenceStatus() == GpuAcSolverStatus.UNREALISTIC_STATE;
             if (ok) {
                 better.put(r.contingencyId(), r);
                 recovered++;
@@ -705,7 +772,9 @@ final class GpuBatchPrecomputer {
 
     /** A pair whose actions open or close couplers is solved on the tree OLF elects after those actions, not on its
      *  contingency's: a coupler the strategy recloses (open at base, or opened by the contingency) goes back in it. */
-    private static BatchContingency withPairTree(BatchContingency pair, PropagatedContingency propagatedContingency, List<LfBranch> ctgBranches,
+    private static BatchContingency withPairTree(BatchContingency pair,
+                                                 java.util.Optional<com.powsybl.openloadflow.network.LfContingency> lfContingency,
+                                                 List<LfBranch> ctgBranches,
                                                  List<LfBranch> contingencyZeroImpedanceBranchOutages, ZeroImpedanceTreeReplay ziTree) {
         java.util.Set<LfBranch> ctgOut = new java.util.HashSet<>(ctgBranches);
         ctgOut.addAll(contingencyZeroImpedanceBranchOutages);
@@ -722,8 +791,8 @@ final class GpuBatchPrecomputer {
         }
         return new BatchContingency(pair.contingencyId(), pair.outagedBranches(), pair.lostGenerators(), pair.lostLoads(),
                 pair.shuntShifts(), pair.tapOverrides(), pair.outagedShunts(), pair.reclosedBranches(), pair.outagedZeroImpedanceBranches(),
-                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(propagatedContingency, opened, closed), pair.generatorActions(),
-                pair.acEmulationOffHvdcs());
+                pair.outagedHvdcs(), pair.sideOpenBranches(), ziTree.applyAndRevert(lfContingency, opened, closed), pair.generatorActions(),
+                pair.acEmulationOffHvdcs(), pair.broughtBackBuses());
     }
 
     private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,

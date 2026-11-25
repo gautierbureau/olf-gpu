@@ -342,4 +342,27 @@ final class GpuLimitScanner {
     private double busAngle(LfBus bus) {
         return view != null ? view.busAngle(state, bus) : bus.getAngle();
     }
+
+    /**
+     * The candidates with the voltage limits of {@code buses} added, in record order: buses the screen does not read (no
+     * base row), checked as every bus candidate is, in OLF's bus order.
+     */
+    static int[] withBuses(GpuLimitTable table, int[] candidates, java.util.Set<LfBus> buses) {
+        if (buses.isEmpty()) {
+            return candidates;
+        }
+        java.util.TreeSet<Integer> records = new java.util.TreeSet<>();
+        for (int c : candidates) {
+            records.add(c);
+        }
+        LfBus[] tableBuses = table.buses();
+        for (LfBus bus : buses) {
+            int i = bus.getNum();
+            if (i < tableBuses.length && tableBuses[i] == bus) {
+                records.add(table.limitCount() + 2 * i);         // the high voltage limit
+                records.add(table.limitCount() + 2 * i + 1);     // the low one
+            }
+        }
+        return records.stream().mapToInt(Integer::intValue).toArray();
+    }
 }

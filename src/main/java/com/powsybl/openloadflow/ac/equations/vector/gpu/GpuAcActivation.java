@@ -34,6 +34,19 @@ public record GpuAcActivation(int[] rowMode, int[] targetMap) {
         return t;
     }
 
+    /** This activation on {@code rowCount} rows, the rows past its own fixed variables with no OLF target (the dead buses'
+     *  rows, DeadBusRows: their targets are their start values). */
+    public GpuAcActivation lengthened(int rowCount) {
+        if (rowCount == rowMode.length) {
+            return this;
+        }
+        int[] mode = java.util.Arrays.copyOf(rowMode, rowCount);
+        java.util.Arrays.fill(mode, rowMode.length, rowCount, com.powsybl.openloadflow.ac.solver.gpu.codes.GpuRowMode.FIXED_VARIABLE);
+        int[] map = java.util.Arrays.copyOf(targetMap, rowCount);
+        java.util.Arrays.fill(map, targetMap.length, rowCount, -1);
+        return new GpuAcActivation(mode, map);
+    }
+
     public static GpuAcActivation fromEquationSystem(LfNetwork network,
                                                      EquationSystem<AcVariableType, AcEquationType> es) {
         int n = es.getIndex().getSortedVariablesToFind().size();

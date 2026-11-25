@@ -34,12 +34,12 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LimitScalingManager;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.sa.AbstractNetworkResult;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
 import com.powsybl.openloadflow.sa.ContingencyActivePowerLossDistribution;
-import com.powsybl.openloadflow.sa.LimitReductionManager;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.PostContingencyNetworkResult;
@@ -50,7 +50,7 @@ import com.powsybl.security.LimitViolationsResult;
 import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
-import com.powsybl.security.limitreduction.LimitReduction;
+import com.powsybl.security.limitscaling.LimitScaling;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.ConnectivityResult;
 import com.powsybl.security.results.NetworkResult;
@@ -155,6 +155,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_ANSWERED_WITHOUT_NETWORK_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
+    /** How many contingencies and strategies of the last run were answered FAILED from the device's UNREALISTIC_STATE. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_UNREALISTIC_ANSWERED_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** How many operator strategies of the last run were answered without applying them to the network
+     *  (resultsWithoutNetwork); reset with the counters above. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_STRATEGIES_ANSWERED_WITHOUT_NETWORK_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** How many post-strategy restores of the last run were targeted (see restorePostContingencyState). */
     static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_STRATEGY_RESTORE_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -200,13 +209,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     ? run.precomputed.preDistributedActivePower().get(contingency.getId())
                     : null;
             if (replayed == null || loadFlowParametersOverride != null
-                    || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())) {
+                    || !run.strategiesOf(contingency.getId()).isEmpty()) {
                 return delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
                         loadFlowParametersOverride, reportNode);
             }
             double mismatch = lfContingency.getActivePowerLoss();
             if (Math.abs(mismatch) > 0) {                    // a replayed value exists only with distributed slack on
-                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                com.powsybl.openloadflow.lf.util.LfReports.reportContingencyActivePowerLossDistribution(reportNode,
                         mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
             }
             LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
@@ -397,7 +406,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private int[] flowReadSet(GpuSaRunState run, LfNetwork network, String contingencyId) {
         if (run.violationScreen == null || run.candidates == null || flowsMonitored()
-                || targetedByOperatorStrategy(run.operatorStrategies, contingencyId)
+                || !run.strategiesOf(contingencyId).isEmpty()
                 || GpuTrace.SA_RESID.isOn()
                 || GpuTrace.VIOL_CROSSCHECK.isOn()
                 || GpuTrace.STATE_VIEW_CHECK.isOn()) {
@@ -612,15 +621,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * {@link GpuStateView}, the same doubles OLF's accessors return once the state is written back (checked bit for bit
      * by OLF_GPU_STATE_VIEW_CHECK), and the injection, its flow refresh and the bus writes are skipped. Not when
      * something reads OLF's objects for this contingency: a diagnostic of the written-back state (OLF_GPU_SA_RESID,
-     * OLF_GPU_VIOL_CROSSCHECK), an operator strategy on it, a state monitor asking for flows, a contingency with its own
+     * OLF_GPU_VIOL_CROSSCHECK), an operator strategy on it (unless {@code withStrategies}: the strategies are answered
+     * without the network too), a state monitor asking for flows, a contingency with its own
      * load flow parameters; nor when the view cannot stand for the objects on this run ({@link GpuStateView#usable()}).
      * A bus-results monitor is served by writing the buses' voltages and angles alone. The voltage-angle limits are
      * checked through the view too (GpuLimitScanner).
      */
     private boolean answeredFromState(GpuSaRunState run, Contingency contingency, LfNetwork network,
-                                      PrecomputedBatch precomputed) {
+                                      PrecomputedBatch precomputed, boolean withStrategies) {
         if (GpuTrace.SA_RESID.isOn() || GpuTrace.VIOL_CROSSCHECK.isOn()
-                || targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                || !withStrategies && !run.strategiesOf(contingency.getId()).isEmpty()
                 || flowsMonitored()
                 || contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) != null) {
             return false;
@@ -664,8 +674,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * the refresh.
      */
     private static boolean anotherStrategyReadsFlows(GpuSaRunState run, String contingencyId, OperatorStrategy strategy) {
-        for (OperatorStrategy other : run.operatorStrategies) {
-            if (other.getId().equals(strategy.getId()) || !targets(other, contingencyId)) {
+        for (OperatorStrategy other : run.strategiesOf(contingencyId)) {
+            if (other.getId().equals(strategy.getId())) {
                 continue;
             }
             for (ConditionalActions stage : other.getConditionalActions()) {
@@ -695,12 +705,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     private static boolean strategyConditionOfType(GpuSaRunState run, String contingencyId,
                                                    Class<? extends com.powsybl.contingency.strategy.condition.Condition> type) {
-        for (OperatorStrategy strategy : run.operatorStrategies) {
-            if (targets(strategy, contingencyId)) {
-                for (ConditionalActions stage : strategy.getConditionalActions()) {
-                    if (type.isInstance(stage.getCondition())) {
-                        return true;
-                    }
+        for (OperatorStrategy strategy : run.strategiesOf(contingencyId)) {
+            for (ConditionalActions stage : strategy.getConditionalActions()) {
+                if (type.isInstance(stage.getCondition())) {
+                    return true;
                 }
             }
         }
@@ -727,24 +735,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
-    private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
-        for (OperatorStrategy strategy : strategies) {
-            if (targets(strategy, contingencyId)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean targets(OperatorStrategy strategy, String contingencyId) {
-        var contingencyContext = strategy.getContingencyContext();
-        return switch (contingencyContext.getContextType()) {
-            case ALL, ONLY_CONTINGENCIES -> true;
-            case SPECIFIC -> contingencyId.equals(contingencyContext.getContingencyId());
-            case NONE -> false;
-        };
-    }
-
     /**
      * What a strategy pair's device answer reports as distributed active power, or null when the pair is not answered
      * on the device: no state, the batch not ready, or its distribution not recorded under distributed slack. OLF
@@ -755,7 +745,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                   SecurityAnalysisParameters securityAnalysisParameters) {
         PrecomputedBatch precomputed = run.precomputed;
         // an existence test: with the state store a get reads the whole state from its file
-        if (!precomputed.isReady() || !precomputed.answered(pairId)) {
+        if (!precomputed.isReady() || !precomputed.answered(pairId) && !precomputed.unrealistic().contains(pairId)) {
             return null;
         }
         // a contingency's own load flow parameters, when they hold for its strategies too, decide the distribution
@@ -773,15 +763,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private static boolean everyStrategyAnsweredOnDevice(GpuSaRunState run, String contingencyId,
                                                          SecurityAnalysisParameters securityAnalysisParameters) {
-        for (OperatorStrategy strategy : run.operatorStrategies) {
-            if (!targets(strategy, contingencyId)) {
-                continue;
-            }
+        for (OperatorStrategy strategy : run.strategiesOf(contingencyId)) {
             // whichever of its action lists OLF ends up applying (the stages' conditions are evaluated later, on the
-            // post-contingency violations), the device must hold it
+            // post-contingency violations), the device must hold it; of those the contingency's violations may select only,
+            // where the device knows the types it may report: the others were not solved
             List<List<String>> candidates = GpuStrategyComposer.candidateActionLists(strategy);
             if (candidates.isEmpty()) {
                 return false;
+            }
+            Integer possibleTypes = run.precomputed.possibleViolationTypes().get(contingencyId);
+            List<List<String>> selectable = possibleTypes != null
+                    ? GpuStrategyComposer.candidateActionLists(strategy, possibleTypes) : null;
+            if (selectable != null) {
+                candidates = selectable;
             }
             for (List<String> actionIds : candidates) {
                 if (pairDistributedOnDevice(run, contingencyId, GpuStrategyComposer.pairId(contingencyId, strategy, actionIds),
@@ -793,6 +787,103 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return true;
     }
 
+    /** The buses in service in {@code topology} without a row in the base system ({@code view}): those a strategy's actions
+     *  bring back from out of the network, in bus order, as the usual path finds them on the applied network. */
+    private static java.util.Set<LfBus> busesWithoutBaseRow(LfNetwork network, GpuStateView view, GpuContingencyTopology topology) {
+        java.util.Set<LfBus> withoutBaseRow = new java.util.LinkedHashSet<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!topology.busOut(bus) && !view.hasRows(bus)) {
+                withoutBaseRow.add(bus);
+            }
+        }
+        return withoutBaseRow;
+    }
+
+    /** Per bus with device rows past OLF's (PrecomputedBatch#deadBusVariableRows), its voltage and angle rows; built once a
+     *  run. */
+    private static Map<Integer, int[]> deadBusRows(GpuSaRunState run) {
+        if (run.deadBusRows == null || run.deadBusRowsFor != run.precomputed) {
+            Map<Integer, int[]> rows = new java.util.HashMap<>();
+            run.precomputed.deadBusVariableRows().forEach((variable, row) -> {
+                int[] r = rows.computeIfAbsent(variable.getElementNum(), k -> new int[] {-1, -1});
+                if (variable.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V) {
+                    r[0] = row;
+                } else if (variable.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI) {
+                    r[1] = row;
+                }
+            });
+            run.deadBusRows = rows;
+            run.deadBusRowsFor = run.precomputed;
+        }
+        return run.deadBusRows;
+    }
+
+    /**
+     * The pair's state with what the usual path writes for the buses it brings back ({@code reenergized}): each bus the
+     * walk of {@link #copyVoltageToReenergizedBuses} reaches takes the voltage and angle of the bus it hangs from (the
+     * values that bus's {@code getV}/{@code getAngle} return), held in two slots appended to the state; a bus it does not
+     * reach is read at its device rows past OLF's ({@code deadBusRows}). {@code rows} receives each bus's voltage and
+     * angle rows.
+     */
+    @SuppressWarnings("java:S107")
+    private static double[] withBroughtBackBuses(LfNetwork network, GpuStateView view, GpuContingencyTopology topology,
+                                                 java.util.Set<LfBus> reenergized, Map<Integer, int[]> deadBusRows,
+                                                 double[] state, Map<Integer, int[]> rows) {
+        double[] withSlots = java.util.Arrays.copyOf(state, state.length + 2 * reenergized.size());
+        int slot = state.length;
+        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>(reenergized);
+        java.util.ArrayDeque<LfBus> todo = new java.util.ArrayDeque<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!topology.busOut(bus) && !withoutBaseRow.contains(bus)) {
+                todo.add(bus);
+            }
+        }
+        while (!todo.isEmpty() && !withoutBaseRow.isEmpty()) {
+            LfBus bus = todo.poll();
+            for (LfBranch branch : bus.getBranches()) {
+                if (topology.branchOut(branch) || !branch.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus other = branch.getBus1() == bus ? branch.getBus2() : branch.getBus1();
+                if (other != null && withoutBaseRow.remove(other)) {
+                    GpuStateView current = view.withBusRows(rows);
+                    withSlots[slot] = current.busV(withSlots, bus);
+                    withSlots[slot + 1] = current.busAngle(withSlots, bus);
+                    rows.put(other.getNum(), new int[] {slot, slot + 1});
+                    slot += 2;
+                    todo.add(other);
+                }
+            }
+        }
+        for (LfBus bus : withoutBaseRow) {                  // not reached: its rows past OLF's, else nothing (NaN)
+            int[] dead = deadBusRows.get(bus.getNum());
+            if (dead != null && dead[0] >= 0 && dead[1] >= 0) {
+                rows.put(bus.getNum(), dead);
+            } else {
+                withSlots[slot] = Double.NaN;
+                withSlots[slot + 1] = Double.NaN;
+                rows.put(bus.getNum(), new int[] {slot, slot + 1});
+                slot += 2;
+            }
+        }
+        return withSlots;
+    }
+
+    /** The buses in the network without a row in the base system: those an action brought back from out of the network, in
+     *  bus order. */
+    private static java.util.Set<LfBus> busesWithoutBaseRow(LfNetwork network,
+            com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType, com.powsybl.openloadflow.ac.equations.AcEquationType> equationSystem,
+            Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseVariableRows) {
+        java.util.Set<LfBus> withoutBaseRow = new java.util.LinkedHashSet<>();
+        for (LfBus bus : network.getBuses()) {
+            if (!bus.isDisabled() && !baseVariableRows.containsKey(equationSystem.getVariableSet()
+                    .getVariable(bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V))) {
+                withoutBaseRow.add(bus);
+            }
+        }
+        return withoutBaseRow;
+    }
+
     /**
      * The buses an action brought back from out of the network (GpuStrategyComposer.composeReenergizedIsland) have no row in
      * the device's system: OLF's equation system gives them rows once the actions enabled them, which the injected state,
@@ -801,17 +892,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      */
     private static void copyVoltageToReenergizedBuses(LfNetwork network,
             com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType, com.powsybl.openloadflow.ac.equations.AcEquationType> equationSystem,
-            Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseVariableRows) {
-        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>();
-        for (LfBus bus : network.getBuses()) {
-            if (!bus.isDisabled() && !baseVariableRows.containsKey(equationSystem.getVariableSet()
-                    .getVariable(bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V))) {
-                withoutBaseRow.add(bus);
-            }
-        }
-        if (withoutBaseRow.isEmpty()) {
+            java.util.Set<LfBus> reenergized) {
+        if (reenergized.isEmpty()) {
             return;
         }
+        java.util.Set<LfBus> withoutBaseRow = new java.util.HashSet<>(reenergized);
         java.util.ArrayDeque<LfBus> todo = new java.util.ArrayDeque<>();
         for (LfBus bus : network.getBuses()) {
             if (!bus.isDisabled() && !withoutBaseRow.contains(bus)) {
@@ -865,7 +950,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     protected SecurityAnalysisResult runSimulations(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies,
                                                     AcLoadFlowParameters acParameters, SecurityAnalysisParameters securityAnalysisParameters,
                                                     List<OperatorStrategy> operatorStrategies, List<Action> actions,
-                                                    List<LimitReduction> limitReductions,
+                                                    List<LimitScaling> limitScalings,
                                                     ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
         // The GPU path is MONO-THREADED BY DESIGN (one device; its parallelism IS the batch), but
         // threadCount > 1 stays useful for the CPU side: partition workers run their sequential
@@ -877,7 +962,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         RUN_START_NS.set(System.nanoTime());
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
         GpuSaRunState run = new GpuSaRunState();
-        run.limitReductions = limitReductions;               // the screen's table, built before the batch solve (P4)
+        run.limitScalings = limitScalings;               // the screen's table, built before the batch solve (P4)
         runState.set(run);
         run.loadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
         run.securityAnalysisParameters = securityAnalysisParameters;
@@ -937,6 +1022,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         run.lfNetwork = lfNetwork;
         run.contingencies = propagatedContingencies;
         run.operatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
+        run.strategiesByContingency = GpuStrategyComposer.byContingency(run.operatorStrategies, propagatedContingencies);
         run.actions = actions != null ? actions : List.of();
         run.precomputed = PrecomputedBatch.empty();
         run.batchDistributedSlack = scope.distributedSlack();
@@ -967,7 +1053,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         ContingencyActivePowerLossDistribution lossDistribution = new ReplayedLossDistribution(contingencyActivePowerLossDistribution);
         try {
             return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
-                    operatorStrategies, actions, limitReductions, lossDistribution);
+                    operatorStrategies, actions, limitScalings, lossDistribution);
         } finally {
             restoreStaleVoltages(runState.get(), null);      // the network leaves the loop in its base state
             closeStateStore(runState.get());                 // a file-backed state map is dropped with the run
@@ -1022,39 +1108,61 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * rather than the reporting — so it is worth doing over flat arrays even before it moves to the
      * device. The table is built once per run and cached on the partition's GpuSaRunState.
      */
-    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId) {
-        detectViolations(network, manager, limitReductions, reference, saParameters, contingencyId, null);
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, null);
     }
 
     /** {@code scanInFull}: the branches the screen cannot be trusted on for this scenario, scanned in full on the host
      *  (null: the current contingency's side-opened branches). */
-    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull) {
-        detectViolations(network, manager, limitReductions, reference, saParameters, contingencyId, scanInFull, null);
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, null);
     }
 
     /** As above, the values read from {@code fromState} through the run's {@link GpuStateView} when it is non-null
      *  (a contingency answered without writing its state back), else from OLF's objects. */
-    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState) {
-        detectViolations(network, manager, limitReductions, reference, saParameters, contingencyId, scanInFull, fromState,
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, fromState,
                 GpuContingencyTopology.NETWORK);
     }
 
     /** As above, the branches, sides and buses out of service as {@code topology} says (a contingency answered without
      *  being applied). */
-    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters,
                                   String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
                                   GpuContingencyTopology topology) {
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, fromState, topology,
+                java.util.Set.of());
+    }
+
+    /** As above, the voltages of {@code busesInFull} checked too: buses the screen does not read (no base row), which a
+     *  pair's actions brought back. */
+    @SuppressWarnings("java:S107")
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
+                                  GpuContingencyTopology topology, java.util.Set<LfBus> busesInFull) {
+        detectViolations(network, manager, limitScalings, reference, saParameters, contingencyId, scanInFull, fromState, topology,
+                busesInFull, null);
+    }
+
+    /** As above, {@code fromState} read through {@code pairView} when non-null: a strategy pair's view, its brought-back
+     *  buses read at rows of their own. */
+    @SuppressWarnings("java:S107")
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitScaling> limitScalings,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId, java.util.Collection<LfBranch> scanInFull, double[] fromState,
+                                  GpuContingencyTopology topology, java.util.Set<LfBus> busesInFull, GpuStateView pairView) {
         GpuSaRunState run = runState.get();
-        GpuStateView view = fromState != null ? run.stateView : null;
+        GpuStateView view = fromState != null ? (pairView != null ? pairView : run.stateView) : null;
         if (run.limitScanner == null) {
-            GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(limitReductions));
+            GpuLimitTable table = GpuLimitTable.build(network, LimitScalingManager.create(limitScalings));
             run.limitScanner = new GpuLimitScanner(table);
             run.limitTable = table;
             if (run.precomputed.gpuData() != null) {
@@ -1087,16 +1195,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 : sideOpenedTableIndices(run, network, contingencyId);
         if (run.violationScreen != null) {
             int[] candidates = run.candidates.get(contingencyId);
-            run.limitScanner.detectFromCandidates(network, manager,
-                    candidates != null ? candidates : run.violationScreen.screen(run.precomputed.states().get(contingencyId),
-                            screenScenario(run, network, contingencyId)),
+            if (candidates == null) {
+                candidates = run.violationScreen.screen(run.precomputed.states().get(contingencyId), screenScenario(run, network, contingencyId));
+            }
+            run.limitScanner.detectFromCandidates(network, manager, GpuLimitScanner.withBuses(run.limitTable, candidates, busesInFull),
                     run.violationScreen, run.uncoveredBranches, sideOpened, view, fromState, topology);
             if (GpuStateViewCheck.comparesDecisions()) {     // the screen against a full scan of the same values
-                var fullScan = new LimitViolationManager(reference, limitReductions,
+                var fullScan = new LimitViolationManager(reference, limitScalings,
                         saParameters.getIncreasedViolationsParameters());
                 // of the full state, when the answer came from the gathered rows (P4): a missing row is then a lost
                 // violation too
-                double[] full = fromState != null ? run.precomputed.states().get(contingencyId) : null;
+                double[] full = fromState != null && pairView == null ? run.precomputed.states().get(contingencyId) : null;
                 run.limitScanner.detectViolations(network, fullScan, view, full != null ? full : fromState, topology);
                 GpuStateViewCheck.compareScreen(manager.getLimitViolations(), fullScan.getLimitViolations());
                 if (view != null && scanInFull == null) {    // the screen's open-branch values against the exact ones
@@ -1107,7 +1216,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             run.limitScanner.detectViolations(network, manager, view, fromState, topology);
         }
         if (GpuTrace.VIOL_CROSSCHECK.isOn()) {
-            GpuSaDiagnostics.crossCheck(network, manager, limitReductions, reference, saParameters, contingencyId);
+            GpuSaDiagnostics.crossCheck(network, manager, limitScalings, reference, saParameters, contingencyId);
         }
     }
 
@@ -1148,6 +1257,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         run.precomputed = GpuBatchPrecomputer.precompute(network, run.lfNetwork, run.context,
                 run.contingencies, run.operatorStrategies, run.actions, groups, leftToCpu, handbackSettings(run, parameters),
                 reportNode);
+        GpuStateInjector.deadBusVariableRows(run.remap, run.precomputed.deadBusVariableRows());
         if (run.precomputed.violationScreen() != null) {     // the scenarios were screened on the device as they came back
             run.limitTable = run.precomputed.limitTable();
             run.limitScanner = new GpuLimitScanner(run.limitTable);
@@ -1178,13 +1288,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * on, which answers each one from both.
      */
     private GpuBatchPrecomputer.HandbackSettings handbackSettings(GpuSaRunState run, AcLoadFlowParameters parameters) {
-        if (run.limitReductions == null || run.contingencies == null) {
+        if (run.limitScalings == null || run.contingencies == null) {
             return null;
         }
         Map<String, Contingency> byId = new java.util.HashMap<>();
         run.contingencies.forEach(propagated -> byId.put(propagated.getContingency().getId(), propagated.getContingency()));
-        return new GpuBatchPrecomputer.HandbackSettings(run.limitReductions, id -> answerableFromRows(run, byId.get(id)),
-                GpuStateViewCheck.comparesDecisions(), parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage());
+        return new GpuBatchPrecomputer.HandbackSettings(run.limitScalings, id -> answerableFromRows(run, byId.get(id)),
+                GpuStateViewCheck.comparesDecisions(), parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage(),
+                run.securityAnalysisParameters.getIncreasedViolationsParameters());
     }
 
     /**
@@ -1197,7 +1308,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return contingency != null
                 && !GpuTrace.SA_RESID.isOn() && !GpuTrace.VIOL_CROSSCHECK.isOn()
                 && !GpuTrace.SA_VAR_DUMP.isOn() && !GpuTrace.EQ_DUMP_CTG.isOn()
-                && !targetedByOperatorStrategy(run.operatorStrategies, contingency.getId())
+                && !!run.strategiesOf(contingency.getId()).isEmpty()
                 && !flowsMonitored() && !busesMonitored()
                 && contingency.getExtension(com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters.class) == null;
     }
@@ -1279,7 +1390,33 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                          boolean createResultExtension, LfContingency lfContingency,
                                                          Contingency contingency, PreContingencyNetworkResult preContingencyNetworkResult,
                                                          com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
-                                                         List<LimitReduction> limitReductions) {
+                                                         List<LimitScaling> limitScalings) {
+        OperatorStrategyResult result = actionSimulationResult(network, context, operatorStrategy, actionsIds,
+                preContingencyLimitViolationManager, securityAnalysisParameters, lfActionById, createResultExtension, lfContingency,
+                contingency, preContingencyNetworkResult, networkParameters, limitScalings);
+        GpuSaRunState run = runState.get();
+        if (contingency.getId().equals(run.withoutNetworkFor)) {  // also answered without the network: compare the two
+            OperatorStrategyResult withoutNetwork = run.withoutNetworkStrategies.isEmpty() ? null
+                    : run.withoutNetworkStrategies.remove(operatorStrategy.getId());
+            if (withoutNetwork == null) {
+                GpuStateViewCheck.unansweredStrategies(Map.of(operatorStrategy.getId(), result));
+            } else {
+                GpuStateViewCheck.compareResults(withoutNetwork, result);
+            }
+        }
+        return result;
+    }
+
+    @SuppressWarnings("java:S107")
+    private OperatorStrategyResult actionSimulationResult(LfNetwork network, AcLoadFlowContext context, OperatorStrategy operatorStrategy,
+                                                          java.util.List<String> actionsIds,
+                                                          LimitViolationManager preContingencyLimitViolationManager,
+                                                          SecurityAnalysisParameters securityAnalysisParameters,
+                                                          Map<String, com.powsybl.openloadflow.network.action.LfAction> lfActionById,
+                                                          boolean createResultExtension, LfContingency lfContingency,
+                                                          Contingency contingency, PreContingencyNetworkResult preContingencyNetworkResult,
+                                                          com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
+                                                          List<LimitScaling> limitScalings) {
         restoreStaleVoltages(runState.get(), null);         // an action simulation reads the network as it stands
         // the pair holding the actions OLF's condition check selected
         String scId = GpuStrategyComposer.pairId(contingency.getId(), operatorStrategy, actionsIds);
@@ -1291,7 +1428,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // distributed active power not recorded — CPU path
             return super.runActionSimulation(network, context, operatorStrategy, actionsIds, preContingencyLimitViolationManager,
                     securityAnalysisParameters, lfActionById, createResultExtension, lfContingency, contingency,
-                    preContingencyNetworkResult, networkParameters, limitReductions);
+                    preContingencyNetworkResult, networkParameters, limitScalings);
+        }
+        if (precomputed.unrealistic().contains(scId)) {
+            // OLF's realistic-voltage check stopped the strategy's load flow (UNREALISTIC_STATE): OLF reports it FAILED,
+            // without violations or network results (it updates them only for CONVERGED), with the distributed power
+            // its load flow placed. The full restore that follows puts the post-contingency network back.
+            runState.get().strategyRetappedOnly = null;
+            LAST_UNREALISTIC_ANSWERED_COUNT.incrementAndGet();
+            return new OperatorStrategyResult(operatorStrategy,
+                    List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
+                            PostContingencyComputationStatus.FAILED, new LimitViolationsResult(List.of()),
+                            new NetworkResult(List.of(), List.of(), List.of()), distributed * PerUnit.SB)));
         }
         // Apply the actions' NETWORK effects (topology/limits bookkeeping — no solve), inject the
         // precomputed post-action state, and reuse the engine's result building — the same pattern
@@ -1317,7 +1465,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // nothing: the contingency already applied that topology. Then it applies the actions, as here.
             for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
                 if (!lfAction.apply(network, lfContingency, networkParameters)) {
-                    com.powsybl.openloadflow.util.Reports.reportActionApplicationFailure(lfAction.getId(), lfContingency.getId(),
+                    com.powsybl.openloadflow.network.util.NetworkReports.reportActionApplicationFailure(lfAction.getId(), lfContingency.getId(),
                             network.getReportNode());
                 }
             }
@@ -1350,8 +1498,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, strategyFlowReadSet(runState.get(), scId, contingency.getId(), operatorStrategy, scanInFull));
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
-        copyVoltageToReenergizedBuses(network, precomputed.equationSystem(), precomputed.baseVariableRows());
-        var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+        java.util.Set<LfBus> reenergized = busesWithoutBaseRow(network, precomputed.equationSystem(), precomputed.baseVariableRows());
+        copyVoltageToReenergizedBuses(network, precomputed.equationSystem(), reenergized);
+        var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
         var postActionsNetworkResult = new PostContingencyNetworkResult(network,
@@ -1359,8 +1508,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
         postActionsNetworkResult.update();
-        detectViolations(network, postActionsViolationManager, limitReductions, preContingencyLimitViolationManager,
-                securityAnalysisParameters, scId, scanInFull);
+        detectViolations(network, postActionsViolationManager, limitScalings, preContingencyLimitViolationManager,
+                securityAnalysisParameters, scId, scanInFull, null, GpuContingencyTopology.NETWORK, reenergized);
         // what restorePostContingencyState must undo: with tap actions only, the retapped branches and the voltages
         List<LfBranch> retapped = new java.util.ArrayList<>();
         for (com.powsybl.openloadflow.network.action.LfAction lfAction : lfActions) {
@@ -1387,36 +1536,59 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /**
-     * A device-answered contingency answered without applying it to the network (P2 of
-     * {@code docs/device-final-results-plan.md}): what {@link #runPostContingencySimulation} answers from the state, with
-     * the contingency's topology read from its disabled network ({@link GpuContingencyTopology}) instead of from the
+     * A device-answered contingency, and its operator strategies, answered without applying them to the network (P2 of
+     * {@code docs/device-final-results-plan.md}): what {@link #runPostContingencySimulation} and
+     * {@link #runActionSimulation} answer from the states, with the contingency's topology read from its disabled network
+     * and each strategy's from its branch actions' activations ({@link GpuContingencyTopology}) instead of from the
      * network's flags after {@code apply}, and the loss distribution's report written from its replayed value, as
-     * {@code ReplayedLossDistribution} writes it. Nothing is applied, distributed, simulated or restored, but the
+     * {@code ReplayedLossDistribution} writes it. Nothing is applied, distributed, simulated, saved or restored, but the
      * excluded slack buses {@code toLfContingency} would have changed. Only when nothing needs the applied network
-     * ({@link #answeredWithoutNetwork}). While the comparison is on, the contingency is answered the usual way too and the
-     * two results compared ({@link GpuStateViewCheck#compareResults}); the usual one is returned.
+     * ({@link #answeredWithoutNetwork}). While the comparison is on, the contingency and its strategies are answered the
+     * usual way too and the results compared ({@link GpuStateViewCheck#compareResults}); the usual ones are returned.
      */
     @Override
-    protected java.util.Optional<PostContingencyResult> resultWithoutNetwork(LfNetwork network, AcLoadFlowContext context,
-                                                                            PropagatedContingency propagatedContingency,
-                                                                            LfContingency lfContingency,
-                                                                            com.powsybl.openloadflow.network.NetworkState networkState,
-                                                                            LimitViolationManager preContingencyLimitViolationManager,
-                                                                            SecurityAnalysisParameters securityAnalysisParameters,
-                                                                            PreContingencyNetworkResult preContingencyNetworkResult,
-                                                                            boolean createResultExtension, List<LimitReduction> limitReductions,
-                                                                            ReportNode reportNode) {
+    @SuppressWarnings("java:S107")
+    protected java.util.Optional<ResultsWithoutNetwork> resultsWithoutNetwork(LfNetwork network, AcLoadFlowContext context,
+                                                                             PropagatedContingency propagatedContingency,
+                                                                             LfContingency lfContingency,
+                                                                             com.powsybl.openloadflow.network.NetworkState networkState,
+                                                                             List<OperatorStrategy> operatorStrategies,
+                                                                             Map<String, com.powsybl.openloadflow.network.action.LfAction> lfActionById,
+                                                                             LimitViolationManager preContingencyLimitViolationManager,
+                                                                             SecurityAnalysisParameters securityAnalysisParameters,
+                                                                             PreContingencyNetworkResult preContingencyNetworkResult,
+                                                                             boolean createResultExtension, List<LimitScaling> limitScalings,
+                                                                             ReportNode reportNode) {
         GpuSaRunState run = runState.get();
+        GpuStateViewCheck.unansweredStrategies(run.withoutNetworkStrategies);
+        run.withoutNetworkStrategies = Map.of();
+        run.withoutNetworkFor = null;
         Contingency contingency = propagatedContingency.getContingency();
-        if (!answeredWithoutNetwork(run, contingency, network)) {
+        if (!answeredWithoutNetwork(run, contingency, network, operatorStrategies, lfActionById, securityAnalysisParameters)) {
             return java.util.Optional.empty();
         }
         boolean compare = GpuStateViewCheck.comparesDecisions();
         PostContingencyResult result = answerWithoutNetwork(run, network, context, contingency, lfContingency,
-                preContingencyLimitViolationManager, securityAnalysisParameters, limitReductions, compare ? null : reportNode);
-        if (compare) {                                       // the usual path answers it too, and compares the two
+                preContingencyLimitViolationManager, securityAnalysisParameters, limitScalings, compare ? null : reportNode);
+        List<OperatorStrategyResult> strategyResults = List.of();
+        if (!operatorStrategies.isEmpty()) {
+            // the strategies start from the contingency's state: OLF stops an unrealistic one, which only its run reports
+            List<OperatorStrategyResult> answered = result.getStatus() == PostContingencyComputationStatus.CONVERGED
+                    ? strategiesWithoutNetwork(run, network, contingency, lfContingency, operatorStrategies, lfActionById,
+                            result.getLimitViolationsResult(), preContingencyLimitViolationManager, securityAnalysisParameters,
+                            limitScalings, compare ? null : reportNode)
+                    : null;
+            if (answered == null) {
+                return java.util.Optional.empty();
+            }
+            strategyResults = answered;
+        }
+        if (compare) {                                       // the usual path answers them too, and compares the results
             run.withoutNetwork = result;
             run.withoutNetworkFor = contingency.getId();
+            Map<String, OperatorStrategyResult> byId = new java.util.HashMap<>();
+            strategyResults.forEach(r -> byId.put(r.getOperatorStrategy().getId(), r));
+            run.withoutNetworkStrategies = byId;
             return java.util.Optional.empty();
         }
         // what toLfContingency may have changed: the excluded slack buses of a relocated slack bus (the device leaves
@@ -1426,7 +1598,144 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             networkState.restore(List.of(), List.of(), false);
         }
         LAST_ANSWERED_WITHOUT_NETWORK_COUNT.incrementAndGet();
-        return java.util.Optional.of(result);
+        LAST_STRATEGIES_ANSWERED_WITHOUT_NETWORK_COUNT.addAndGet(strategyResults.size());
+        // counts, printed in the "ms" column like the CPU replay's
+        PHASE_NS.computeIfAbsent(" answered without the network: contingencies (count)",
+                k -> new java.util.concurrent.atomic.LongAdder()).add(1_000_000);
+        PHASE_NS.computeIfAbsent(" answered without the network: strategies (count)",
+                k -> new java.util.concurrent.atomic.LongAdder()).add(1_000_000L * strategyResults.size());
+        return java.util.Optional.of(new ResultsWithoutNetwork(result, strategyResults));
+    }
+
+    /**
+     * The results of the strategies whose condition holds on the contingency's violations, in their order, each answered
+     * from its pair's device state without the network; null when one of the pairs the conditions select cannot be
+     * ({@link #pairAnsweredWithoutNetwork}). A null {@code reportNode} writes no report; else each strategy gets its
+     * simulation node, as OLF's loop creates it before checking the condition.
+     */
+    @SuppressWarnings("java:S107")
+    private List<OperatorStrategyResult> strategiesWithoutNetwork(GpuSaRunState run, LfNetwork network, Contingency contingency,
+                                                                  LfContingency lfContingency, List<OperatorStrategy> operatorStrategies,
+                                                                  Map<String, com.powsybl.openloadflow.network.action.LfAction> lfActionById,
+                                                                  LimitViolationsResult postContingencyViolations,
+                                                                  LimitViolationManager preContingencyLimitViolationManager,
+                                                                  SecurityAnalysisParameters securityAnalysisParameters,
+                                                                  List<LimitScaling> limitScalings, ReportNode reportNode) {
+        long t0 = System.nanoTime();
+        GpuContingencyTopology contingencyTopology = GpuContingencyTopology.of(lfContingency);
+        List<OperatorStrategyResult> results = new java.util.ArrayList<>();
+        for (OperatorStrategy strategy : operatorStrategies) {
+            // the conditions read the violations alone (answeredWithoutNetwork: none reads a threshold on the network)
+            List<String> actionIds = checkCondition(strategy, postContingencyViolations, network);
+            if (actionIds.isEmpty()) {
+                continue;
+            }
+            String pairId = GpuStrategyComposer.pairId(contingency.getId(), strategy, actionIds);
+            List<com.powsybl.openloadflow.network.action.LfAction> lfActions = actionIds.stream()
+                    .map(lfActionById::get)
+                    .filter(Objects::nonNull)
+                    .toList();
+            if (!pairAnsweredWithoutNetwork(run, contingency.getId(), pairId, lfActions, securityAnalysisParameters)) {
+                return null;
+            }
+            results.add(strategyWithoutNetwork(run, network, contingency, lfContingency, contingencyTopology, strategy, pairId,
+                    lfActions, preContingencyLimitViolationManager, securityAnalysisParameters, limitScalings));
+        }
+        if (reportNode != null) {
+            for (OperatorStrategy strategy : operatorStrategies) {
+                com.powsybl.openloadflow.lf.util.LfReports.createOperatorStrategySimulation(reportNode, strategy.getId());
+            }
+        }
+        PHASE_NS.computeIfAbsent(" strategies answered without the network (no apply, no save, no restore)",
+                k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - t0);
+        return results;
+    }
+
+    /**
+     * Whether a strategy pair the conditions select can be answered without the network: the device answered it, and,
+     * unless OLF's realistic-voltage check stopped it, its actions are all branch actions (their topology is derived
+     * without applying them, an invalid one, on a switch or branch OLF's network does not hold, changing nothing as in
+     * OLF's connectivity update; an action on an injection, a tap or an HVDC writes the network), and the device
+     * moved no tap and switched no branch for it. A bus out of the network at base the pair brings back is read from the
+     * pair's state as the usual path writes it ({@link #withBroughtBackBuses}).
+     */
+    private static boolean pairAnsweredWithoutNetwork(GpuSaRunState run, String contingencyId, String pairId,
+                                                      List<com.powsybl.openloadflow.network.action.LfAction> lfActions,
+                                                      SecurityAnalysisParameters securityAnalysisParameters) {
+        PrecomputedBatch precomputed = run.precomputed;
+        if (pairDistributedOnDevice(run, contingencyId, pairId, securityAnalysisParameters) == null) {
+            return false;
+        }
+        if (precomputed.unrealistic().contains(pairId)) {
+            return true;
+        }
+        BatchContingency scenario = precomputed.scenarios().get(pairId);
+        return scenario != null
+                && precomputed.deviceTapMoves().get(pairId) == null
+                && precomputed.automationSystemSwitched().get(pairId) == null
+                && lfActions.stream().allMatch(com.powsybl.openloadflow.network.action.AbstractLfBranchAction.class::isInstance);
+    }
+
+    /** The result {@link #runActionSimulation} would answer for a strategy pair from its state, nothing applied. */
+    @SuppressWarnings("java:S107")
+    private OperatorStrategyResult strategyWithoutNetwork(GpuSaRunState run, LfNetwork network, Contingency contingency,
+                                                          LfContingency lfContingency, GpuContingencyTopology contingencyTopology,
+                                                          OperatorStrategy strategy, String pairId,
+                                                          List<com.powsybl.openloadflow.network.action.LfAction> lfActions,
+                                                          LimitViolationManager preContingencyLimitViolationManager,
+                                                          SecurityAnalysisParameters securityAnalysisParameters,
+                                                          List<LimitScaling> limitScalings) {
+        PrecomputedBatch precomputed = run.precomputed;
+        double distributed = pairDistributedOnDevice(run, contingency.getId(), pairId, securityAnalysisParameters);
+        logActionStart(network, strategy);
+        Stopwatch stopwatch = Stopwatch.createStarted();
+        OperatorStrategyResult.ConditionalActionsResult result;
+        if (precomputed.unrealistic().contains(pairId)) {    // as runActionSimulation reports it
+            LAST_UNREALISTIC_ANSWERED_COUNT.incrementAndGet();
+            result = new OperatorStrategyResult.ConditionalActionsResult(strategy.getId(), PostContingencyComputationStatus.FAILED,
+                    new LimitViolationsResult(List.of()), new NetworkResult(List.of(), List.of(), List.of()),
+                    distributed * PerUnit.SB);
+        } else {
+            List<com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?>> branchActions = lfActions.stream()
+                    .<com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?>>map(
+                            com.powsybl.openloadflow.network.action.AbstractLfBranchAction.class::cast)
+                    .toList();
+            // the topology LfActionUtils.applyListOfActions leaves, its connectivity changes undone as it undoes them
+            GpuContingencyTopology topology = contingencyTopology.with(
+                    com.powsybl.openloadflow.network.action.AbstractLfBranchAction.getNetworkActivations(network, lfContingency, branchActions));
+            // the branches runActionSimulation scans in full: those the contingency opened at one side, and those the
+            // actions open or close, but where the pair's screen scenario covers them
+            java.util.Set<LfBranch> scanInFull = new java.util.LinkedHashSet<>(sideOpenedBranches(lfContingency));
+            for (com.powsybl.openloadflow.network.action.AbstractLfBranchAction<?> branchAction : branchActions) {
+                scanInFull.addAll(branchAction.getDisabledBranches());
+                scanInFull.addAll(branchAction.getEnabledBranches());
+            }
+            scanInFull.removeAll(screenScenario(run, network, pairId).covered());
+            double[] state = answerState(run, pairId);
+            var manager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
+                    securityAnalysisParameters.getIncreasedViolationsParameters());
+            // only a pair whose actions bring back buses out of the network at base has buses without a base row
+            java.util.Set<LfBus> reenergized = precomputed.scenarios().get(pairId).broughtBackBuses().isEmpty()
+                    ? java.util.Set.of() : busesWithoutBaseRow(network, run.stateView, topology);
+            if (reenergized.isEmpty()) {
+                detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
+                        pairId, scanInFull, state, topology, java.util.Set.of());
+            } else {
+                Map<Integer, int[]> rows = new java.util.HashMap<>();
+                double[] withSlots = withBroughtBackBuses(network, run.stateView, topology, reenergized,
+                        deadBusRows(run), state, rows);
+                detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
+                        pairId, scanInFull, withSlots, topology, reenergized, run.stateView.withBusRows(rows));
+            }
+            result = new OperatorStrategyResult.ConditionalActionsResult(strategy.getId(), PostContingencyComputationStatus.CONVERGED,
+                    new LimitViolationsResult(manager.getLimitViolations()),
+                    GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(pairId), pairId,
+                            new NetworkResult(List.of(), List.of(), List.of())),
+                    distributed * PerUnit.SB);
+        }
+        stopwatch.stop();
+        logActionEnd(network, strategy, stopwatch);
+        return new OperatorStrategyResult(strategy, List.of(result));
     }
 
     private static java.util.Set<LfBus> excludedSlackBuses(LfNetwork network) {
@@ -1441,11 +1750,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * for it (both are set on the network today), its loss distribution has a replayed value (OLF's own distribution
      * writes the network), no state monitor asks for results (they read the network's objects), it did not run out of
      * Newton iterations on the device (that result comes from the usual path), and no dump of the applied network is on.
+     * With operator strategies, no condition reads a threshold on the network (they read the flows and targets OLF's run
+     * leaves), and every action list the contingency's violations may select is a pair answered without the network
+     * ({@link #pairAnsweredWithoutNetwork}).
      */
-    private boolean answeredWithoutNetwork(GpuSaRunState run, Contingency contingency, LfNetwork network) {
+    private boolean answeredWithoutNetwork(GpuSaRunState run, Contingency contingency, LfNetwork network,
+                                           List<OperatorStrategy> operatorStrategies,
+                                           Map<String, com.powsybl.openloadflow.network.action.LfAction> lfActionById,
+                                           SecurityAnalysisParameters securityAnalysisParameters) {
         PrecomputedBatch precomputed = run.precomputed;
         String id = contingency.getId();
-        return precomputed.isReady()
+        boolean answered = precomputed.isReady()
                 && !precomputed.exhausted().contains(id)
                 && precomputed.answered(id)
                 && precomputed.preDistributedActivePower().get(id) != null
@@ -1453,7 +1768,30 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 && precomputed.automationSystemSwitched().get(id) == null
                 && !flowsMonitored() && !busesMonitored()
                 && !GpuTrace.SA_VAR_DUMP.isOn() && !GpuTrace.EQ_DUMP_CTG.isOn()
-                && answeredFromState(run, contingency, network, precomputed);
+                && answeredFromState(run, contingency, network, precomputed, !operatorStrategies.isEmpty());
+        if (!answered || operatorStrategies.isEmpty()) {
+            return answered;
+        }
+        if (strategyConditionReadsNetwork(run, id)) {
+            return false;
+        }
+        Integer possibleTypes = precomputed.possibleViolationTypes().get(id);
+        for (OperatorStrategy strategy : operatorStrategies) {
+            List<List<String>> candidates = possibleTypes != null
+                    ? GpuStrategyComposer.candidateActionLists(strategy, possibleTypes)
+                    : GpuStrategyComposer.candidateActionLists(strategy);
+            for (List<String> actionIds : candidates) {
+                List<com.powsybl.openloadflow.network.action.LfAction> lfActions = actionIds.stream()
+                        .map(lfActionById::get)
+                        .filter(Objects::nonNull)
+                        .toList();
+                if (!pairAnsweredWithoutNetwork(run, id, GpuStrategyComposer.pairId(id, strategy, actionIds), lfActions,
+                        securityAnalysisParameters)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** The result {@link #runPostContingencySimulation} would answer from the state, the contingency not applied. A null
@@ -1462,7 +1800,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                        Contingency contingency, LfContingency lfContingency,
                                                        LimitViolationManager preContingencyLimitViolationManager,
                                                        SecurityAnalysisParameters securityAnalysisParameters,
-                                                       List<LimitReduction> limitReductions, ReportNode reportNode) {
+                                                       List<LimitScaling> limitScalings, ReportNode reportNode) {
         long t0 = System.nanoTime();
         PrecomputedBatch precomputed = run.precomputed;
         String id = contingency.getId();
@@ -1473,7 +1811,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (reportNode != null) {                            // what ReplayedLossDistribution reports on the usual path
             double mismatch = lfContingency.getActivePowerLoss();
             if (Math.abs(mismatch) > 0) {
-                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                com.powsybl.openloadflow.lf.util.LfReports.reportContingencyActivePowerLossDistribution(reportNode,
                         mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
             }
             LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
@@ -1493,17 +1831,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (unrealistic) {                                   // OLF reports no violations for an unrealistic state
             result = new PostContingencyResult(contingency, PostContingencyComputationStatus.FAILED,
                     new LimitViolationsResult(List.of()), new NetworkResult(List.of(), List.of(), List.of()), connectivityResult,
-                    distributedActivePower * PerUnit.SB);
+                    distributedActivePower * PerUnit.SB, List.of());
         } else {
-            var manager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+            var manager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                     securityAnalysisParameters.getIncreasedViolationsParameters());
-            detectViolations(network, manager, limitReductions, preContingencyLimitViolationManager, securityAnalysisParameters,
+            detectViolations(network, manager, limitScalings, preContingencyLimitViolationManager, securityAnalysisParameters,
                     id, null, state, topology);
             result = new PostContingencyResult(contingency, PostContingencyComputationStatus.CONVERGED,
                     new LimitViolationsResult(manager.getLimitViolations()),
                     GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(id), id,
                             new NetworkResult(List.of(), List.of(), List.of())),
-                    connectivityResult, distributedActivePower * PerUnit.SB);
+                    // no changed phase tap: answered without the network only when the device moved no tap
+                    connectivityResult, distributedActivePower * PerUnit.SB, List.of());
         }
         stopwatch.stop();
         logPostContingencyEnd(network, lfContingency, stopwatch);
@@ -1517,17 +1856,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  LfContingency lfContingency, LimitViolationManager preContingencyLimitViolationManager,
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
-                                                                 List<LimitReduction> limitReductions, double preDistributedActivePower) {
+                                                                 List<LimitScaling> limitScalings, double preDistributedActivePower) {
         PostContingencyResult result = postContingencyResult(network, context, contingency, lfContingency,
                 preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult, createResultExtension,
-                limitReductions, preDistributedActivePower);
+                limitScalings, preDistributedActivePower);
         GpuSaRunState run = runState.get();
         if (run.withoutNetwork != null) {                    // also answered without the network: compare the two
             if (contingency.getId().equals(run.withoutNetworkFor)) {
                 GpuStateViewCheck.compareResults(run.withoutNetwork, result);
             }
-            run.withoutNetwork = null;
-            run.withoutNetworkFor = null;
+            run.withoutNetwork = null;                       // withoutNetworkFor stays: its strategies compare next
         }
         return result;
     }
@@ -1536,7 +1874,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                         LfContingency lfContingency, LimitViolationManager preContingencyLimitViolationManager,
                                                         SecurityAnalysisParameters securityAnalysisParameters,
                                                         PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
-                                                        List<LimitReduction> limitReductions, double preDistributedActivePower) {
+                                                        List<LimitScaling> limitScalings, double preDistributedActivePower) {
         GpuSaRunState run = runState.get();
         if (run.staleVoltages != null) {
             PrecomputedBatch precomputed = run.precomputed;
@@ -1562,8 +1900,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // (its targets, its bus types), which only that run produces: the contingency then runs on the CPU. So does
             // one whose strategy is conditioned on a threshold: the condition reads the flows of the failed run's last
             // Newton iterate (a plateau's last sample is a lottery, which the device does not hand back) or its targets.
+            // OLF's realistic-voltage check stopping the run (UNREALISTIC_STATE) is reported FAILED, with the same empty
+            // results (AcSecurityAnalysis.postContingencyStatusFromAcLoadFlowResult).
             logPostContingencyStart(network, lfContingency);
-            return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
+            if (precomputed.unrealistic().contains(contingency.getId())) {
+                LAST_UNREALISTIC_ANSWERED_COUNT.incrementAndGet();
+            }
+            return new PostContingencyResult(contingency, precomputed.unrealistic().contains(contingency.getId())
+                    ? PostContingencyComputationStatus.FAILED : PostContingencyComputationStatus.MAX_ITERATION_REACHED,
                     new LimitViolationsResult(List.of()),
                     new NetworkResult(List.of(), List.of(), List.of()),
                     new ConnectivityResult(lfContingency.getCreatedSynchronousComponentsCount(), 0,
@@ -1573,7 +1917,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     // what the device's own slack passes placed before the budget ran out, as OLF reports for its
                     // own failed run; the pre-distribution alone where the device did not report a total
                     precomputed.distributedActivePower()
-                            .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB);
+                            .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB,
+                    List.of());
         }
         // the device's answer: its full state, or the rows the host answers it from (P4), in the run's scratch state
         double[] fullState = precomputed.states().get(contingency.getId());
@@ -1585,7 +1930,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             long tCpu = System.nanoTime();
             PostContingencyResult cpuResult = super.runPostContingencySimulation(network, context, contingency, lfContingency,
                     preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult,
-                    createResultExtension, limitReductions, preDistributedActivePower);
+                    createResultExtension, limitScalings, preDistributedActivePower);
             // The CPU replay's own cost (OLF's whole outer-loop run for this contingency), apart from the
             // device-answered ones; the count is printed in the "ms" column like the remap counter.
             PHASE_NS.computeIfAbsent("   CPU replay: OLF solve + results", k -> new java.util.concurrent.atomic.LongAdder())
@@ -1619,7 +1964,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // refreshes the flows of the enabled branches only)
         run.automationSystemSwitched = applyAutomationSystemSwitches(network,
                 precomputed.automationSystemSwitched().get(contingency.getId()));
-        boolean fromState = answeredFromState(run, contingency, network, precomputed);
+        boolean fromState = answeredFromState(run, contingency, network, precomputed, false);
         boolean compareDecisions = fromState && GpuStateViewCheck.comparesDecisions();
         boolean unrealistic = false;
         if (fromState) {
@@ -1675,7 +2020,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         PostContingencyComputationStatus status = unrealistic
                 ? PostContingencyComputationStatus.FAILED
                 : PostContingencyComputationStatus.CONVERGED;
-        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
         var postContingencyNetworkResult = new PostContingencyNetworkResult(network,
@@ -1694,22 +2039,22 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedElementIds()),
-                    distributedActivePower * PerUnit.SB);
+                    distributedActivePower * PerUnit.SB, List.of());
         }
         long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
         long tDet = System.nanoTime();
         PHASE_NS.computeIfAbsent("   networkResult.update()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tDet - tRes);
-        detectViolations(network, postContingencyLimitViolationManager, limitReductions,
+        detectViolations(network, postContingencyLimitViolationManager, limitScalings,
                 preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId(), null,
                 fromState ? state : null);
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
         if (compareDecisions) {                              // the same detection on the written-back objects
-            var fromObjects = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+            var fromObjects = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings,
                     securityAnalysisParameters.getIncreasedViolationsParameters());
-            detectViolations(network, fromObjects, limitReductions, preContingencyLimitViolationManager,
+            detectViolations(network, fromObjects, limitScalings, preContingencyLimitViolationManager,
                     securityAnalysisParameters, contingency.getId());
             GpuStateViewCheck.compareViolations(postContingencyLimitViolationManager.getLimitViolations(),
                     fromObjects.getLimitViolations());
@@ -1736,7 +2081,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(contingency.getId()), contingency.getId(),
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
-                connectivityResult, distributedActivePower * PerUnit.SB);
+                connectivityResult, distributedActivePower * PerUnit.SB,
+                postContingencyNetworkResult.getChangedPhaseTapChangers().values().stream().toList());
     }
 
     /**

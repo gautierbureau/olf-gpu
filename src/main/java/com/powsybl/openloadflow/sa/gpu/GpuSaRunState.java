@@ -33,6 +33,8 @@ import java.util.Map;
 final class GpuSaRunState {
     List<PropagatedContingency> contingencies = List.of();
     List<OperatorStrategy> operatorStrategies = List.of();
+    /** Each contingency's strategies, in the order of operatorStrategies (GpuStrategyComposer.byContingency). */
+    java.util.Map<String, List<OperatorStrategy>> strategiesByContingency = java.util.Map.of();
     List<Action> actions = List.of();
     LfNetwork lfNetwork;
     AcLoadFlowContext context;
@@ -125,10 +127,16 @@ final class GpuSaRunState {
     int[] tableIndexOfBranchNum;
     /** The detection's inputs read from the device state array (OLF_GPU_STATE_VIEW_CHECK), for these base rows. */
     GpuStateView stateView;
+    /** Per bus with device rows past OLF's, its voltage and angle rows, for {@link #deadBusRowsFor}. */
+    java.util.Map<Integer, int[]> deadBusRows;
+    PrecomputedBatch deadBusRowsFor;
     /** A contingency's result answered without the network while the comparison is on, compared with the usual path's
      *  result for the same contingency. */
     com.powsybl.security.results.PostContingencyResult withoutNetwork;
     String withoutNetworkFor;
+    /** Its operator strategies' results answered without the network while the comparison is on, by strategy id, compared
+     *  with the usual path's (the ones left once its strategies ran were not answered there). */
+    Map<String, com.powsybl.security.results.OperatorStrategyResult> withoutNetworkStrategies = Map.of();
     /** The excluded slack buses after the pre-contingency load flow: a contingency answered without the network restores
      *  them only if its toLfContingency changed them. */
     java.util.Set<LfBus> baseExcludedSlackBuses = java.util.Set.of();
@@ -138,9 +146,14 @@ final class GpuSaRunState {
      *  scan on the host. */
     final Map<String, GpuScreenScenario> screenScenarios = new java.util.HashMap<>();
     /** The run's limit reductions (runSimulations): the screen's table is built from them before the batch solve. */
-    List<com.powsybl.security.limitreduction.LimitReduction> limitReductions;
+    List<com.powsybl.security.limitscaling.LimitScaling> limitScalings;
     /** The state a scenario answered from its gathered rows is read from (P4): those rows, every other one NaN; and the
      *  rows it holds now, put back to NaN before the next scenario's. */
     double[] scratch;
     GpuGatheredState scratchHolds;
+
+    /** The strategies whose contingency context names {@code contingencyId}. */
+    List<OperatorStrategy> strategiesOf(String contingencyId) {
+        return strategiesByContingency.getOrDefault(contingencyId, List.of());
+    }
 }

@@ -42,6 +42,10 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                          *  (status -2: an extractor gate or the straggler exit) is not in here and
                          *  still replays on the CPU. */
                         java.util.Set<String> exhausted,
+                        /** The contingencies and strategy pairs whose state OLF's realistic-voltage check stops
+                         *  (UNREALISTIC_STATE), reported FAILED without violations or network results. Its contingencies
+                         *  are in {@code exhausted} too. */
+                        java.util.Set<String> unrealistic,
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
@@ -58,12 +62,19 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                          *  them in {@code states} (except while the comparison is on). */
                         Map<String, GpuGatheredState> gathered,
                         /** The limit table and the screen the candidates index, null without the handback. */
-                        GpuLimitTable limitTable, GpuViolationScreen violationScreen) {
+                        GpuLimitTable limitTable, GpuViolationScreen violationScreen,
+                        /** Per converged contingency the device screened against the base case's violations, the
+                         *  types of the violations OLF may report for it (GpuBaseViolations' bits, GpuStateHandback): the
+                         *  strategy pairs its violations cannot select were not solved, as OLF never applies them. */
+                        Map<String, Integer> possibleViolationTypes,
+                        /** The variables of the buses with device rows past OLF's (DeadBusRows), with those rows: a pair
+                         *  bringing such a bus back finds its voltage there. */
+                        Map<Variable<AcVariableType>, Integer> deadBusVariableRows) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null);
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of());
     }
 
     /** True when the device converged scenario {@code id}: its full state, or the rows the host answers it with. */

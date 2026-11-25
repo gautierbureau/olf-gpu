@@ -25,6 +25,19 @@ public final class ViolationScreenNative {
     private ViolationScreenNative() {
     }
 
+    /**
+     * The base case's violations against which OLF's reference filtering decides (GpuBaseViolations), per limit entry and
+     * per bus side: from then on every screen also leaves, per scenario, the types it may report ({@link #readPossibleTypes}).
+     * False on any failure.
+     */
+    public static native boolean uploadBaseViolations(long tableHandle, int[] limitKind, double[] limitValue,
+                                                      int[] busHighKind, double[] busHighValue, int[] busLowKind,
+                                                      double[] busLowValue);
+
+    /** Per scenario of the last screen, the types it may report (GpuBaseViolations' bits); null without the base case's
+     *  violations or on failure. */
+    public static native int[] readPossibleTypes(long tableHandle, int nScenarios);
+
     /** Release a violation table (idempotent for handle 0). */
     public static native void destroyViolationTable(long tableHandle);
 

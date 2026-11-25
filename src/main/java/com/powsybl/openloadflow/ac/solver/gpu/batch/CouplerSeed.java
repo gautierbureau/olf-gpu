@@ -197,6 +197,12 @@ final class CouplerSeed {
             if (ze == null || gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10] == 0) {
                 continue;                // absent, or already out of the base tree
             }
+            if (nonTree.isDisabled()
+                    && CouplerTreeReHoming.childSide(gpuData.zeroImpedanceBranch().indices()[ze * 11 + 10]) != GpuTwoSides.NONE) {
+                // a switch open at base onto a dead bus with rows past OLF's (DeadBusRows), its child: the bus keeps its
+                // rows at OLF's start values, which moving the dummy rows' targets home would overwrite (0, 0)
+                continue;
+            }
             rs.spanningTreeOverrideScenarioElementValueList.add(s);
             rs.spanningTreeOverrideScenarioElementValueList.add(ze);
             rs.spanningTreeOverrideScenarioElementValueList.add(0);

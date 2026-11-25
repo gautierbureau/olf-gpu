@@ -678,6 +678,34 @@ class GpuSaBusbarAndIslandTest extends AbstractGpuSaTest {
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** The same shape with a SHUNT behind the far breaker: OLF resolves shuntIdsToShift with getShuntById and skips the
+     *  null as it does a load. The mapper refused the whole contingency on it (MAPPER:shunt-shift-unresolvable, 288 on
+     *  network.xiidm's fixed list), while the main-side line outage it carries is a plain batch. */
+    @Test
+    void deviceSkipsShiftedShuntOutsideTheSolvedComponentLikeOlf() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.VoltageLevel vx = network.newVoltageLevel().setId("vx").setNominalV(135)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vx.getNodeBreakerView().newBusbarSection().setId("bbsx").setNode(0).add();
+        vx.getNodeBreakerView().newDisconnector().setId("dx").setNode1(0).setNode2(1).setOpen(false).add();
+        vx.getNodeBreakerView().newBreaker().setId("bx").setNode1(1).setNode2(2).setOpen(false).add();
+        vx.newShuntCompensator().setId("shx").setNode(2).setSectionCount(1)
+                .newLinearModel().setBPerSection(1e-3).setMaximumSectionCount(1).add().add();
+        vx.getNodeBreakerView().newDisconnector().setId("dlx").setNode1(0).setNode2(3).setOpen(false).add();
+        network.newLine().setId("lx").setVoltageLevel1("VL4").setConnectableBus1("B4")   // open at the main side
+                .setVoltageLevel2("vx").setNode2(3).setR(0.5).setX(5).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("l23+lx", new BranchContingency("L2-3-1"), new BranchContingency("lx")));
+        var propagatedContingency = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
+                new com.powsybl.openloadflow.network.LfTopoConfig(),
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()).get(0);
+        assertEquals(java.util.Set.of("shx"), propagatedContingency.getShuntIdsToShift().keySet(), "the propagation shifts the far shunt");
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** An outage that isolates the slack: OLF re-picks one in the main component with the run's own selector, its
      *  angle becomes the reference and the distributed slack reads its balance. Batched beside a plain outage. */
     @Test

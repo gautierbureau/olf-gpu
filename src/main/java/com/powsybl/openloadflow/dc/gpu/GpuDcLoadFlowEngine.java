@@ -28,14 +28,14 @@ import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
+import com.powsybl.openloadflow.lf.util.ActivePowerDistribution;
+import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
-import com.powsybl.openloadflow.network.util.ActivePowerDistribution;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import com.powsybl.openloadflow.util.PerUnit;
-import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
@@ -304,7 +304,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             solver.fillTarget();
             return solver.solveTarget();
         } catch (RuntimeException e) {
-            Reports.reportDcLfSolverFailure(reportNode, e.getMessage());
+            LfReports.reportDcLfSolverFailure(reportNode, e.getMessage());
             LOGGER.error("Failed to solve linear system for DC load flow", e);
             return null;
         }
@@ -339,7 +339,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
     }
 
     private void runOuterLoop(DcOuterLoop outerLoop, DcOuterLoopContext outerLoopContext, RunningContext runningContext) {
-        ReportNode olReportNode = Reports.createOuterLoopReporter(outerLoopContext.getNetwork().getReportNode(), outerLoop.getName());
+        ReportNode olReportNode = LfReports.createOuterLoopReporter(outerLoopContext.getNetwork().getReportNode(), outerLoop.getName());
         OuterLoopResult outerLoopResult;
         int outerLoopIteration = 0;
         do {
@@ -370,7 +370,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
                 && runningContext.outerLoopTotalIterations < context.getParameters().getMaxOuterLoopIterations());
 
         if (outerLoopResult.status() != OuterLoopStatus.STABLE) {
-            Reports.reportUnsuccessfulOuterLoop(olReportNode, outerLoopResult.status().name());
+            LfReports.reportUnsuccessfulOuterLoop(olReportNode, outerLoopResult.status().name());
         }
     }
 
@@ -424,10 +424,10 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             double remainingMismatch = resultWbh.remainingMismatch();
             distributedActivePower = initialSlackBusActivePowerMismatch - remainingMismatch;
             if (Math.abs(remainingMismatch) > parameters.getSlackBusPMaxMismatch() / PerUnit.SB) {
-                Reports.reportMismatchDistributionFailure(reportNode, remainingMismatch * PerUnit.SB);
+                LfReports.reportMismatchDistributionFailure(reportNode, remainingMismatch * PerUnit.SB);
             } else {
                 if (Math.abs(remainingMismatch) > ActivePowerDistribution.P_RESIDUE_EPS) {
-                    Reports.reportResidualDistributionMismatch(reportNode, remainingMismatch * PerUnit.SB);
+                    LfReports.reportResidualDistributionMismatch(reportNode, remainingMismatch * PerUnit.SB);
                 }
                 ActivePowerDistribution.reportAndLogSuccess(reportNode, initialSlackBusActivePowerMismatch, resultWbh);
             }
@@ -435,7 +435,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
                 distributedActivePower -= resultWbh.failedDistributedActivePower();
                 runningContext.lastSolverSuccess = false;
                 runningContext.lastOuterLoopResult = new OuterLoopResult("DistributedSlack", OuterLoopStatus.FAILED, resultWbh.failedMessage());
-                Reports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
+                LfReports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
                 return buildDcLoadFlowResult(network, runningContext, initialSlackBusActivePowerMismatch, distributedActivePower);
             }
         }
@@ -468,7 +468,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
         }
 
         if (runningContext.outerLoopTotalIterations >= parameters.getMaxOuterLoopIterations()) {
-            Reports.reportMaxOuterLoopIterations(reportNode, runningContext.outerLoopTotalIterations, true, LOGGER);
+            LfReports.reportMaxOuterLoopIterations(reportNode, runningContext.outerLoopTotalIterations, true, LOGGER);
         }
 
         for (var outerLoopAndContext : Lists.reverse(outerLoopsAndContexts)) {
@@ -486,7 +486,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             }
         }
 
-        Reports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
+        LfReports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
         return buildDcLoadFlowResult(network, runningContext, initialSlackBusActivePowerMismatch, distributedActivePower);
     }
 

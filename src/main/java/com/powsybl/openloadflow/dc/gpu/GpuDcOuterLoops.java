@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
+import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -21,7 +22,6 @@ import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.network.PiModelArray;
 import com.powsybl.openloadflow.network.TransformerPhaseControl;
 import com.powsybl.openloadflow.util.PerUnit;
-import com.powsybl.openloadflow.util.Reports;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -276,7 +276,7 @@ final class GpuDcOuterLoops {
             switch (newStatus[i]) {
                 case 0 -> {
                     control.switchToLinearMode();
-                    Reports.reportAcEmulationBackToLinear(reportNode, hvdc.getId(), LOGGER);
+                    LfReports.reportAcEmulationBackToLinear(reportNode, hvdc.getId(), LOGGER);
                 }
                 case 1 -> {
                     control.switchToSaturationFromCS1toCS2(false);
@@ -300,10 +300,10 @@ final class GpuDcOuterLoops {
     private static void report(ReportNode reportNode, LfHvdc hvdc, boolean fromLinear, String controllerStationId,
                                String nonControllerStationId, double pMax) {
         if (fromLinear) {
-            Reports.reportAcEmulationFromLinearToSaturated(reportNode, hvdc.getId(), controllerStationId, nonControllerStationId,
+            LfReports.reportAcEmulationFromLinearToSaturated(reportNode, hvdc.getId(), controllerStationId, nonControllerStationId,
                     pMax * PerUnit.SB, LOGGER);
         } else {
-            Reports.reportAcEmulationSaturationSideSwitch(reportNode, hvdc.getId(), controllerStationId, nonControllerStationId,
+            LfReports.reportAcEmulationSaturationSideSwitch(reportNode, hvdc.getId(), controllerStationId, nonControllerStationId,
                     pMax * PerUnit.SB, LOGGER);
         }
     }

@@ -188,7 +188,7 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
             LimitViolation vb = b.get(k);
             assertEquals(va.getLimit(), vb.getLimit(), 0.0, where + " " + k + ": limit");
             assertEquals(va.getValue(), vb.getValue(), TOL_MW * Math.max(1.0, Math.abs(va.getValue())), where + " " + k + ": value");
-            assertEquals(va.getLimitReduction(), vb.getLimitReduction(), 0.0, where + " " + k + ": reduction");
+            assertEquals(va.getLimitScaling(), vb.getLimitScaling(), 0.0, where + " " + k + ": scaling");
         }
     }
 

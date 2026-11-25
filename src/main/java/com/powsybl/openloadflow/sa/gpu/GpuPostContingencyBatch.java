@@ -187,12 +187,12 @@ public final class GpuPostContingencyBatch implements AutoCloseable {
      * device converged, as described above. False, with the network as it was, when this batch has no converged state
      * to bring for it: its load flow is then the caller's to run.
      */
-    public boolean bringToConvergedState(AcLoadFlowContext context, LfContingency lfContingency) {
+    public boolean bringToConvergedState(AcLoadFlowContext context, String contingencyId) {
         EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
         if (!precomputed.isReady() || precomputed.equationSystem() != es) {
             return false;
         }
-        String id = lfContingency.getId();
+        String id = Objects.requireNonNull(contingencyId);
         double[] state = precomputed.states().get(id);
         if (state == null) {
             return false;                                     // not converged on the device, or never batched

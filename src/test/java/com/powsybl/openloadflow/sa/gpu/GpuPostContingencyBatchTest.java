@@ -70,7 +70,8 @@ class GpuPostContingencyBatchTest {
     @Test
     void theDefaultLoopsAreHandedBack() {
         Loaded loaded = load(IeeeCdfNetworkFactory.create14(), p -> { });
-        assertEquals(List.of("DistributedSlack", "AcHvdcAcEmulationLimits", "VoltageMonitoring", "ReactiveLimits"),
+        assertEquals(List.of("DistributedSlack", com.powsybl.openloadflow.ac.outerloop.AcHvdcAcEmulationLimitsOuterLoop.NAME, "VoltageMonitoring",
+                        "ReactiveLimits"),
                 loopNames(loaded.acParameters()));
         assertEquals(List.of(), GpuPostContingencyBatch.loopsNotHandedBack(loaded.lfNetwork(), loaded.acParameters()));
     }
@@ -78,14 +79,15 @@ class GpuPostContingencyBatchTest {
     @Test
     void anHvdcInAcEmulationKeepsItsLoopFromTheBatch() {
         Loaded loaded = load(HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork(), p -> { });
-        assertEquals(List.of("AcHvdcAcEmulationLimits"), GpuPostContingencyBatch.loopsNotHandedBack(loaded.lfNetwork(), loaded.acParameters()));
+        assertEquals(List.of(com.powsybl.openloadflow.ac.outerloop.AcHvdcAcEmulationLimitsOuterLoop.NAME),
+                GpuPostContingencyBatch.loopsNotHandedBack(loaded.lfNetwork(), loaded.acParameters()));
     }
 
     @Test
     void aMonitoringSvcKeepsVoltageMonitoringFromTheBatch() {
         Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
         StaticVarCompensator svc = network.getStaticVarCompensator("svc1");
-        svc.setVoltageSetpoint(385).setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE).setRegulating(true);
+        svc.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.regulation.RegulationMode.VOLTAGE).setRegulating(true);
         svc.newExtension(StandbyAutomatonAdder.class)
                 .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
                 .withLowVoltageSetpoint(389).withHighVoltageSetpoint(395)
@@ -118,7 +120,7 @@ class GpuPostContingencyBatchTest {
                 assertTrue(batch.notBatchedReason().orElseThrow().contains("did not run"), batch.notBatchedReason().orElseThrow());
                 assertEquals(0, batch.size());
                 LfContingency lfContingency = contingencies.get(0).toLfContingency(loaded.lfNetwork()).orElseThrow();
-                assertFalse(batch.bringToConvergedState(context, lfContingency));
+                assertFalse(batch.bringToConvergedState(context, lfContingency.getId()));
             }
         }
     }

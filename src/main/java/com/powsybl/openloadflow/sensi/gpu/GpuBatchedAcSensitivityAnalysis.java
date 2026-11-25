@@ -34,6 +34,7 @@ import com.powsybl.openloadflow.lf.util.ParticipatingElement;
 import com.powsybl.openloadflow.sa.gpu.GpuPostContingencyBatch;
 import com.powsybl.openloadflow.sensi.AcSensitivityAnalysis;
 import com.powsybl.openloadflow.sensi.GpuSensitivityFactorGroups;
+import com.powsybl.openloadflow.sensi.LfNetworkChange;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityFactorReader;
@@ -237,16 +238,23 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
                 contingencyLfParametersExt.isStartWithFrozenACEmulation(), sensitivityBasis, lfNetwork.getReportNode());
     }
 
-    /** The contingency's state from the batch when it converged there, its own load flow otherwise. */
+    /** A contingency's state from the batch when it converged there, its own load flow otherwise, and every operator
+     *  strategy's (the batch solves contingencies alone). */
     @Override
-    protected boolean runPostContingencyLoadFlow(AcLoadFlowContext context, LfContingency lfContingency) {
+    protected boolean runPostContingencyLoadFlow(AcLoadFlowContext context, LfNetworkChange lfNetworkChange) {
         Partition partition = partitions.get(context);
-        if (partition != null && partition.batch().bringToConvergedState(context, lfContingency)) {
-            partition.brought().add(lfContingency.getId());
+        String contingencyId = contingencyOnly(lfNetworkChange);
+        if (partition != null && contingencyId != null && partition.batch().bringToConvergedState(context, contingencyId)) {
+            partition.brought().add(contingencyId);
             BATCHED_CONTINGENCIES.increment();
             return true;
         }
-        return super.runPostContingencyLoadFlow(context, lfContingency);
+        return super.runPostContingencyLoadFlow(context, lfNetworkChange);
+    }
+
+    /** The contingency of a network change that is a contingency alone, null for the base case or an operator strategy. */
+    private static String contingencyOnly(LfNetworkChange lfNetworkChange) {
+        return lfNetworkChange != null && lfNetworkChange.getOperatorStrategyIndex() < 0 ? lfNetworkChange.getContingencyId() : null;
     }
 
     /**
@@ -256,39 +264,40 @@ public class GpuBatchedAcSensitivityAnalysis extends AcSensitivityAnalysis {
      * basis when OLF's right-hand sides are in it. Otherwise they are solved on the Jacobian, as OLF does.
      */
     @Override
-    protected void solveFactorsStates(AcLoadFlowContext context, DenseMatrix factorsStates, LfContingency lfContingency) {
+    protected void solveFactorsStates(AcLoadFlowContext context, DenseMatrix factorsStates, LfNetworkChange lfNetworkChange) {
         deviceValues.remove();
-        Partition partition = lfContingency != null ? partitions.get(context) : null;
-        if (partition != null && partition.basis() != null && partition.brought().contains(lfContingency.getId())) {
-            double[] result = partition.batch().sensitivityBasis(lfContingency.getId());
+        String contingencyId = contingencyOnly(lfNetworkChange);
+        Partition partition = contingencyId != null ? partitions.get(context) : null;
+        if (partition != null && partition.basis() != null && partition.brought().contains(contingencyId)) {
+            double[] result = partition.batch().sensitivityBasis(contingencyId);
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
             if (result != null && partition.basis().contracted()) {
-                double[] values = partition.basis().verifiedValues(factorsStates, es, lfContingency.getId(), result);
+                double[] values = partition.basis().verifiedValues(factorsStates, es, contingencyId, result);
                 if (values != null) {
-                    deviceValues.set(new DeviceValues(lfContingency.getIndex(), values, partition.factorIndex()));
+                    deviceValues.set(new DeviceValues(lfNetworkChange.getContingencyIndex(), values, partition.factorIndex()));
                     DEVICE_VALUED_CONTINGENCIES.increment();
                     return;
                 }
-            } else if (result != null && partition.basis().solve(factorsStates, es, lfContingency.getId(), result,
+            } else if (result != null && partition.basis().solve(factorsStates, es, contingencyId, result,
                     partition.batch().currentRows(es, partition.basis().gatherRows()))) {
                 BASIS_SOLVED_CONTINGENCIES.increment();
                 return;
             }
         }
-        super.solveFactorsStates(context, factorsStates, lfContingency);
+        super.solveFactorsStates(context, factorsStates, lfNetworkChange);
     }
 
     /** The device's value of a factor in a contingency whose sensitivities the device contracted, OLF's otherwise. */
     @Override
     protected double calculateSensi(LfSensitivityFactor<AcVariableType, AcEquationType> factor, DenseMatrix factorsStates,
-                                    int column, int contingencyIndex) {
+                                    int column, int contingencyIndex, int operatorStrategyIndex) {
         DeviceValues device = deviceValues.get();
-        if (device != null && device.contingencyIndex() == contingencyIndex) {
+        if (device != null && operatorStrategyIndex < 0 && device.contingencyIndex() == contingencyIndex) {
             Integer index = device.factorIndex().get(factor);
             if (index != null) {
                 return device.values()[index];
             }
         }
-        return super.calculateSensi(factor, factorsStates, column, contingencyIndex);
+        return super.calculateSensi(factor, factorsStates, column, contingencyIndex, operatorStrategyIndex);
     }
 }

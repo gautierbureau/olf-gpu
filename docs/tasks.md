@@ -473,6 +473,15 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
   cache invalidation: validate on a device), the `PostContingencyResult` constructor (core 7.4.0), `getLimitScalings()`,
   and `AbstractLfBranchAction.updateBusesAndBranchStatus` gone (#1385's `NetworkActivations`) in
   `GpuAutomationSystemOuterLoop`.
+- **On OLF main (2026-11-25):** olf-gpu now builds on OLF main (`2.5.0-SNAPSHOT-gpu`, the fork's `main-gpu-integration`),
+  which has none of the hooks below. They are ported in one commit on the fork branch `gb/ac-sensitivity-extension-points`
+  (off `main-gpu-integration` 0701b2083, commit 88ab6aee1: "Let a subclass batch the AC sensitivity analysis's
+  contingencies"): the same five seams, on OLF main's network changes. `runPostContingencyLoadFlow` and
+  `solveFactorsStates` take the `LfNetworkChange` (null for the base case), `calculateSensi` also the operator strategy
+  index, and `beforeContingencySimulations` runs before the pre-contingency operator strategies, while the context still
+  holds the base state. The GPU side batches a change that is a contingency alone; an operator strategy's state runs its
+  own load flow, as in OLF. The sensi package's 352 tests pass on the fork; it is to be merged into
+  `main-gpu-integration` like the other extension-point PRs.
 - **M1 - DONE: hooks in OLF** (branch `olf-local-patches-sensi-hooks` of the OLF fork, on `olf-local-patches`, commit
   "Let a subclass batch the AC sensitivity analysis's contingencies", 8c7df974, pushed to the fork 2026-11-09, and
   cherry-picked onto `olf-local-patches` the same day: olf-gpu builds against it). OLF's

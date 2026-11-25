@@ -27,7 +27,7 @@ import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.NetworkState;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
-import com.powsybl.openloadflow.network.util.ActivePowerDistribution;
+import com.powsybl.openloadflow.lf.util.ActivePowerDistribution;
 
 import java.util.HashMap;
 import java.util.List;
@@ -144,9 +144,9 @@ public final class CpuPostContingencyBatches {
             networkState.restore();
         }
         es.getStateVector().set(baseState);                     // the context at the base state, as the device leaves it
-        return new Made(GpuPostContingencyBatch.of(new PrecomputedBatch(states, islanded, Set.of(), baseRows, es, data, null,
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, decisions,
-                sensitivityBases)), switchedToPq, switchedBackToPv);
+        return new Made(GpuPostContingencyBatch.of(new PrecomputedBatch(states, islanded, Set.of(), Set.of(), baseRows, es, data, null,
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), Map.of(),
+                decisions, sensitivityBases)), switchedToPq, switchedBackToPv);
     }
 
     /**

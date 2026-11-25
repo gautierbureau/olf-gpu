@@ -349,17 +349,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 GpuBatchScopeCensus.record("PAIR:NOT_APPLIED:NO_VIOLATION");
                 continue;
             }
-            if (result != null && result.length == 3) {    // the state went to the sink: the result carries no state
-                results.add(new BatchScenarioResult(id, null, (int) result[0], result[1], (int) result[2],
-                        plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
-                        movesOrNone(deviceTapMovesByIndex[i]),
-                        generatorTargets(distributedSlackGeneratorIds, distributedSlackGeneratorAnchors,
-                                distributedSlackGeneratorMovesByIndex[i]),
-                        reactiveLimitDecisionsByIndex != null ? reactiveLimitDecisionsByIndex[i] : null,
-                        sensitivityBasisByIndex != null ? sensitivityBasisByIndex[i] : null));
-            } else if (result != null) {                   // the state is the result row's first n entries
-                results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
+            if (result != null) {
+                // the state is the result row's first n entries, or it went to the sink: a 3-entry row carries no state
+                int at = result.length == 3 ? 0 : n;
+                results.add(new BatchScenarioResult(id, at == 0 ? null : result, (int) result[at], result[at + 1], (int) result[at + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i], switchedOrNone(automationSystemSwitchedByIndex[i]),
                         movesOrNone(deviceTapMovesByIndex[i]),

@@ -9,11 +9,11 @@ package com.powsybl.openloadflow.sensi;
 
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.equations.Derivable;
 import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfElement;
-import com.powsybl.openloadflow.equations.Derivable;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
 

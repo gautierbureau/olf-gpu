@@ -29,7 +29,6 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;

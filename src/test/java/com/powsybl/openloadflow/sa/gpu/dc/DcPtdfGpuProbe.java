@@ -46,7 +46,7 @@ class DcPtdfGpuProbe {
         assumeTrue(Files.exists(CASE_FILE), "rte6515_full.xiidm.gz not found");
         assumeTrue(Files.exists(PARAMS_FILE), "params json not found");
         assumeTrue(GpuPtdfMatrix.isAvailable(), "GPU native library not available");
-        Network network = Network.read(CASE_FILE);
+        Network network = DcCases.read(CASE_FILE);
         LoadFlowParameters parameters = JsonLoadFlowParameters.read(PARAMS_FILE).setDc(true);
         DcLoadFlowParameters dcParameters = OpenLoadFlowParameters.createDcParameters(network, parameters,
                 OpenLoadFlowParameters.get(parameters), new SparseMatrixFactory(),

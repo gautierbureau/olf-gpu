@@ -45,8 +45,8 @@ class DcLoadFlowGpuProbe {
         assumeTrue(Files.exists(CASE_FILE), "rte6515_full.xiidm.gz not found");
         assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
         LoadFlowParameters parameters = JsonLoadFlowParameters.read(PARAMS_FILE).setDc(true);
-        Network cpu = Network.read(CASE_FILE);
-        Network gpu = Network.read(CASE_FILE);
+        Network cpu = DcCases.read(CASE_FILE);
+        Network gpu = DcCases.read(CASE_FILE);
         LoadFlow.Runner stock = new LoadFlow.Runner(new OpenLoadFlowProvider(new SparseMatrixFactory()));
         LoadFlow.Runner device = new LoadFlow.Runner(new GpuLoadFlowProvider(new SparseMatrixFactory()));
         for (int pass = 0; pass < 2; pass++) {

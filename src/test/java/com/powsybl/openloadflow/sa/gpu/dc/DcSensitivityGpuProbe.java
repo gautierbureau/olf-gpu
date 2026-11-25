@@ -54,7 +54,7 @@ class DcSensitivityGpuProbe {
         int functions = Integer.parseInt(System.getenv().getOrDefault("OLF_SENSI_FUNCTIONS", "200"));
         int contingencyCount = Integer.parseInt(System.getenv().getOrDefault("OLF_SENSI_CTG", "100"));
 
-        Network network = Network.read(CASE_FILE);
+        Network network = DcCases.read(CASE_FILE);
         LoadFlowParameters lfParameters = JsonLoadFlowParameters.read(PARAMS_FILE).setDc(true);
         SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
         parameters.setLoadFlowParameters(lfParameters);

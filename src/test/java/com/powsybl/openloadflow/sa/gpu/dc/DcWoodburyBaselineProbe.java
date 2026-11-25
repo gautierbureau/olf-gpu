@@ -83,7 +83,7 @@ class DcWoodburyBaselineProbe {
         assumeTrue(Files.exists(CASE_FILE), CASE_FILE + " not found in module dir");
         assumeTrue(Files.exists(PARAMS_FILE), PARAMS_FILE + " not found in module dir");
 
-        Network network = Network.read(CASE_FILE);
+        Network network = DcCases.read(CASE_FILE);
         // OLF_DC_CTG_FILE: a contingency list (JSON array of {id, elements}, or an object with "contingencies")
         // instead of every main-synchronous-component branch
         String ctgFile = System.getenv("OLF_DC_CTG_FILE");

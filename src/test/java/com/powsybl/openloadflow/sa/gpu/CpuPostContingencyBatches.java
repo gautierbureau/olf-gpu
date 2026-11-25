@@ -22,12 +22,12 @@ import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuQLimitType;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuSensitivityFunction;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.lf.util.ActivePowerDistribution;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.NetworkState;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
-import com.powsybl.openloadflow.lf.util.ActivePowerDistribution;
 
 import java.util.HashMap;
 import java.util.List;

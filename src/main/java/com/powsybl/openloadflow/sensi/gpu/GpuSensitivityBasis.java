@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.SensitivityBasisRequest;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuSensitivityBasisKind;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuSensitivityFunction;
+import com.powsybl.openloadflow.equations.Derivable;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -21,7 +22,6 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.impl.LfLegBranch;
 import com.powsybl.openloadflow.sensi.GpuSensitivityFactorGroups;
-import com.powsybl.openloadflow.equations.Derivable;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
 

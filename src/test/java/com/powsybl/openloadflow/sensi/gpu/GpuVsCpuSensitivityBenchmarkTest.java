@@ -17,6 +17,7 @@ import com.powsybl.loadflow.json.JsonLoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
+import com.powsybl.openloadflow.sensi.GpuSensitivityAnalysisProvider;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisParameters;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisProvider;
 import com.powsybl.sensitivity.*;

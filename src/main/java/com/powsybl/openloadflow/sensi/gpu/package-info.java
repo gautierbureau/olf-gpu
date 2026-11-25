@@ -6,9 +6,10 @@
  * SPDX-License-Identifier: MPL-2.0
  */
 /**
- * The GPU sensitivity-analysis provider: {@link com.powsybl.openloadflow.sensi.gpu.GpuSensitivityAnalysisProvider}
- * runs OLF's sensitivity analysis with its AC load flows on the GPU Newton-Raphson, the sensitivities computed by OLF
- * on the Jacobian at the state they reach.
+ * The AC side of the GPU sensitivity-analysis provider ({@link com.powsybl.openloadflow.sensi.GpuSensitivityAnalysisProvider}):
+ * OLF's AC sensitivity analysis with its post-contingency load flows solved together on the device
+ * ({@link com.powsybl.openloadflow.sensi.gpu.GpuBatchedAcSensitivityAnalysis}), and their sensitivities from a device
+ * basis.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */

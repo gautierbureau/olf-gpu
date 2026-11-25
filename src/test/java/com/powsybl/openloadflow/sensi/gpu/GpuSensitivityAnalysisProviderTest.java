@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuReorderingAlgorithm;
 import com.powsybl.openloadflow.gpu.GpuLoadFlowProvider;
+import com.powsybl.openloadflow.sensi.GpuSensitivityAnalysisProvider;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
@@ -176,9 +177,10 @@ class GpuSensitivityAnalysisProviderTest {
         assertTrue(new GpuSensitivityAnalysisProvider().getSpecificParametersSerializer().isEmpty());
     }
 
-    /** A DC sensitivity analysis has no GPU path: it runs as in OLF, to the last bit. */
+    /** A DC sensitivity analysis runs on the DC engine on the device (OLF's stock one without a device): OLF's values,
+     *  within the last bits of its own arithmetic. */
     @Test
-    void dcRunsAsInOlf() {
+    void dcGivesOlfsSensitivities() {
         Supplier<SensitivityAnalysisParameters> dc = () -> {
             SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
             parameters.getLoadFlowParameters().setDc(true);
@@ -191,8 +193,8 @@ class GpuSensitivityAnalysisProviderTest {
         assertFalse(cpu.isEmpty());
         assertEquals(cpu.keySet(), gpu.keySet());
         for (Map.Entry<List<Integer>, SensitivityValue> entry : cpu.entrySet()) {
-            assertEquals(entry.getValue().getValue(), gpu.get(entry.getKey()).getValue(), 0.0, "sensitivity " + entry.getKey());
-            assertEquals(entry.getValue().getFunctionReference(), gpu.get(entry.getKey()).getFunctionReference(), 0.0,
+            assertClose(entry.getValue().getValue(), gpu.get(entry.getKey()).getValue(), 1e-12, "sensitivity " + entry.getKey());
+            assertClose(entry.getValue().getFunctionReference(), gpu.get(entry.getKey()).getFunctionReference(), 1e-12,
                     "function reference " + entry.getKey());
         }
     }

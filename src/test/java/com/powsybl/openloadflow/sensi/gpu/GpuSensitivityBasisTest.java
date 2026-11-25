@@ -17,6 +17,7 @@ import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.sensi.GpuSensitivityAnalysisProvider;
 import com.powsybl.openloadflow.sensi.OpenSensitivityAnalysisProvider;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisProvider;

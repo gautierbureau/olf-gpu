@@ -7,24 +7,53 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.service.AutoService;
+import com.powsybl.commons.PowsyblException;
+import com.powsybl.commons.extensions.ExtensionJsonSerializer;
+import com.powsybl.iidm.network.Network;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
+import com.powsybl.openloadflow.gpu.GpuLoadFlowProvider;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
-import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.sensi.gpu.GpuBatchedAcSensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisProvider;
+import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
+import com.powsybl.sensitivity.SensitivityFactorReader;
+import com.powsybl.sensitivity.SensitivityResultWriter;
+import com.powsybl.sensitivity.json.JsonSensitivityAnalysisParameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+
 /**
- * OLF's sensitivity analysis provider with the DC engine on the device
- * ({@link GpuDcSensitivityAnalysis}); AC is the stock one. Registered as {@code "OpenLoadFlowGpu"},
- * the same name as the GPU load flow and security analysis providers. Without a device the stock DC
- * engine runs.
+ * OLF's sensitivity analysis on the GPU (name {@value #NAME}, the same as the GPU load flow and security analysis
+ * providers'). A DC run takes the DC engine on the device ({@link GpuDcSensitivityAnalysis}; OLF's stock one without a
+ * device). An AC run has its AC load flows on the GPU: the base case runs on the GPU Newton-Raphson, as {@link GpuLoadFlowProvider} runs a
+ * load flow, the post-contingency load flows together in one device batch ({@link GpuBatchedAcSensitivityAnalysis};
+ * one by one on the GPU Newton-Raphson where the batch does not cover them), and the sensitivities are then computed
+ * by OLF on the Jacobian at the state those load flows reach. Each state is handed back to OLF's network as OLF's own
+ * outer loops leave it (the state vector, the generators switched to PQ at their reactive limits and back), so that
+ * Jacobian holds the equations the run converged on.
+ *
+ * <p>OLF's sensitivity parameters and its load flow parameters are used as they are, on a copy: the caller's
+ * parameters are left as they were, so reusing them with OLF's provider runs on the CPU. The copy selects the GPU
+ * Newton-Raphson and runs single-threaded, the device solving one load flow at a time. Without the GPU library an AC
+ * run fails, as the GPU load flow does.
+ *
+ * <p>The load flow provider of this provider is {@link GpuLoadFlowProvider}, so a caller building the run's load flow
+ * parameters from provider parameters by name (pypowsybl's {@code provider_parameters}) sets the GPU solver's and
+ * OLF's.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -33,21 +62,21 @@ public class GpuSensitivityAnalysisProvider extends OpenSensitivityAnalysisProvi
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuSensitivityAnalysisProvider.class);
 
-    public static final String NAME = "OpenLoadFlowGpu";
+    public static final String NAME = GpuLoadFlowProvider.NAME;
 
     private final MatrixFactory matrixFactory;
 
-    public GpuSensitivityAnalysisProvider(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory) {
-        super(matrixFactory, connectivityFactory);
-        this.matrixFactory = matrixFactory;
+    public GpuSensitivityAnalysisProvider() {
+        this(new SparseMatrixFactory());
     }
 
     public GpuSensitivityAnalysisProvider(MatrixFactory matrixFactory) {
-        this(matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        this(matrixFactory, new DTreeGraphConnectivityFactory<>());
     }
 
-    public GpuSensitivityAnalysisProvider() {
-        this(new SparseMatrixFactory());
+    public GpuSensitivityAnalysisProvider(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory) {
+        super(matrixFactory, connectivityFactory);
+        this.matrixFactory = Objects.requireNonNull(matrixFactory);
     }
 
     @Override
@@ -55,15 +84,23 @@ public class GpuSensitivityAnalysisProvider extends OpenSensitivityAnalysisProvi
         return NAME;
     }
 
-    /**
-     * The OLF provider already registers the {@code open-sensitivity-parameters} JSON serializer, and
-     * the serializers are keyed by extension name, so this provider must not register it twice.
-     */
     @Override
-    public java.util.Optional<com.powsybl.commons.extensions.ExtensionJsonSerializer> getSpecificParametersSerializer() {
-        return java.util.Optional.empty();
+    public Optional<String> getLoadFlowProviderName() {
+        return Optional.of(GpuLoadFlowProvider.NAME);
     }
 
+    /**
+     * None: this provider's specific parameters are OLF's ({@link OpenSensitivityAnalysisParameters}), which OLF's
+     * provider already (de)serializes. powsybl collects the serializers of every sensitivity analysis provider by
+     * extension name, two under one name are a duplicate key, and the JSON form of sensitivity parameters failed to
+     * write or read at all while both providers were registered.
+     */
+    @Override
+    public Optional<ExtensionJsonSerializer> getSpecificParametersSerializer() {
+        return Optional.empty();
+    }
+
+    /** The DC engine on the device; OLF's stock one without a device. */
     @Override
     protected AbstractSensitivityAnalysis<?, ?> createDcSensitivityAnalysis(GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory,
                                                                             SensitivityAnalysisParameters sensitivityAnalysisParameters) {
@@ -72,5 +109,59 @@ public class GpuSensitivityAnalysisProvider extends OpenSensitivityAnalysisProvi
             return super.createDcSensitivityAnalysis(selectedConnectivityFactory, sensitivityAnalysisParameters);
         }
         return new GpuDcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
+    }
+
+    /** The AC sensitivity analysis whose post-contingency load flows are solved together on the device. */
+    @Override
+    protected AcSensitivityAnalysis createAcSensitivityAnalysis(MatrixFactory matrixFactory,
+                                                                GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
+                                                                SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        return new GpuBatchedAcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters);
+    }
+
+    @Override
+    public CompletableFuture<Void> run(Network network, String workingVariantId, SensitivityFactorReader factorReader,
+                                       SensitivityResultWriter resultWriter, SensitivityAnalysisRunParameters runParameters) {
+        Objects.requireNonNull(runParameters);
+        SensitivityAnalysisParameters parameters = Objects.requireNonNull(runParameters.getSensitivityAnalysisParameters());
+        if (parameters.getLoadFlowParameters().isDc()) {
+            return super.run(network, workingVariantId, factorReader, resultWriter, runParameters);
+        }
+        SensitivityAnalysisRunParameters onDevice = new SensitivityAnalysisRunParameters()
+                .setParameters(withGpuSolver(parameters))
+                .setComputationManager(runParameters.getComputationManager())
+                .setContingencies(runParameters.getContingencies())
+                .setVariableSets(runParameters.getVariableSets())
+                .setOperatorStrategies(runParameters.getOperatorStrategies())
+                .setActions(runParameters.getActions())
+                .setReportNode(runParameters.getReportNode());
+        return super.run(network, workingVariantId, factorReader, resultWriter, onDevice);
+    }
+
+    /**
+     * The caller's parameters for a run on the device: a copy (through the JSON form, so it keeps every extension,
+     * OLF's sensitivity parameters and the load flow parameters' own), its load flow parameters those of a GPU load
+     * flow ({@link GpuLoadFlowProvider#withGpuSolver}), and one thread: the device runs one load flow at a time, and
+     * concurrent native solves on one device are not supported.
+     */
+    public static SensitivityAnalysisParameters withGpuSolver(SensitivityAnalysisParameters parameters) {
+        SensitivityAnalysisParameters copy = copy(parameters);
+        copy.setLoadFlowParameters(GpuLoadFlowProvider.withGpuSolver(copy.getLoadFlowParameters()));
+        OpenSensitivityAnalysisParameters parametersExt = copy.getExtension(OpenSensitivityAnalysisParameters.class);
+        if (parametersExt != null && parametersExt.getThreadCount() > 1) {
+            LOGGER.warn("GPU sensitivity analysis: threadCount {} ignored, the device runs one load flow at a time. "
+                    + "Use the CPU provider for multi-threading", parametersExt.getThreadCount());
+            parametersExt.setThreadCount(1);
+        }
+        return copy;
+    }
+
+    private static SensitivityAnalysisParameters copy(SensitivityAnalysisParameters parameters) {
+        try {
+            ObjectMapper mapper = JsonSensitivityAnalysisParameters.createObjectMapper();
+            return JsonSensitivityAnalysisParameters.read(new ByteArrayInputStream(mapper.writeValueAsBytes(parameters)));
+        } catch (IOException e) {
+            throw new PowsyblException("GPU sensitivity analysis: cannot copy the sensitivity analysis parameters", e);
+        }
     }
 }

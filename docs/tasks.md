@@ -481,7 +481,14 @@ first, on the current stack; post-action states once olf-gpu moves to OLF main.
   index, and `beforeContingencySimulations` runs before the pre-contingency operator strategies, while the context still
   holds the base state. The GPU side batches a change that is a contingency alone; an operator strategy's state runs its
   own load flow, as in OLF. The sensi package's 352 tests pass on the fork; it is to be merged into
-  `main-gpu-integration` like the other extension-point PRs.
+  `main-gpu-integration` like the other extension-point PRs (merged 2026-11-25, 279d1df33).
+- **One provider for AC and DC (2026-11-25):** `main`'s DC port brought its own
+  `com.powsybl.openloadflow.sensi.GpuSensitivityAnalysisProvider` (the GPU DC engine, `GpuDcSensitivityAnalysis`), under
+  the same name `OpenLoadFlowGpu` as this branch's `sensi.gpu` one: two providers under one name, and
+  `SensitivityAnalysis.find` picked the DC one for every run. They are now one class, at `main`'s place: DC on the
+  device DC engine (the stock one without a device), AC on the batched device path. Its default connectivity is OLF
+  main's (DTree; it was Even-Shiloach in both). `GpuSensitivityAnalysisProviderTest#dcGivesOlfsSensitivities` holds the
+  DC run to OLF's values within 1e-12 (the device's DC differs from OLF's in the last bits); `main`'s DC tests pass.
 - **M1 - DONE: hooks in OLF** (branch `olf-local-patches-sensi-hooks` of the OLF fork, on `olf-local-patches`, commit
   "Let a subclass batch the AC sensitivity analysis's contingencies", 8c7df974, pushed to the fork 2026-11-09, and
   cherry-picked onto `olf-local-patches` the same day: olf-gpu builds against it). OLF's

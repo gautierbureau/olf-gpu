@@ -11,6 +11,7 @@ import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
 import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.math.matrix.PrintConfig;
 import com.powsybl.math.matrix.SparseMatrix;
 
 import java.io.PrintStream;
@@ -219,6 +220,16 @@ final class SparseColumnRecorder implements Matrix {
 
     @Override
     public void print(PrintStream out) {
+        throw unsupported();
+    }
+
+    @Override
+    public void print(PrintStream out, List<String> rowNames, List<String> columnNames, PrintConfig printConfig) {
+        throw unsupported();
+    }
+
+    @Override
+    public void print(PrintStream out, PrintConfig printConfig) {
         throw unsupported();
     }
 }

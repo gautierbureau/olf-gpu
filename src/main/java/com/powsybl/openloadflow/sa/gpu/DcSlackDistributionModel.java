@@ -8,11 +8,11 @@
 package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.openloadflow.lf.util.ActivePowerDistribution;
+import com.powsybl.openloadflow.lf.util.ParticipatingElement;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.util.ActivePowerDistribution;
-import com.powsybl.openloadflow.network.util.ParticipatingElement;
 
 import java.util.*;
 

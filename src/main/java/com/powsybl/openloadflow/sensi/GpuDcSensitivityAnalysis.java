@@ -24,6 +24,7 @@ import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
 import com.powsybl.openloadflow.dc.gpu.GpuDcAssembly;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
+import com.powsybl.openloadflow.lf.util.ParticipatingElement;
 import com.powsybl.openloadflow.network.DisabledNetwork;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -32,7 +33,6 @@ import com.powsybl.openloadflow.network.action.LfAction;
 import com.powsybl.openloadflow.network.action.LfOperatorStrategy;
 import com.powsybl.openloadflow.network.impl.LfLegBranch;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
-import com.powsybl.openloadflow.network.util.ParticipatingElement;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityFunctionType;
@@ -178,7 +178,7 @@ public class GpuDcSensitivityAnalysis extends DcSensitivityAnalysis {
         int groupCount = factorGroups.getList().size();
         SparseColumnRecorder recorder = new SparseColumnRecorder(equationCount, groupCount);
         for (SensitivityFactorGroup<DcVariableType, DcEquationType> factorGroup : factorGroups.getList()) {
-            factorGroup.fillRhs(recorder, slackParticipationByBus);
+            factorGroup.describeRhs(slackParticipationByBus).writeInto(recorder, factorGroup.getIndex());
         }
         boolean alt = baseFactorBuilt;
         factorColumnCount = groupCount;

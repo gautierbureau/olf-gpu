@@ -34,19 +34,19 @@ import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
+import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.sa.*;
 import com.powsybl.openloadflow.util.Indexed;
 import com.powsybl.openloadflow.util.PerUnit;
-import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
 import com.powsybl.security.LimitViolationsResult;
 import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
-import com.powsybl.security.limitreduction.LimitReduction;
+import com.powsybl.security.limitscaling.LimitScaling;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.monitor.StateMonitorIndex;
 import com.powsybl.security.results.*;
@@ -171,13 +171,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     protected SecurityAnalysisResult runSimulations(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies,
                                                     DcLoadFlowParameters dcParameters, SecurityAnalysisParameters securityAnalysisParameters,
                                                     List<OperatorStrategy> operatorStrategies, List<Action> actions,
-                                                    List<LimitReduction> limitReductions,
+                                                    List<LimitScaling> limitScalings,
                                                     ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
         if (!GpuDcSolver.isAvailable()) {
             LOGGER.info("GPU Woodbury: whole run on the stock path (no device)");
             LAST_GPU_PRECOMPUTED_COUNT.set(-1);
             return super.runSimulations(lfNetwork, propagatedContingencies, dcParameters, securityAnalysisParameters,
-                    operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+                    operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution);
         }
 
         OpenSecurityAnalysisParameters openSecurityAnalysisParameters = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
@@ -187,7 +187,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
         try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters, false)) {
             ReportNode networkReportNode = lfNetwork.getReportNode();
-            ReportNode preContSimReportNode = Reports.createPreContingencySimulation(networkReportNode);
+            ReportNode preContSimReportNode = LfReports.createPreContingencySimulation(networkReportNode);
             lfNetwork.setReportNode(preContSimReportNode);
 
             // same preparation as the stock path: contingencies on one-side-connected branches are dropped
@@ -206,7 +206,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 LOGGER.warn("GPU Woodbury: {} — whole run on the stock path", e.getMessage());
                 LAST_GPU_PRECOMPUTED_COUNT.set(-1);
                 return super.runSimulations(lfNetwork, propagatedContingencies, dcParameters, securityAnalysisParameters,
-                        operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+                        operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution);
             }
             GpuDcSolver solver = engine.getSolver();
             double[] preContingencyStates;
@@ -230,13 +230,14 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             var preContingencyNetworkResult = new PreContingencyNetworkResult(lfNetwork, monitorIndexes, createResultExtension,
                     LoadFlowModel.DC, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor());
             preContingencyNetworkResult.update();
-            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
+            var preContingencyLimitViolationManager = new LimitViolationManager(limitScalings);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
 
             long tPre1 = System.nanoTime();
             // contingency elements: OLF's own index (one S column per distinct branch, its computedElementIndex)
             Map<String, ComputedContingencyElement> elementByBranch =
-                    ConnectivityBreakAnalysis.createContingencyElementsIndexByBranchId(propagatedContingencies, lfNetwork, equationSystem, creationParameters);
+                    ConnectivityBreakAnalysis.createContingencyElementsIndexByBranchId(propagatedContingencies, lfNetwork, equationSystem,
+                            Collections.emptyList(), creationParameters);   // no permanent contingency branch, as the stock
 
             // operator strategies: the stock's indexes, the needed actions, and one action element per branch an
             // action switches or shifts (its S column is appended after the contingency elements')
@@ -266,7 +267,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 LOGGER.warn("GPU Woodbury: the device cannot hold the element states, whole run on the stock path");
                 LAST_GPU_PRECOMPUTED_COUNT.set(-1);
                 return super.runSimulations(lfNetwork, propagatedContingencies, dcParameters, securityAnalysisParameters,
-                        operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+                        operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution);
             }
             long tS = System.nanoTime();
 
@@ -319,7 +320,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     onDevice = runOnDevice(solver, engine.getAssembly(), networkReportNode, elementCount, lfNetwork, context, device, strategySetup, elementByBranch,
                             preContingencyStates, preContingencyNetworkResult,
                             preContingencyLimitViolationManager, monitorIndexes, createResultExtension, securityAnalysisParameters,
-                            limitReductions, dcPowerFactor, resultById, strategyResultsByContingency);
+                            limitScalings, dcPowerFactor, resultById, strategyResultsByContingency);
                 }
             }
             lfNetwork.setReportNode(networkReportNode);
@@ -329,7 +330,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 // network to base after each contingency, and its pre-contingency result is ours by construction
                 List<PropagatedContingency> cpuInOrder = propagatedContingencies.stream().filter(cpu::contains).toList();
                 SecurityAnalysisResult stock = super.runSimulations(lfNetwork, new ArrayList<>(cpuInOrder), dcParameters, securityAnalysisParameters,
-                        operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+                        operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution);
                 for (PostContingencyResult r : stock.getPostContingencyResults()) {
                     resultById.put(r.getContingency().getId(), r);
                 }
@@ -430,7 +431,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                             double[] preContingencyStates, PreContingencyNetworkResult preContingencyNetworkResult,
                             LimitViolationManager preContingencyLimitViolationManager, AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
                             boolean createResultExtension, SecurityAnalysisParameters securityAnalysisParameters,
-                            List<LimitReduction> limitReductions, double dcPowerFactor, Map<String, PostContingencyResult> resultById,
+                            List<LimitScaling> limitScalings, double dcPowerFactor, Map<String, PostContingencyResult> resultById,
                             Map<String, List<OperatorStrategyResult>> strategyResultsByContingency) {
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         int n = equationSystem.getIndex().getColumnCount();
@@ -441,7 +442,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         long tS = t0;
 
         // --- limit table
-        GpuLimitTable table = uploadLimitTable(solver, lfNetwork, limitReductions, dcPowerFactor);
+        GpuLimitTable table = uploadLimitTable(solver, lfNetwork, limitScalings, dcPowerFactor);
         GpuLimitScanner scanner = new GpuLimitScanner(table);
         long tTable = System.nanoTime();
         boolean needAngles = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
@@ -495,7 +496,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         assembly.busesWithZeroPTarget()),
                 scanner, table, needAngles, needBusResults, monitoredBranchResults, stateFree, checkStateReader, reads,
                 preContingencyNetworkResult, preContingencyLimitViolationManager, monitorIndexes, createResultExtension,
-                securityAnalysisParameters, limitReductions, dcPowerFactor, resultById, strategyResultsByContingency,
+                securityAnalysisParameters, limitScalings, dcPowerFactor, resultById, strategyResultsByContingency,
                 networkState, new ReentrantLock(), stats);
         runPipeline(run, device);
         // leave the base state loaded, as the stock path's restore would
@@ -731,7 +732,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                        GpuMonitoredBranchResults monitoredBranchResults, boolean stateFree, boolean checkStateReader, ChunkReads runReads,
                        PreContingencyNetworkResult preContingencyNetworkResult, LimitViolationManager preContingencyLimitViolationManager,
                        AbstractNetworkResult.StateMonitorIndexes monitorIndexes, boolean createResultExtension,
-                       SecurityAnalysisParameters securityAnalysisParameters, List<LimitReduction> limitReductions, double dcPowerFactor,
+                       SecurityAnalysisParameters securityAnalysisParameters, List<LimitScaling> limitScalings, double dcPowerFactor,
                        Map<String, PostContingencyResult> resultById, Map<String, List<OperatorStrategyResult>> strategyResultsByContingency,
                        NetworkState networkState, ReentrantLock networkLock, PipelineStats stats) {
 
@@ -1030,7 +1031,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             try {
                 // a child of the network's report node, as the AC security analysis does: not of the previous
                 // contingency's, which nested every contingency in the one before (and re-checked every ancestor's values)
-                ReportNode postContSimReportNode = Reports.createPostContingencySimulation(run.networkReportNode(), contingency.getId());
+                ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(run.networkReportNode(), contingency.getId());
                 lfNetwork.setReportNode(postContSimReportNode);
                 logPostContingencyStart(lfNetwork, lfContingency);
 
@@ -1050,7 +1051,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
                 // violations: the screen's candidates confirmed on OLF's own values (read from the state, or from the model)
                 var postContingencyLimitViolationManager = new LimitViolationManager(run.preContingencyLimitViolationManager(),
-                        run.limitReductions(), run.violationsParameters());
+                        run.limitScalings(), run.violationsParameters());
                 if (emitted > CAPACITY) {
                     run.stats().hostScreened++;
                     postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabled);
@@ -1076,7 +1077,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                         lfContingency.getDisconnectedElementIds());
                 LimitViolationsResult postContingencyViolations = new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations());
                 run.resultById().put(contingency.getId(), new PostContingencyResult(contingency, PostContingencyComputationStatus.CONVERGED,
-                        postContingencyViolations, networkResult, connectivityResult, Double.NaN));
+                        postContingencyViolations, networkResult, connectivityResult, Double.NaN, List.of()));   // fast DC moves no tap
 
                 List<Indexed<OperatorStrategy>> strategies = strategySetup.operatorStrategiesByContingencyId().get(contingency.getId());
                 if (strategies != null) {
@@ -1117,7 +1118,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             Contingency contingency = sc.connectivity().getPropagatedContingency().getContingency();
             OperatorStrategy operatorStrategy = sc.operatorStrategy().value();
             List<LfAction> lfActions = sc.lfOperatorStrategy().getActions();
-            ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
+            ReportNode osSimReportNode = LfReports.createOperatorStrategySimulation(sc.contingencyReportNode(), operatorStrategy.getId());
             lfNetwork.setReportNode(osSimReportNode);
 
             int emitted = records[i];
@@ -1167,7 +1168,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                 Predicate<LfBranch> isBranchDisabled = lostBuses.isEmpty() && partialDisabled.isEmpty() ? disabledBranches::contains
                         : b -> disabledBranches.contains(b) || partialDisabled.contains(b) || lostBuses.contains(b.getBus1()) || lostBuses.contains(b.getBus2());
 
-                var violationManager = new LimitViolationManager(run.preContingencyLimitViolationManager(), run.limitReductions(), run.violationsParameters());
+                var violationManager = new LimitViolationManager(run.preContingencyLimitViolationManager(), run.limitScalings(), run.violationsParameters());
                 if (emitted > CAPACITY) {
                     violationManager.detectViolations(lfNetwork, isBranchDisabled);
                 } else {
@@ -1712,10 +1713,10 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
     }
 
     /** The limit table, built as the host scanner reads it, and its copy on the device for the screen. */
-    private static GpuLimitTable uploadLimitTable(GpuDcSolver solver, LfNetwork lfNetwork, List<LimitReduction> limitReductions, double dcPowerFactor) {
+    private static GpuLimitTable uploadLimitTable(GpuDcSolver solver, LfNetwork lfNetwork, List<LimitScaling> limitScalings, double dcPowerFactor) {
         int branchCount = lfNetwork.getBranches().size();
-        LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
-        GpuLimitTable table = GpuLimitTable.build(lfNetwork, limitReductionManager);
+        LimitScalingManager limitScalingManager = LimitScalingManager.create(limitScalings);
+        GpuLimitTable table = GpuLimitTable.build(lfNetwork, limitScalingManager);
         int groupCount = table.groupCount();
         int[] branchGroupStart = new int[branchCount];
         int[] branchGroupEnd = new int[branchCount];

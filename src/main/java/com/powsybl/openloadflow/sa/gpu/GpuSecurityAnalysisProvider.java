@@ -16,7 +16,6 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.gpu.GpuLoadFlowProvider;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
-import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -171,7 +170,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
                         dcConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
                 return dcAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
                         runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(),
-                        runParameters.getLimitReductions())
+                        runParameters.getLimitScalings())
                         .whenComplete((r, t) -> restoreThreadCount(runParameters.getSecurityAnalysisParameters(), dcRequestedThreads));
             }
             return super.run(network, workingVariantId, contingenciesProvider, runParameters);

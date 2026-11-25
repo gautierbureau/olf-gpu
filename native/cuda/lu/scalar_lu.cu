@@ -389,8 +389,8 @@ void solveScalarLaneColumns(ScalarLu& lu, int lane, int cols, const double* b, d
     if (lane < 0 || lane >= lu.width) {
         throw std::runtime_error("solveScalarLaneColumns: lane " + std::to_string(lane) + " not in the last factorization");
     }
-    const dim3 tileBlock(TILE, TILE_ROWS);
-    const dim3 vectorGrid((lu.n + TILE - 1) / TILE, (cols + TILE - 1) / TILE);
+    const dim3 tileBlock(LU_TILE, LU_TILE_ROWS);
+    const dim3 vectorGrid((lu.n + LU_TILE - 1) / LU_TILE, (cols + LU_TILE - 1) / LU_TILE);
     // the column-major right-hand sides into the factors' row order, interleaved by column: the batch's own
     // permutation with the columns in the place of the lanes
     toInterleaved<<<vectorGrid, tileBlock, 0, stream>>>(lu.n, lu.n, cols, cols, identityLanes, nullptr, lu.dRowPosition.as<int>(),

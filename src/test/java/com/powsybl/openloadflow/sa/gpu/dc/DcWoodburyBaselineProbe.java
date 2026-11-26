@@ -145,6 +145,29 @@ class DcWoodburyBaselineProbe {
                 kept.forEach(s -> System.out.printf("DC-BASELINE replay %s: %s%n", s.getId(), s.getConditionalActions().get(0).getActionIds()));
             }
         }
+        // OLF_DC_SUBSETS=1 (with a replay): each strategy also as one strategy per action alone and one per action left out,
+        // labelled by the action's index and traits (never its id), reported against the load flows with OLF_DC_TRUTH
+        if (study != null && "1".equals(System.getenv("OLF_DC_SUBSETS"))) {
+            List<com.powsybl.contingency.strategy.OperatorStrategy> expanded = new ArrayList<>();
+            for (com.powsybl.contingency.strategy.OperatorStrategy st : study.strategies()) {
+                var conditional = st.getConditionalActions().get(0);
+                List<String> ids = conditional.getActionIds();
+                expanded.add(st);
+                SUBSET_LABELS.put(st.getId(), "all " + ids.size());
+                for (int i = 0; i < ids.size(); i++) {
+                    List<String> without = new ArrayList<>(ids);
+                    without.remove(i);
+                    String trait = switchTraits(network, study.actions(), ids.get(i));
+                    for (var sub : List.of(Map.entry("only", List.of(ids.get(i))), Map.entry("without", without))) {
+                        String subId = st.getId() + "#" + sub.getKey() + i;
+                        expanded.add(new com.powsybl.contingency.strategy.OperatorStrategy(subId, st.getContingencyContext(),
+                                conditional.getCondition(), sub.getValue()));
+                        SUBSET_LABELS.put(subId, sub.getKey() + " " + i + " " + trait);
+                    }
+                }
+            }
+            study = new TopologyStudy.Study(study.actions(), expanded, study.description() + ", subsets " + expanded.size());
+        }
         if (study != null) {
             System.out.printf("DC-BASELINE study: %s%n", study.description());
         }
@@ -208,6 +231,7 @@ class DcWoodburyBaselineProbe {
                 Map<String, Map<String, Double>> truth = truthFlows(network, contingencies, monitoredBranches);
                 distanceToTruth(truth, klu);
                 distanceToTruth(truth, gpu);
+                subsetReport(truth, List.of(klu, gpu));
             }
             compare(klu, gpu, contingencies.size(),
                     new FlowTolerance(baseAccuracy, network,
@@ -410,6 +434,53 @@ class DcWoodburyBaselineProbe {
             variants.setWorkingVariant(base);
             variants.removeVariant(id);
         }
+    }
+
+    /** OLF_DC_SUBSETS: each expanded strategy's label (index and traits, no id). */
+    private static final Map<String, String> SUBSET_LABELS = new LinkedHashMap<>();
+
+    private static String switchTraits(Network network, List<com.powsybl.action.Action> actions, String actionId) {
+        var action = actions.stream().filter(a -> a.getId().equals(actionId)).findFirst().orElseThrow();
+        if (!(action instanceof com.powsybl.action.SwitchAction w)) {
+            return action.getType();
+        }
+        var sw = network.getSwitch(w.getSwitchId());
+        return (w.isOpen() ? "open" : "close") + (sw == null ? " missing" : (sw.isOpen() == w.isOpen() ? " no-op " : " toggles ") + sw.getKind()
+                + (sw.isRetained() ? " retained" : ""));
+    }
+
+    /** OLF_DC_SUBSETS: per expanded strategy, each arm's worst distance to the load flow and to it in the actions' effect. */
+    private static void subsetReport(Map<String, Map<String, Double>> truth, List<Arm> arms) {
+        if (SUBSET_LABELS.isEmpty()) {
+            return;
+        }
+        List<Map<String, Map<String, Double>>> flows = arms.stream().map(a -> monitoredP1(a.result())).toList();
+        for (com.powsybl.contingency.strategy.OperatorStrategy st : study.strategies()) {
+            String ctg = st.getContingencyContext().getContingencyId();
+            Map<String, Double> ts = truth.get("strategy " + st.getId());
+            Map<String, Double> tc = truth.get(ctg);
+            StringBuilder line = new StringBuilder(String.format("DC-BASELINE subset %-40s LF effect %.3e", SUBSET_LABELS.get(st.getId()),
+                    maxDiff(ts, tc)));
+            for (int k = 0; k < arms.size(); k++) {
+                Map<String, Double> as = flows.get(k).get("strategy " + st.getId());
+                line.append(String.format(" | %s vs LF %.3e", arms.get(k).name(), as == null ? Double.NaN : maxDiff(as, ts)));
+            }
+            System.out.println(line);
+        }
+    }
+
+    private static double maxDiff(Map<String, Double> a, Map<String, Double> b) {
+        if (a == null || b == null) {
+            return Double.NaN;
+        }
+        double d = 0;
+        for (var e : a.entrySet()) {
+            Double v = b.get(e.getKey());
+            if (v != null && Double.isFinite(e.getValue() + v)) {
+                d = Math.max(d, Math.abs(e.getValue() - v));
+            }
+        }
+        return d;
     }
 
     /** How far an arm's monitored flows are from the plain DC load flows, per kind of state, counts only. */

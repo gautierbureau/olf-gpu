@@ -472,6 +472,32 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertFalse(cpu.getOperatorStrategyResults().isEmpty(), "the strategies must have produced results");
     }
 
+    /**
+     * Two tap targets on one phase shifter whose reactance changes with the tap, in two strategies: OLF gives the two
+     * action elements one column (one branch) but each its own Woodbury terms (new model, new angle); with the terms kept
+     * per column, one strategy was solved with the other's tap (here 119.5 MW instead of 100 MW on PS1).
+     */
+    @Test
+    void twoTapTargetsOnOnePhaseShifterMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        // steps 0 and 2 change the reactance (-50 %, +100 %) and the angle; the base is step 1
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wtExaggerateRxgbTable();
+        addActivePowerLimits(network, 0.7);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pstTap0", "PS1", false, 0),
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pstTap2", "PS1", false, 2));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyTap0", ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pstTap0")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyTap2", ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pstTap2")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, strategyMonitors(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        assertEquals(2, cpu.getOperatorStrategyResults().size());
+    }
+
     /** Two phase shifters re-tapped together (two action elements in one Woodbury system). */
     @Test
     void twoPhaseTapActionsMatchStock() {

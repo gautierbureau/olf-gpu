@@ -239,8 +239,8 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     ConnectivityBreakAnalysis.createContingencyElementsIndexByBranchId(propagatedContingencies, lfNetwork, equationSystem,
                             Collections.emptyList(), creationParameters);   // no permanent contingency branch, as the stock
 
-            // operator strategies: the stock's indexes, the needed actions, and one action element per branch an
-            // action switches or shifts (its S column is appended after the contingency elements')
+            // operator strategies: the stock's indexes, the needed actions, and their action elements (each one's S column
+            // appended after the contingency elements', see deviceColumn)
             Map<String, Action> actionsById = Actions.indexById(actions);
             Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId =
                     OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, true);
@@ -1429,9 +1429,18 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
     private int actionElementOffset;
 
-    /** A device column index for any computed element: contingency elements at OLF's index, action elements after them. */
+    /** Each action element's own column, after the contingency elements' (see deviceColumn). */
+    private final Map<ComputedElement, Integer> actionElementColumn = new IdentityHashMap<>();
+
+    /**
+     * A device column index for any computed element: contingency elements at OLF's index, action elements after them, one
+     * column each. OLF gives the action elements of one branch a single column (their +1/-1 rows are the same), but each
+     * keeps its own Woodbury terms (WoodburyEngine reads them from the element: a tap action's new model, a switch's open
+     * or close); the device keeps those terms per column, so two actions on one branch with different effects (two tap
+     * targets, an open and a close) need two columns.
+     */
     private int deviceColumn(ComputedElement element) {
-        return element instanceof ComputedContingencyElement ? element.getComputedElementIndex() : actionElementOffset + element.getComputedElementIndex();
+        return element instanceof ComputedContingencyElement ? element.getComputedElementIndex() : actionElementOffset + actionElementColumn.get(element);
     }
 
     /**
@@ -1444,7 +1453,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                                 Collection<ComputedContingencyElement> contingencyElements, List<ComputedElement> actionElements,
                                 StrategySetup strategySetup) {
         actionElementOffset = contingencyElements.stream().mapToInt(ComputedContingencyElement::getComputedElementIndex).max().orElse(-1) + 1;
-        int actionCount = actionElements.stream().mapToInt(ComputedElement::getComputedElementIndex).max().orElse(-1) + 1;
+        actionElementColumn.clear();
+        for (ComputedElement element : actionElements) {
+            actionElementColumn.putIfAbsent(element, actionElementColumn.size());
+        }
+        int actionCount = actionElementColumn.size();
         int elementCount = actionElementOffset + actionCount;
         int[] rowPlus = new int[elementCount];
         int[] rowMinus = new int[elementCount];

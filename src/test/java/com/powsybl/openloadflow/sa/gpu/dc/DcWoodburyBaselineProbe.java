@@ -21,6 +21,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
+import com.powsybl.openloadflow.sa.gpu.StrategyLists;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
@@ -53,7 +54,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>Knobs: {@code OLF_DC_MAX_CTG} caps the contingency list (default: all), {@code OLF_DC_THREADS}
  * sets the CPU arms' threadCount (default 8 — the GPU arm is single-threaded by construction), {@code OLF_DC_MONITORED} the number of monitored branches
- * (default 100), {@code OLF_DC_SKIP_CUDSS=1} runs the KLU arm only (CPU profiling runs).
+ * (default 100), {@code OLF_DC_SKIP_CUDSS=1} runs the KLU arm only (CPU profiling runs). The operator strategies are
+ * either a generated topology study ({@code OLF_DC_STRATEGIES}) or the operator's own lists
+ * ({@code OLF_DC_ACTIONS_FILE} + {@code OLF_DC_OPERATOR_STRATEGIES_FILE}, read by {@link StrategyLists}).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -107,15 +110,40 @@ class DcWoodburyBaselineProbe {
                         // OLF_DC_KINDS: the topological strategy kinds cycled through (coupler, move, breaker)
                         System.getenv("OLF_DC_KINDS") != null ? List.of(System.getenv("OLF_DC_KINDS").split(",")) : TopologyStudy.DEFAULT_KINDS)
                 : null;
+        // OLF_DC_ACTIONS_FILE=<json> + OLF_DC_OPERATOR_STRATEGIES_FILE=<json>: the operator's action and strategy lists in
+        // powsybl's own formats (ActionList, OperatorStrategyList), read as the AC comparison reads them;
+        // OLF_DC_STRATEGY_ACTION_TYPES=<type>[,<type>] keeps the strategies whose actions are all of these types
+        String actionsFile = System.getenv("OLF_DC_ACTIONS_FILE");
+        String operatorStrategiesFile = System.getenv("OLF_DC_OPERATOR_STRATEGIES_FILE");
+        if (actionsFile != null || operatorStrategiesFile != null) {
+            if (study != null) {
+                throw new IllegalArgumentException("OLF_DC_STRATEGIES generates a study: not with the operator's lists");
+            }
+            StrategyLists.Lists lists = StrategyLists.read(Path.of(Objects.requireNonNull(actionsFile, "OLF_DC_ACTIONS_FILE")),
+                    Path.of(Objects.requireNonNull(operatorStrategiesFile, "OLF_DC_OPERATOR_STRATEGIES_FILE")), network, contingencies,
+                    StrategyLists.types("OLF_DC_STRATEGY_ACTION_TYPES"), null);
+            // the strategies OLF's fast DC security analysis rejects the whole analysis for are left out of both arms
+            lists = StrategyLists.withoutClosesTowardsDeadParts(lists, network);
+            study = new TopologyStudy.Study(lists.actions(), lists.strategies(), "STRATEGIES from lists: " + lists.summary());
+            // OLF_DC_LISTS_ONLY=1: read the lists against the network, print their counts, run nothing
+            if ("1".equals(System.getenv("OLF_DC_LISTS_ONLY"))) {
+                System.out.printf("DC-BASELINE study: %s%n", study.description());
+                assumeTrue(false, "lists only");
+            }
+        }
         // OLF_DC_ONLY_STRATEGIES=id,id: replay these strategies of the study alone, with their contingencies (diagnosis)
-        String onlyStrategies = System.getenv("OLF_DC_ONLY_STRATEGIES");
+        // OLF_DC_ONLY_STRATEGIES_FILE=<file>: the same, the ids read from a file (one per line) and never printed
+        String onlyStrategiesFile = System.getenv("OLF_DC_ONLY_STRATEGIES_FILE");
+        String onlyStrategies = onlyStrategiesFile != null ? readIds(Path.of(onlyStrategiesFile)) : System.getenv("OLF_DC_ONLY_STRATEGIES");
         if (study != null && onlyStrategies != null && !onlyStrategies.isEmpty()) {
             Set<String> ids = Set.of(onlyStrategies.split(","));
             List<com.powsybl.contingency.strategy.OperatorStrategy> kept = study.strategies().stream().filter(s -> ids.contains(s.getId())).toList();
             Set<String> ctgIds = kept.stream().map(s -> s.getContingencyContext().getContingencyId()).collect(Collectors.toSet());
             contingencies = contingencies.stream().filter(c -> ctgIds.contains(c.getId())).toList();
             study = new TopologyStudy.Study(study.actions(), kept, study.description() + ", replaying " + kept.size());
-            kept.forEach(s -> System.out.printf("DC-BASELINE replay %s: %s%n", s.getId(), s.getConditionalActions().get(0).getActionIds()));
+            if (onlyStrategiesFile == null) {
+                kept.forEach(s -> System.out.printf("DC-BASELINE replay %s: %s%n", s.getId(), s.getConditionalActions().get(0).getActionIds()));
+            }
         }
         if (study != null) {
             System.out.printf("DC-BASELINE study: %s%n", study.description());
@@ -167,6 +195,19 @@ class DcWoodburyBaselineProbe {
             if ("1".equals(System.getenv("OLF_DC_REFERENCE"))) {
                 Arm reference = run(REFERENCE, new SparseMatrixFactory(), network, contingencies, monitoredBranches, threads);
                 printBranches(List.of(reference, klu, gpu));
+                distance(reference, klu);
+                distance(reference, gpu);
+            }
+            distance(klu, gpu);
+            if (study != null) {
+                strategyCensus(klu, gpu, network, contingencies);
+            }
+            // OLF_DC_TRUTH=1 (small replays): each state as a plain DC load flow on the network with the contingency and the
+            // strategy's actions applied, the arms' monitored flows against it
+            if ("1".equals(System.getenv("OLF_DC_TRUTH"))) {
+                Map<String, Map<String, Double>> truth = truthFlows(network, contingencies, monitoredBranches);
+                distanceToTruth(truth, klu);
+                distanceToTruth(truth, gpu);
             }
             compare(klu, gpu, contingencies.size(),
                     new FlowTolerance(baseAccuracy, network,
@@ -325,6 +366,248 @@ class DcWoodburyBaselineProbe {
         assertTrue(worstP1Ratio <= 1, "monitored P1 beyond the tolerance: " + worstP1);
     }
 
+    /** The monitored side-1 flows of each state from a plain DC load flow on the modified network (keys as monitoredP1's). */
+    private static Map<String, Map<String, Double>> truthFlows(Network network, List<Contingency> contingencies, List<String> monitoredBranches) {
+        LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
+        lfp.setDc(true);
+        Map<String, Contingency> contingencyById = new HashMap<>();
+        contingencies.forEach(c -> contingencyById.put(c.getId(), c));
+        Map<String, com.powsybl.action.Action> actionById = new HashMap<>();
+        study.actions().forEach(x -> actionById.put(x.getId(), x));
+        Map<String, Map<String, Double>> truth = new HashMap<>();
+        for (Contingency c : contingencies) {
+            truth.put(c.getId(), truthState(network, c, List.of(), monitoredBranches, lfp));
+        }
+        for (com.powsybl.contingency.strategy.OperatorStrategy st : study.strategies()) {
+            List<com.powsybl.action.Action> acts = st.getConditionalActions().stream().flatMap(ca -> ca.getActionIds().stream())
+                    .map(actionById::get).toList();
+            truth.put("strategy " + st.getId(), truthState(network, contingencyById.get(st.getContingencyContext().getContingencyId()), acts,
+                    monitoredBranches, lfp));
+        }
+        return truth;
+    }
+
+    private static Map<String, Double> truthState(Network network, Contingency contingency, List<com.powsybl.action.Action> actions,
+                                                  List<String> monitoredBranches, LoadFlowParameters lfp) {
+        var variants = network.getVariantManager();
+        String base = variants.getWorkingVariantId();
+        String id = "dc-truth";
+        variants.cloneVariant(base, id, true);
+        variants.setWorkingVariant(id);
+        try {
+            contingency.toModification().apply(network);
+            actions.forEach(a -> a.toModification().apply(network));
+            com.powsybl.loadflow.LoadFlow.find("OpenLoadFlow").run(network, id, com.powsybl.computation.local.LocalComputationManager.getDefault(), lfp);
+            Map<String, Double> flows = new HashMap<>();
+            for (String b : monitoredBranches) {
+                Branch<?> branch = network.getBranch(b);
+                if (branch != null) {
+                    flows.put(b, branch.getTerminal1().isConnected() ? branch.getTerminal1().getP() : Double.NaN);
+                }
+            }
+            return flows;
+        } finally {
+            variants.setWorkingVariant(base);
+            variants.removeVariant(id);
+        }
+    }
+
+    /** How far an arm's monitored flows are from the plain DC load flows, per kind of state, counts only. */
+    private static void distanceToTruth(Map<String, Map<String, Double>> truth, Arm arm) {
+        distance(new Arm("DC-LF", null, 0), truth, arm);
+        // the actions' effect alone: each strategy's flows minus its contingency's, in the arm and in the load flows; a
+        // model difference both states share (outer loops, HVDC emulation, slack limits) cancels out
+        Map<String, Map<String, Double>> flows = monitoredP1(arm.result());
+        int compared = 0;
+        int above1 = 0;
+        double worst = 0;
+        double worstEffect = 0;
+        for (com.powsybl.contingency.strategy.OperatorStrategy st : study.strategies()) {
+            String ctg = st.getContingencyContext().getContingencyId();
+            Map<String, Double> ts = truth.get("strategy " + st.getId());
+            Map<String, Double> tc = truth.get(ctg);
+            Map<String, Double> as = flows.get("strategy " + st.getId());
+            Map<String, Double> ac = flows.get(ctg);
+            if (ts == null || tc == null || as == null || ac == null) {
+                continue;
+            }
+            compared++;
+            double d = 0;
+            for (String b : ts.keySet()) {
+                Double v1 = ts.get(b);
+                Double v2 = tc.get(b);
+                Double v3 = as.get(b);
+                Double v4 = ac.get(b);
+                if (v1 != null && v2 != null && v3 != null && v4 != null && Double.isFinite(v1 + v2 + v3 + v4)) {
+                    d = Math.max(d, Math.abs((v3 - v4) - (v1 - v2)));
+                    worstEffect = Math.max(worstEffect, Math.abs(v1 - v2));
+                }
+            }
+            above1 += d > 1 ? 1 : 0;
+            worst = Math.max(worst, d);
+        }
+        System.out.printf("DC-BASELINE vs DC-LF: %s action effect: %d strategies compared, %d > 1 MW, worst %.3e MW (largest effect in the load flows %.3e MW)%n",
+                arm.name(), compared, above1, worst, worstEffect);
+    }
+
+    /**
+     * The features of the strategies whose monitored flows differ by more than 1e-3 MW between two arms, against those
+     * of every strategy: a histogram of feature tuples, counts only (network data rule).
+     */
+    private static void strategyCensus(Arm a, Arm b, Network network, List<Contingency> contingencies) {
+        Map<String, Map<String, Double>> pa = monitoredP1(a.result());
+        Map<String, Map<String, Double>> pb = monitoredP1(b.result());
+        Map<String, Contingency> contingencyById = new HashMap<>();
+        contingencies.forEach(c -> contingencyById.put(c.getId(), c));
+        Map<String, com.powsybl.action.Action> actionById = new HashMap<>();
+        study.actions().forEach(x -> actionById.put(x.getId(), x));
+        // whether the contingency splits the network (created components, lost load or generation), the first arm's
+        Map<String, String> splits = new HashMap<>();
+        for (PostContingencyResult p : a.result().getPostContingencyResults()) {
+            var c = p.getConnectivityResult();
+            splits.put(p.getContingency().getId(), c.getCreatedSynchronousComponentCount() + (c.getDisconnectedLoadActivePower() != 0
+                    || c.getDisconnectedGenerationActivePower() != 0 ? "+lost" : ""));
+        }
+        // the distinct effects the run's actions have on each element (a tap target, open or close): OLF gives every action
+        // element on one branch the same column, each with its own terms
+        Map<String, Set<String>> effectsByElement = new HashMap<>();
+        for (com.powsybl.action.Action x : study.actions()) {
+            if (x instanceof com.powsybl.action.PhaseTapChangerTapPositionAction t) {
+                effectsByElement.computeIfAbsent(t.getTransformerId(), k -> new HashSet<>()).add((t.isRelativeValue() ? "r" : "a") + t.getTapPosition());
+            } else if (x instanceof com.powsybl.action.SwitchAction w) {
+                effectsByElement.computeIfAbsent(w.getSwitchId(), k -> new HashSet<>()).add(w.isOpen() ? "open" : "close");
+            }
+        }
+        Map<String, Long> all = new TreeMap<>();
+        Map<String, Long> differing = new TreeMap<>();
+        List<String> differingIds = new ArrayList<>();
+        for (com.powsybl.contingency.strategy.OperatorStrategy st : study.strategies()) {
+            Map<String, Double> va = pa.get("strategy " + st.getId());
+            Map<String, Double> vb = pb.get("strategy " + st.getId());
+            if (va == null || vb == null) {
+                continue;
+            }
+            double d = 0;
+            for (var e : va.entrySet()) {
+                Double o = vb.get(e.getKey());
+                if (o != null && Double.isFinite(o) && Double.isFinite(e.getValue())) {
+                    d = Math.max(d, Math.abs(o - e.getValue()));
+                }
+            }
+            boolean shared = st.getConditionalActions().stream().flatMap(ca -> ca.getActionIds().stream()).map(actionById::get)
+                    .map(x -> x instanceof com.powsybl.action.PhaseTapChangerTapPositionAction t ? t.getTransformerId()
+                            : x instanceof com.powsybl.action.SwitchAction w ? w.getSwitchId() : null)
+                    .anyMatch(id -> id != null && effectsByElement.get(id).size() > 1);
+            String features = "elementWithOtherEffects=" + shared + " "
+                    + strategyFeatures(st, contingencyById.get(st.getContingencyContext().getContingencyId()), actionById, network)
+                    + " ctgSplits=" + splits.getOrDefault(st.getContingencyContext().getContingencyId(), "?");
+            all.merge(features, 1L, Long::sum);
+            if (d > 1e-3) {
+                differing.merge(features, 1L, Long::sum);
+                differingIds.add(st.getId());
+            }
+        }
+        // OLF_DC_DIFFERING_OUT=<file>: the differing strategies' ids, written to the file only (a replay's input)
+        String differingOut = System.getenv("OLF_DC_DIFFERING_OUT");
+        if (differingOut != null) {
+            try {
+                Files.write(Path.of(differingOut), differingIds);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+        all.forEach((f, n) -> System.out.printf("DC-BASELINE census %s vs %s: %d of %d differ > 1e-3 MW | %s%n", a.name(), b.name(),
+                differing.getOrDefault(f, 0L), n, f));
+    }
+
+    /** A strategy's features, id-free. */
+    private static String strategyFeatures(com.powsybl.contingency.strategy.OperatorStrategy st, Contingency contingency,
+                                           Map<String, com.powsybl.action.Action> actionById, Network network) {
+        List<String> ids = st.getConditionalActions().stream().flatMap(ca -> ca.getActionIds().stream()).toList();
+        Set<String> ctgElements = contingency == null ? Set.of()
+                : contingency.getElements().stream().map(com.powsybl.contingency.ContingencyElement::getId).collect(Collectors.toSet());
+        Set<String> types = new TreeSet<>();
+        Set<String> traits = new TreeSet<>();
+        Set<String> touched = new HashSet<>();
+        for (String id : ids) {
+            com.powsybl.action.Action x = actionById.get(id);
+            types.add(x.getType());
+            String element = null;
+            if (x instanceof com.powsybl.action.PhaseTapChangerTapPositionAction p) {
+                element = p.getTransformerId();
+                traits.add(p.isRelativeValue() ? "relative" : "absolute");
+                p.getSide().ifPresent(side -> traits.add("3wt-leg"));
+                var t2 = network.getTwoWindingsTransformer(element);
+                if (t2 != null && t2.getPhaseTapChanger() != null) {
+                    var ptc = t2.getPhaseTapChanger();
+                    int target = p.isRelativeValue() ? ptc.getTapPosition() + p.getTapPosition() : p.getTapPosition();
+                    traits.add(target == ptc.getTapPosition() ? "same-tap" : "new-tap");
+                    traits.add(ptc.isRegulating() ? "regulating" : "fixed");
+                    traits.add(t2.getTerminal1().isConnected() && t2.getTerminal2().isConnected() ? "connected" : "open-side");
+                }
+            } else if (x instanceof com.powsybl.action.SwitchAction w) {
+                element = w.getSwitchId();
+                var sw = network.getSwitch(element);
+                traits.add(w.isOpen() ? "open" : "close");
+                if (sw != null) {
+                    traits.add(sw.isOpen() == w.isOpen() ? "no-op" : "toggles");
+                    traits.add(sw.getKind().name());
+                }
+            }
+            if (element != null) {
+                if (ctgElements.contains(element)) {
+                    traits.add("acts-on-the-outage");
+                }
+                if (!touched.add(element)) {
+                    traits.add("same-element-twice");
+                }
+            }
+        }
+        return String.format("actions=%d types=%s ctgElements=%d traits=%s", ids.size(), types, ctgElements.size(), traits);
+    }
+
+    /**
+     * How far an arm's monitored flows are from another arm's (e.g. the non-fast DC security analysis), per kind of state:
+     * the number of states with a flow more than 1e-6 MW and 1e-3 MW away, and the largest distance. Counts only.
+     */
+    private static void distance(Arm reference, Arm arm) {
+        distance(reference, monitoredP1(reference.result()), arm);
+    }
+
+    private static void distance(Arm reference, Map<String, Map<String, Double>> ref, Arm arm) {
+        Map<String, Map<String, Double>> other = monitoredP1(arm.result());
+        for (String kind : List.of("contingency", "strategy")) {
+            int states = 0;
+            int above1e6 = 0;
+            int above1e3 = 0;
+            int missing = 0;
+            double worst = 0;
+            for (var e : ref.entrySet()) {
+                if (e.getKey().startsWith("strategy ") != "strategy".equals(kind) || "<pre-contingency>".equals(e.getKey())) {
+                    continue;
+                }
+                Map<String, Double> o = other.get(e.getKey());
+                if (o == null) {
+                    missing++;
+                    continue;
+                }
+                states++;
+                double d = 0;
+                for (var b : e.getValue().entrySet()) {
+                    Double v = o.get(b.getKey());
+                    if (v != null && Double.isFinite(v) && Double.isFinite(b.getValue())) {
+                        d = Math.max(d, Math.abs(v - b.getValue()));
+                    }
+                }
+                above1e6 += d > 1e-6 ? 1 : 0;
+                above1e3 += d > 1e-3 ? 1 : 0;
+                worst = Math.max(worst, d);
+            }
+            System.out.printf("DC-BASELINE vs %s: %s %s states: %d compared, %d missing, %d > 1e-6 MW, %d > 1e-3 MW, worst %.3e MW%n",
+                    reference.name(), arm.name(), kind, states, missing, above1e6, above1e3, worst);
+        }
+    }
+
     private static Arm run(String name, MatrixFactory matrixFactory, Network network, List<Contingency> contingencies,
                            List<String> monitoredBranches, int threads) {
         return run(name, matrixFactory, network, contingencies, monitoredBranches, threads, false);
@@ -391,6 +674,15 @@ class DcWoodburyBaselineProbe {
                             + com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.TARGET_MISMATCH_COUNT.get() : "");
         }
         return new Arm(name, result, wallMs);
+    }
+
+    /** The ids of a file, one per line, comma joined. */
+    private static String readIds(Path file) {
+        try {
+            return String.join(",", Files.readAllLines(file).stream().filter(l -> !l.isBlank()).toList());
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
     private static List<Contingency> readContingencies(Path file) {

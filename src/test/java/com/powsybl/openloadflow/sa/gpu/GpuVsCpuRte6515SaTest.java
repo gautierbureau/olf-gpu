@@ -33,12 +33,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
@@ -1689,114 +1686,18 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     /**
-     * Actions and operator strategies read with powsybl's own readers (see OLF_GPU_SA_ACTIONS_FILE). Strategies on a
-     * contingency outside the run's list are dropped, as are actions no kept strategy uses.
+     * The operator's action and strategy lists (see OLF_GPU_SA_ACTIONS_FILE), read by {@link StrategyLists}.
      * OLF_GPU_SA_STRATEGY_ACTION_TYPES=<type>[,<type>] (powsybl action type names, e.g. SWITCH,LOAD) keeps the strategies
-     * whose actions are all of these types; a strategy without any action is dropped then. A strategy with an action on
-     * an element the network does not have is dropped too: OLF refuses the whole analysis for one such action
-     * (Actions.checkValidity). Counts only are printed (network data rule).
+     * whose actions are all of these types. OLF_GPU_SA_LISTS_MISSING_OUT=<csv>: every action whose element the network
+     * lacks, written to the file only. Counts only are printed (network data rule).
      */
     private void strategiesFromLists(Path actionsFile, Path operatorStrategiesFile, Network network, List<Contingency> contingencies) {
-        List<com.powsybl.action.Action> allActions = com.powsybl.action.ActionList.readJsonFile(actionsFile).getActions();
-        List<com.powsybl.contingency.strategy.OperatorStrategy> all =
-                com.powsybl.contingency.strategy.OperatorStrategyList.read(operatorStrategiesFile).getOperatorStrategies();
-        Map<String, com.powsybl.action.Action> actionById = new HashMap<>();
-        allActions.forEach(a -> actionById.put(a.getId(), a));
-        Set<String> contingencyIds = new HashSet<>();
-        contingencies.forEach(c -> contingencyIds.add(c.getId()));
-        String typesEnv = System.getenv("OLF_GPU_SA_STRATEGY_ACTION_TYPES");
-        Set<String> types = typesEnv == null ? null : Set.of(typesEnv.split(","));
-        Map<String, Long> missingByType = new TreeMap<>();
-        Set<String> missing = new HashSet<>();
-        for (com.powsybl.action.Action a : allActions) {
-            if (!elementExists(network, a)) {
-                missing.add(a.getId());
-                missingByType.merge(a.getType(), 1L, Long::sum);
-            }
-        }
-        // OLF_GPU_SA_LISTS_MISSING_OUT=<csv>: every action whose element the network lacks (type, action, element, number
-        // of strategies using it, the network's element type under that id if any), written to the file only
         String missingOut = System.getenv("OLF_GPU_SA_LISTS_MISSING_OUT");
-        if (missingOut != null) {
-            Map<String, Long> strategiesByAction = new HashMap<>();
-            all.forEach(s -> s.getConditionalActions().forEach(ca -> ca.getActionIds().forEach(id -> strategiesByAction.merge(id, 1L, Long::sum))));
-            // foundAs: what the network has under that id instead (another equipment type), empty when nothing
-            List<String> lines = new ArrayList<>(List.of("type;actionId;elementId;strategies;foundAs"));
-            for (com.powsybl.action.Action a : allActions) {
-                if (missing.contains(a.getId())) {
-                    var found = network.getIdentifiable(actionElementId(a));
-                    lines.add(a.getType() + ";" + a.getId() + ";" + actionElementId(a) + ";" + strategiesByAction.getOrDefault(a.getId(), 0L)
-                            + ";" + (found == null ? "" : found.getType()));
-                }
-            }
-            try {
-                java.nio.file.Files.write(Path.of(missingOut), lines);
-            } catch (java.io.IOException e) {
-                throw new java.io.UncheckedIOException(e);
-            }
-        }
-        List<com.powsybl.contingency.strategy.OperatorStrategy> kept = new ArrayList<>();
-        int outsideList = 0;
-        int otherTypes = 0;
-        int missingElement = 0;
-        for (com.powsybl.contingency.strategy.OperatorStrategy s : all) {
-            var context = s.getContingencyContext();
-            if (context.getContextType() == com.powsybl.contingency.ContingencyContextType.SPECIFIC
-                    && !contingencyIds.contains(context.getContingencyId())) {
-                outsideList++;
-                continue;
-            }
-            List<String> ids = s.getConditionalActions().stream().flatMap(ca -> ca.getActionIds().stream()).toList();
-            if (types != null && (ids.isEmpty() || !ids.stream().allMatch(id -> types.contains(actionById.get(id).getType())))) {
-                otherTypes++;
-                continue;
-            }
-            if (ids.stream().anyMatch(missing::contains)) {
-                missingElement++;
-                continue;
-            }
-            kept.add(s);
-        }
-        Set<String> used = new HashSet<>();
-        kept.forEach(s -> s.getConditionalActions().forEach(ca -> used.addAll(ca.getActionIds())));
-        Map<String, Long> usedTypes = new TreeMap<>();
-        List<com.powsybl.action.Action> acts = new ArrayList<>();
-        for (com.powsybl.action.Action a : allActions) {
-            if (used.contains(a.getId())) {
-                acts.add(a);
-                usedTypes.merge(a.getType(), 1L, Long::sum);
-            }
-        }
-        this.actions = List.copyOf(acts);
-        this.strategies = List.copyOf(kept);
-        System.out.printf("  STRATEGIES from lists: %d of %d kept (%d on a contingency outside the list, %d with other action types,"
-                        + " %d with an action on an element the network lacks) on %d contingencies, %d actions %s"
-                        + " | actions on a missing element: %s%n", kept.size(), all.size(), outsideList, otherTypes, missingElement,
-                kept.stream().map(x -> x.getContingencyContext().getContingencyId()).distinct().count(), acts.size(), usedTypes,
-                missingByType);
-    }
-
-    /** The element an action of the loaded lists acts on. */
-    private static String actionElementId(com.powsybl.action.Action a) {
-        return switch (a) {
-            case com.powsybl.action.SwitchAction s -> s.getSwitchId();
-            case com.powsybl.action.LoadAction l -> l.getLoadId();
-            case com.powsybl.action.GeneratorAction g -> g.getGeneratorId();
-            case com.powsybl.action.PhaseTapChangerTapPositionAction p -> p.getTransformerId();
-            default -> "";
-        };
-    }
-
-    /** Whether the network has the element an action of the loaded lists acts on (the types OLF checks). */
-    private static boolean elementExists(Network network, com.powsybl.action.Action a) {
-        return switch (a) {
-            case com.powsybl.action.SwitchAction s -> network.getSwitch(s.getSwitchId()) != null;
-            case com.powsybl.action.LoadAction l -> network.getLoad(l.getLoadId()) != null;
-            case com.powsybl.action.GeneratorAction g -> network.getGenerator(g.getGeneratorId()) != null;
-            case com.powsybl.action.PhaseTapChangerTapPositionAction p -> network.getTwoWindingsTransformer(p.getTransformerId()) != null
-                    || network.getThreeWindingsTransformer(p.getTransformerId()) != null;
-            default -> true;
-        };
+        StrategyLists.Lists lists = StrategyLists.read(actionsFile, operatorStrategiesFile, network, contingencies,
+                StrategyLists.types("OLF_GPU_SA_STRATEGY_ACTION_TYPES"), missingOut == null ? null : Path.of(missingOut));
+        this.actions = lists.actions();
+        this.strategies = lists.strategies();
+        System.out.printf("  STRATEGIES from lists: %s%n", lists.summary());
     }
 
     /** One violation's identity across the arms. The LOCATION is part of it: a voltage level split into several buses

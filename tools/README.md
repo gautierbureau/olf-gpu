@@ -15,6 +15,7 @@ Tests and benchmarks of the built extension. Each runs from any directory (it ch
 | `sweep_ordering.sh` | the benchmark (or, with `suite`, the whole test suite) once per cuDSS reordering algorithm |
 | `track-numbers.sh` | the production SA benchmark and `run_bench.sh`, then one row appended to `docs/numbers.md` |
 | `run_lu_host_check.sh` | the host check of our batched LU's transposed solve (`native/host/lu_transposed_check.cpp`): g++ only, no GPU; CSR systems as arguments are checked too |
+| `ray-sa/ray_sa.py` | stock OLF (CPU) security analysis through pypowsybl, split over the machines of a Ray cluster and merged; `--check` compares against one single-machine run (see `ray-sa/README.md`). Needs `pip install pypowsybl ray pandas`, no GPU |
 
 ## Investigation helpers
 

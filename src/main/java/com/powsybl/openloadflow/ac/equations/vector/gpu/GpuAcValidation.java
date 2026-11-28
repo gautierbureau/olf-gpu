@@ -57,10 +57,16 @@ final class GpuAcValidation {
             com.powsybl.openloadflow.ac.equations.LoadModelActiveFlowEquationTerm.class,
             com.powsybl.openloadflow.ac.equations.LoadModelReactiveFlowEquationTerm.class);
 
-    // the closed-branch equation-term arrays of the VECTORIZED equation system
-    // (AcVectorizedEquationSystemCreator) — the GPU covers exactly the same physics
+    // the equation-term arrays of the VECTORIZED equation system (AcVectorizedEquationSystemCreator) — the GPU covers
+    // exactly the same physics: the closed branches, the branches open at one side, the shunts, the HVDC lines in AC
+    // emulation and the voltage-dependent loads, whose device families GpuAcFamilyPacker builds from the network (as for
+    // their scalar terms)
     private static final Set<String> SUPPORTED_ARRAY_EVALUATORS = Set.of(
-            "ac_p_array_closed_1", "ac_p_array_closed_2", "ac_q_array_closed_1", "ac_q_array_closed_2");
+            "ac_p_array_closed_1", "ac_p_array_closed_2", "ac_q_array_closed_1", "ac_q_array_closed_2",
+            "ac_p_array_open_1", "ac_p_array_open_2", "ac_q_array_open_1", "ac_q_array_open_2",
+            "ac_p_array_shunt", "ac_q_array_shunt",
+            "ac_emulation_p_array_1", "ac_emulation_p_array_2",
+            "ac_load_p_array", "ac_load_q_array");
 
     private GpuAcValidation() {
     }

@@ -255,6 +255,12 @@ final class GpuStateView {
             }
             double v1 = state[vRow[bus1.getNum()]];
             double r1 = branch.getPiModel().getR1();
+            // a vectorized open term reads the vector's arrays, as AcNetworkVector.updateOpenBranches fills them
+            AcBranchVector openVector = GpuBranchVectorValues.of(active ? branch.getOpenP1() : branch.getOpenQ1());
+            if (openVector != null) {
+                return active ? GpuBranchVectorValues.openP1(openVector, branch.getNum(), v1, r1)
+                        : GpuBranchVectorValues.openQ1(openVector, branch.getNum(), v1, r1);
+            }
             return active ? GpuBranchTermValues.openP1(branch.getOpenP1(), v1, r1)
                     : GpuBranchTermValues.openQ1(branch.getOpenQ1(), v1, r1);
         }
@@ -263,6 +269,11 @@ final class GpuStateView {
                 return 0;
             }
             double v2 = state[vRow[bus2.getNum()]];
+            AcBranchVector openVector = GpuBranchVectorValues.of(active ? branch.getOpenP2() : branch.getOpenQ2());
+            if (openVector != null) {
+                return active ? GpuBranchVectorValues.openP2(openVector, branch.getNum(), v2)
+                        : GpuBranchVectorValues.openQ2(openVector, branch.getNum(), v2);
+            }
             return active ? GpuBranchTermValues.openP2(branch.getOpenP2(), v2)
                     : GpuBranchTermValues.openQ2(branch.getOpenQ2(), v2);
         }

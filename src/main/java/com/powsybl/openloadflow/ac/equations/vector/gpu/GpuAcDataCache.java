@@ -175,6 +175,12 @@ public final class GpuAcDataCache {
         }
 
         @Override
+        public void onGeneratorStatusChange(LfGenerator generator) {
+            // which generators count in the targets of the bus changed
+            clear();
+        }
+
+        @Override
         public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
             clear();
         }

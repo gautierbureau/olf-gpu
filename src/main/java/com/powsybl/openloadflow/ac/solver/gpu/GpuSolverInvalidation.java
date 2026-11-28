@@ -179,6 +179,12 @@ final class GpuSolverInvalidation
     }
 
     @Override
+    public void onGeneratorStatusChange(LfGenerator generator) {
+        // a generator disabled or enabled, or its control type changed: which generators count in its bus's targets
+        structureChanged();
+    }
+
+    @Override
     public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
         // r1/a1 in closedBranchParameters even when the impedance stays (a pure ratio or phase move); run() downgrades
         // to VALUES

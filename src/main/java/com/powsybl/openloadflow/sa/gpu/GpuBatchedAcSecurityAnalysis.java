@@ -226,7 +226,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     @Override
     protected void restoreBaseState(com.powsybl.openloadflow.network.NetworkState networkState, LfNetwork network,
-                                    com.powsybl.openloadflow.network.LfContingency lfContingency) {
+                                    com.powsybl.openloadflow.network.LfContingency lfContingency,
+                                    com.powsybl.openloadflow.network.ModifiedElementsCollector modifiedElements) {
         GpuSaRunState run = runState.get();
         boolean targeted = lfContingency.getId().equals(run.lossReplayedFor)
                 && lfContingency.getId().equals(run.deviceAnsweredFor);
@@ -253,12 +254,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
             // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
             // writes every live bus (restoreStaleVoltages covers the rest)
+            modifiedElements.setEnabled(false);
             networkState.restore(buses, branches, false);
+            modifiedElements.setEnabled(true);
+            modifiedElements.reset();
             run.staleVoltages = networkState;
             LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
         } else {
             run.staleVoltages = null;                         // the full restore below puts every voltage back
-            super.restoreBaseState(networkState, network, lfContingency);
+            // the full restore, not OLF's default partial one: a device-answered contingency changes elements the
+            // collector does not see
+            modifiedElements.setEnabled(false);
+            networkState.restore();
+            modifiedElements.setEnabled(true);
+            modifiedElements.reset();
         }
     }
 

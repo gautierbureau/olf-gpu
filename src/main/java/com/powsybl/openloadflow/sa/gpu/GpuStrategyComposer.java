@@ -772,13 +772,12 @@ final class GpuStrategyComposer {
      * it controls voltage or remote reactive power, its target Q otherwise.
      */
     private static double[] curveLimitShift(com.powsybl.openloadflow.network.LfGenerator lfGen, double targetP, boolean extrapolate) {
-        if (!(lfGen instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator alg)
-                || lfGen.getGeneratorControlType() != com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE
+        if (lfGen.getGeneratorControlType() != com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE
                 && lfGen.getGeneratorControlType() != com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
             return new double[] {0, 0};
         }
-        var curve = alg.getReactiveLimits().filter(limits -> limits.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
-                .map(com.powsybl.iidm.network.ReactiveCapabilityCurve.class::cast).orElse(null);
+        // OLF's array form of the curve, whose limits are IIDM's to the last bit
+        var curve = lfGen.getReactiveCapabilityCurvePoints().orElse(null);
         if (curve == null) {
             return new double[] {0, 0};
         }

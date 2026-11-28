@@ -271,9 +271,7 @@ public final class VoltageControlReMerge {
 
     /** Whether the generator's reactive limits are a capability CURVE (they then depend on its target P). */
     static boolean hasCurve(com.powsybl.openloadflow.network.LfGenerator g) {
-        return g instanceof com.powsybl.openloadflow.network.impl.AbstractLfGenerator abstractLfGenerator
-                && abstractLfGenerator.getReactiveLimits().map(reactiveLimits -> reactiveLimits.getKind() == com.powsybl.iidm.network.ReactiveLimitsKind.CURVE)
-                        .orElse(false);
+        return g.getReactiveCapabilityCurvePoints().isPresent();
     }
 
     /** Whether the generator is in the distributed-slack generator pack (the device then knows its own P). */

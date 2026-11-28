@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
-import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
@@ -16,6 +15,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfOverloadManagementSystem;
 import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.OverloadManagementSystems;
 import com.powsybl.openloadflow.network.action.AbstractLfBranchAction;
 
 import java.util.ArrayList;
@@ -140,42 +140,35 @@ public final class GpuAutomationSystemOuterLoop {
     /** The tables of the network's automation systems, with the element numbering of {@code mapper} (which must pack the
      *  base-open operated branches); null when an operated or monitored branch is not a closed-branch element. */
     public static Tables build(LfNetwork network, GpuAcElementMapper mapper) {
-        List<LfOverloadManagementSystem> systems = network.getOverloadManagementSystems();
+        // OLF's table of the systems (built once per network, in the network's order)
+        OverloadManagementSystems systems = OverloadManagementSystems.of(network);
         int closedBranchCount = mapper.getClosedBranchCount();
-        int[] monitoredElement = new int[systems.size()];
-        int[] monitoredSide = new int[systems.size()];
-        int[] trippingStart = new int[systems.size() + 1];
-        List<Integer> operatedMaskSlot = new ArrayList<>();
-        List<Byte> openAction = new ArrayList<>();
-        List<Double> threshold = new ArrayList<>();
-        List<LfBranch> operatedBranches = new ArrayList<>();
-        for (int m = 0; m < systems.size(); m++) {
-            LfOverloadManagementSystem system = systems.get(m);
-            int monitored = mapper.getElementIndex(system.getMonitoredBranch());
+        int[] monitoredElement = new int[systems.count];
+        int[] monitoredSide = new int[systems.count];
+        int trippingCount = systems.firstTripping[systems.count];
+        int[] operatedMaskSlot = new int[trippingCount];
+        byte[] openActions = new byte[trippingCount];
+        List<LfBranch> operatedBranches = new ArrayList<>(trippingCount);
+        for (int m = 0; m < systems.count; m++) {
+            int monitored = mapper.getElementIndex(network.getBranch(systems.monitoredBranchNum[m]));
             if (monitored < 0 || monitored >= closedBranchCount) {
                 return null;
             }
             monitoredElement[m] = monitored;
-            monitoredSide[m] = system.getMonitoredSide() == TwoSides.ONE ? GpuTwoSides.ONE : GpuTwoSides.TWO;
-            trippingStart[m] = operatedMaskSlot.size();
-            for (LfOverloadManagementSystem.LfBranchTripping tripping : system.getBranchTrippingList()) {
-                int operated = mapper.getElementIndex(tripping.branchToOperate());
+            monitoredSide[m] = systems.monitoredSide[m] == 1 ? GpuTwoSides.ONE : GpuTwoSides.TWO;
+            for (int t = systems.firstTripping[m]; t < systems.firstTripping[m + 1]; t++) {
+                LfBranch operatedBranch = network.getBranch(systems.branchToOperateNum[t]);
+                int operated = mapper.getElementIndex(operatedBranch);
                 if (operated < 0 || operated >= closedBranchCount) {
                     return null;
                 }
-                operatedMaskSlot.add(operated);
-                openAction.add(tripping.branchOpen() ? (byte) 1 : (byte) 0);
-                threshold.add(tripping.threshold());
-                operatedBranches.add(tripping.branchToOperate());
+                operatedMaskSlot[t] = operated;
+                openActions[t] = systems.branchOpen[t] ? (byte) 1 : (byte) 0;
+                operatedBranches.add(operatedBranch);
             }
         }
-        trippingStart[systems.size()] = operatedMaskSlot.size();
-        byte[] openActions = new byte[openAction.size()];
-        for (int t = 0; t < openActions.length; t++) {
-            openActions[t] = openAction.get(t);
-        }
-        return new Tables(monitoredElement, monitoredSide, trippingStart, operatedMaskSlot.stream().mapToInt(Integer::intValue).toArray(),
-                openActions, threshold.stream().mapToDouble(Double::doubleValue).toArray(), operatedBranches);
+        return new Tables(monitoredElement, monitoredSide, systems.firstTripping.clone(), operatedMaskSlot,
+                openActions, systems.threshold.clone(), operatedBranches);
     }
 
     /** Install the run's tables, or clear the phase with null. */

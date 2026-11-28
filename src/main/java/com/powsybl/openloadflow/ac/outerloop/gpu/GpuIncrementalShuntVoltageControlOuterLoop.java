@@ -221,18 +221,10 @@ public final class GpuIncrementalShuntVoltageControlOuterLoop {
         }
     }
 
-    @SuppressWarnings("checkstyle:IllegalCatchError") // no section G table: the sections are pure B
+    /** The conductance of section {@code pos} of a shunt controller, 0 past its sections. */
     public static double shuntSectionG(LfShunt.Controller c, int pos) {
-        // no public accessor for the per-section G table (only getG() at the current position) —
-        // read-only reflection, same pattern as GpuTransformerVoltageControlOuterLoop.tapModels
-        try {
-            java.lang.reflect.Field fld = LfShunt.Controller.class.getDeclaredField("sectionsG");
-            fld.setAccessible(true);
-            List<Double> sg = (List<Double>) fld.get(c);
-            return pos < sg.size() ? sg.get(pos) : 0;
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            return 0;                                        // no G table — sections are pure-B
-        }
+        double[] sectionGs = c.getSectionGs();
+        return pos < sectionGs.length ? sectionGs[pos] : 0;
     }
 
 }

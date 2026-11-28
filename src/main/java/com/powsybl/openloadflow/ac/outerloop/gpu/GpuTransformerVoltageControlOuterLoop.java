@@ -21,8 +21,8 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfVscConverterStation;
-import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.network.PiModelArray;
+import com.powsybl.openloadflow.network.TapPiModels;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.util.gpu.GpuTrace;
@@ -793,24 +793,20 @@ public final class GpuTransformerVoltageControlOuterLoop {
         return taps;
     }
 
-    /** Full per-tap static branch rows, snapshotted read-only from {@code PiModelArray.getModels()}:
-     *  one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT closedBranchParameters packing, so a
-     *  tap/PST action's override is the target row verbatim.
+    /** Full per-tap static branch rows, from OLF's per-tap columns ({@code PiModelArray.getTapModels()}, read when
+     *  called): one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT closedBranchParameters packing,
+     *  so a tap/PST action's override is the target row verbatim.
      *
-     *  <p>Empty means the branch carries a continuous {@code SimplePiModel} and has no taps at all.
-     *  It used to also mean "reflection on the private field did not work", which turned a JVM
-     *  configuration into silently unrounded ratios and into whole-run CPU fallbacks that no gate
-     *  explained; the accessor is public on the patched OLF, so that failure mode is gone. */
+     *  <p>Empty means the branch carries a continuous {@code SimplePiModel} and has no taps at all. */
     public static double[][] tapModels(Object piModel) {
         if (!(piModel instanceof PiModelArray array)) {
             return new double[0][];
         }
-        List<PiModel> models = array.getModels();
-        double[][] taps = new double[models.size()][GpuPiModelColumn.COUNT];
-        for (int i = 0; i < models.size(); i++) {
-            PiModel m = models.get(i);
-            taps[i] = new double[] {m.getY(), m.getG1(), m.getG2(), m.getB1(), m.getB2(),
-                                    m.getKsi(), m.getR1(), m.getA1()};
+        TapPiModels models = array.getTapModels();
+        double[][] taps = new double[models.getTapCount()][GpuPiModelColumn.COUNT];
+        for (int i = 0; i < taps.length; i++) {
+            taps[i] = new double[] {models.y()[i], models.g1()[i], models.g2()[i], models.b1()[i], models.b2()[i],
+                                    models.ksi()[i], models.r1()[i], models.a1()[i]};
         }
         return taps;
     }

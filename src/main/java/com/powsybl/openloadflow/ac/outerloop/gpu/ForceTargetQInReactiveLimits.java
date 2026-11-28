@@ -8,8 +8,6 @@
 package com.powsybl.openloadflow.ac.outerloop.gpu;
 
 import com.powsybl.commons.PowsyblException;
-import com.powsybl.iidm.network.ReactiveCapabilityCurve;
-import com.powsybl.iidm.network.ReactiveLimitsKind;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
@@ -19,7 +17,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.impl.AbstractLfGenerator;
+import com.powsybl.openloadflow.network.ReactiveCapabilityCurvePoints;
 import com.powsybl.openloadflow.network.impl.LfGeneratorImpl;
 
 import java.util.ArrayList;
@@ -103,8 +101,7 @@ public final class ForceTargetQInReactiveLimits {
                         || gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE) {
                     continue;                                // not in the bus's generation target Q
                 }
-                var curve = ((AbstractLfGenerator) gen).getReactiveLimits()
-                        .filter(reactiveLimits -> reactiveLimits.getKind() == ReactiveLimitsKind.CURVE).orElse(null);
+                ReactiveCapabilityCurvePoints curve = gen.getReactiveCapabilityCurvePoints().orElse(null);
                 int slot = distributedSlackGeneratorIndexOf(gpuData.distributedSlack().generatorId(), gen.getId());
                 if (curve == null || slot < 0 || distributedSlackParameters.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
@@ -142,16 +139,15 @@ public final class ForceTargetQInReactiveLimits {
                     throw new PowsyblException("GPU AC solver: participating generator " + gen.getId()
                             + " on a bus outside the distributed-slack pack");
                 }
-                var points = ((ReactiveCapabilityCurve) curve).getPoints().stream()
-                        .sorted(java.util.Comparator.comparingDouble(ReactiveCapabilityCurve.Point::getP)).toList();
+                int pointCount = curve.getP().length;
                 int ptsOff = pts.size() / 3;
-                for (var pt : points) {
-                    pts.add(pt.getP());
-                    pts.add(pt.getMinQ());
-                    pts.add(pt.getMaxQ());
+                for (int k = 0; k < pointCount; k++) {
+                    pts.add(curve.getP()[k]);
+                    pts.add(curve.getMinQ()[k]);
+                    pts.add(curve.getMaxQ()[k]);
                 }
                 int pRow = gpuData.distributedSlack().busPhiRow()[distributedSlackBusIndex];
-                idx.add(new int[] {qRow, slot, ptsOff, points.size(), distributedSlackBusIndex, qRow >= 0 ? baseRowMode[qRow] : 0, reactiveLimitEntry});
+                idx.add(new int[] {qRow, slot, ptsOff, pointCount, distributedSlackBusIndex, qRow >= 0 ? baseRowMode[qRow] : 0, reactiveLimitEntry});
                 in.add(new double[] {gen.getTargetP(), gen.getRawTargetQ(), gen.getTargetQ(),
                     distributedSlackParameters.factor(gen) / busFactor, baseTargets[pRow]});
                 slots.add(slot);

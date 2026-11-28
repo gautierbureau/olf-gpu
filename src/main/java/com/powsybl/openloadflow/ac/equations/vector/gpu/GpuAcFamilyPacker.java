@@ -10,9 +10,9 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.fixedmatrix.CouplerTreeReHoming;
 import com.powsybl.openloadflow.ac.solver.gpu.codes.GpuTwoSides;
+import com.powsybl.openloadflow.network.HvdcAcEmulationVector;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.PiModel;
@@ -270,19 +270,18 @@ final class GpuAcFamilyPacker {
 
         List<double[]> hvdcAcEmulationParameters = new ArrayList<>();
         List<int[]> hvdcAcEmulationIndices = new ArrayList<>();
-        for (LfHvdc hvdc : network.getHvdcs()) {
-            if (hvdc.getBus1() == null || hvdc.getBus2() == null || !hvdc.isAcEmulation()) {
+        // OLF's table of the lines in AC emulation, in the network's order; a line missing a bus is not packed
+        HvdcAcEmulationVector hvdcs = HvdcAcEmulationVector.of(network);
+        for (int h = 0; h < hvdcs.count; h++) {
+            int bus1 = hvdcs.bus1Num[h];
+            int bus2 = hvdcs.bus2Num[h];
+            if (bus1 < 0 || bus2 < 0) {
                 continue;
             }
-            double k = hvdc.getAcEmulationControl().getDroop() * 180 / Math.PI;
-            int ph1 = phiCol[hvdc.getBus1().getNum()];
-            int ph2 = phiCol[hvdc.getBus2().getNum()];
-            int p1 = pRow[hvdc.getBus1().getNum()];
-            int p2 = pRow[hvdc.getBus2().getNum()];
-            hvdcAcEmulationParameters.add(new double[] {hvdc.getAcEmulationControl().getP0(), k,
-                hvdc.getConverterStation1().getLossFactor() / 100, hvdc.getConverterStation2().getLossFactor() / 100,
-                hvdc.getR()});
-            hvdcAcEmulationIndices.add(new int[] {p1, p2, ph1, ph2});      // [0],[1] = the two P ROWS; [2],[3] = the PHI columns
+            double k = hvdcs.droop[h] * 180 / Math.PI;
+            hvdcAcEmulationParameters.add(new double[] {hvdcs.p0[h], k, hvdcs.lossFactor1[h] / 100, hvdcs.lossFactor2[h] / 100,
+                hvdcs.r[h]});
+            hvdcAcEmulationIndices.add(new int[] {pRow[bus1], pRow[bus2], phiCol[bus1], phiCol[bus2]});      // [0],[1] = the two P ROWS; [2],[3] = the PHI columns
         }
 
         return new Packs(closedBranchParameters, closedBranchIndices, openBranchParameters, openBranchIndices,

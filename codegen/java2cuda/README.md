@@ -104,6 +104,46 @@ exactly the factoring `AcNetworkVector` does on the CPU.
   `_scatter.h` + `codegen/scatter/<family>.scatter.json` from the spec's stamp, validated by
   `../check_scatter.py`.
 
+## Rule families: an outer loop's decisions (`rules.py`)
+
+A second shape, for the decisions of an OLF outer loop once OLF holds them as static functions of
+primitives that read no network (`ReactiveLimitsDecisions`: a controlling bus switches to PQ, a bus
+switched to PQ switches back or follows a limit that moved). Same direction — the OLF Java is the
+source of truth — but nothing of the equation machinery applies:
+
+| | equation family | rule family |
+|---|---|---|
+| types | `double` only | `double`, `boolean`, `int`, in signatures and locals |
+| body | locals and helpers inlined into ONE expression | the Java statements one for one: typed locals, one `return` |
+| calls | inlined | calls between the family's functions stay calls (a function is listed before its callers) |
+| constants | spec-declared model constants | the class's `public static final int` constants, emitted as `constexpr int` |
+| output | fused routines + scatter tables | one device function per method, nothing else |
+
+- `spec_reactive_limits_decisions.py` — metadata only: the class, the methods, the reference vectors,
+  the CUDA identity. Emits `native/cuda/outerloop/generated/reactive_limits_decisions.cuh`.
+- The transpile is the Java text with `boolean` → `bool` and `Math.abs` → `fabs`. Anything else — a
+  loop, a branch, an object, a member access, an unknown identifier — fails the parse. The methods
+  that walk a `ReactiveLimitsVector` (the election of the bus kept PV, the cap on switches back)
+  have loops and are NOT transpiled.
+- Proof (`rules.prove_family`, run by `prove.py`; no finite differences — a decision has no
+  derivative):
+  - **A. parse == golden** — `codegen/golden/<family>.golden.json`, statement for statement,
+    whitespace collapsed. A rule changed in OLF fails here; `python3 codegen/java2cuda/rules.py
+    --write-golden` freezes the new one, deliberately, with the re-render.
+  - **C. render == committed** header, as text.
+  - **V. vectors** — the COMMITTED header is compiled for the host (`g++ -O2 -ffp-contract=off`, the
+    function macro defined empty) into a small generated driver that replays OLF's reference vectors
+    (`src/test/resources/reactiveLimitsDecisionsVectors.txt`, kept by OLF's
+    `ReactiveLimitsDecisionsVectorsTest`: one call per line, doubles as the hexadecimal digits of
+    their bits) and compares every result with the Java's, bit for bit. 2,644 calls: on each
+    comparison of the rules, one bit under, one bit over, far from it, undefined, then 300 seeded
+    random points. Mutating a comparison of the header (`<` to `<=`, `>` to `>=`) is caught.
+- Not proven here: that a KERNEL calls these functions with the right arguments. No kernel calls
+  them yet (the reactive-limit check still has its comparisons inline).
+- A rule that multiplies then adds would need care on the device: the host check compiles without
+  contraction, the CUDA compiler contracts to a fused multiply-add by default. None of today's rules
+  does (`minQ - tol`, `maxQ + tol`, `limit - frozenTargetQ`).
+
 ## Run
 
 ```

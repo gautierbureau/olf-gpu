@@ -25,6 +25,10 @@ line by line against the source — with the shared trig / component factoring
 made explicit as kernel locals (`sinTheta1`, `shunt2`, `reI1`, `rawP`), the same
 factoring OLF's own Java does with its locals and helpers.
 
+A second family shape, **rule families**, transpiles the DECISIONS of an outer loop (OLF's
+`ReactiveLimitsDecisions`) into `native/cuda/outerloop/generated/`: typed functions kept statement for
+statement, proven against reference vectors OLF's own test keeps — see `java2cuda/README.md`.
+
 ## Files
 
 - `java2cuda/spec_<family>.py` — one thin per-family spec, metadata only

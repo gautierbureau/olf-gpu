@@ -1,0 +1,255 @@
+{
+  "java_class": "PhaseControlDecisions",
+  "constants": [
+    [
+      "DECISION_NONE",
+      0
+    ],
+    [
+      "DECISION_SHIFT_ONE_TAP_UP",
+      1
+    ],
+    [
+      "DECISION_SHIFT_ONE_TAP_DOWN",
+      2
+    ],
+    [
+      "DECISION_REACH_PHASE_SHIFT",
+      3
+    ],
+    [
+      "DECISION_EXCEED_PHASE_SHIFT",
+      4
+    ],
+    [
+      "DECISION_INSENSITIVE",
+      5
+    ],
+    [
+      "MIN_TARGET_DEADBAND",
+      "double 1 / 100.0"
+    ],
+    [
+      "SENSI_EPS",
+      "double 1e-6"
+    ]
+  ],
+  "methods": [
+    {
+      "name": "isAboveLimit",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "i"
+        ],
+        [
+          "double",
+          "limit"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "i > limit"
+        ]
+      ]
+    },
+    {
+      "name": "discreteLimiterDecision",
+      "returns": "int",
+      "params": [
+        [
+          "double",
+          "i"
+        ],
+        [
+          "double",
+          "limit"
+        ],
+        [
+          "boolean",
+          "sensitivityPositive"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "!isAboveLimit(i, limit) ? DECISION_NONE : sensitivityPositive ? DECISION_SHIFT_ONE_TAP_DOWN : DECISION_SHIFT_ONE_TAP_UP"
+        ]
+      ]
+    },
+    {
+      "name": "halfTargetDeadband",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "targetDeadband"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "java_max(targetDeadband, MIN_TARGET_DEADBAND) / 2"
+        ]
+      ]
+    },
+    {
+      "name": "isOutOfDeadband",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "p"
+        ],
+        [
+          "double",
+          "targetP"
+        ],
+        [
+          "double",
+          "halfTargetDeadband"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(p - targetP) > halfTargetDeadband"
+        ]
+      ]
+    },
+    {
+      "name": "needsSensitivity",
+      "returns": "boolean",
+      "params": [
+        [
+          "boolean",
+          "limiter"
+        ],
+        [
+          "double",
+          "value"
+        ],
+        [
+          "double",
+          "target"
+        ],
+        [
+          "double",
+          "halfTargetDeadband"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "limiter ? isAboveLimit(value, target) : isOutOfDeadband(value, target, halfTargetDeadband)"
+        ]
+      ]
+    },
+    {
+      "name": "isSensitive",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "sensitivity"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(sensitivity) > SENSI_EPS"
+        ]
+      ]
+    },
+    {
+      "name": "phaseShift",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "value"
+        ],
+        [
+          "double",
+          "target"
+        ],
+        [
+          "double",
+          "sensitivity"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "java_to_radians((target - value) / sensitivity)"
+        ]
+      ]
+    },
+    {
+      "name": "incrementalDecision",
+      "returns": "int",
+      "params": [
+        [
+          "boolean",
+          "limiter"
+        ],
+        [
+          "double",
+          "value"
+        ],
+        [
+          "double",
+          "target"
+        ],
+        [
+          "double",
+          "halfTargetDeadband"
+        ],
+        [
+          "double",
+          "sensitivity"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "!needsSensitivity(limiter, value, target, halfTargetDeadband) ? DECISION_NONE : !isSensitive(sensitivity) ? DECISION_INSENSITIVE : limiter ? DECISION_EXCEED_PHASE_SHIFT : DECISION_REACH_PHASE_SHIFT"
+        ]
+      ]
+    },
+    {
+      "name": "isSignificantCrossImpact",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "phaseShift"
+        ],
+        [
+          "double",
+          "crossSensitivity"
+        ],
+        [
+          "double",
+          "otherI"
+        ],
+        [
+          "double",
+          "otherLimit"
+        ],
+        [
+          "double",
+          "margin"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "java_to_degrees(phaseShift) * crossSensitivity > margin * (otherI - otherLimit)"
+        ]
+      ]
+    }
+  ]
+}

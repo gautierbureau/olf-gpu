@@ -1,0 +1,158 @@
+{
+  "java_class": "AreaInterchangeControlDecisions",
+  "constants": [],
+  "methods": [
+    {
+      "name": "interchangeMismatch",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "interchange"
+        ],
+        [
+          "double",
+          "interchangeTarget"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "interchange - interchangeTarget"
+        ]
+      ]
+    },
+    {
+      "name": "interchangeMismatchWithSlack",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "interchange"
+        ],
+        [
+          "double",
+          "interchangeTarget"
+        ],
+        [
+          "double",
+          "slackDistributionFactor"
+        ],
+        [
+          "double",
+          "slackBusActivePowerMismatch"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "interchange - interchangeTarget + slackDistributionFactor * slackBusActivePowerMismatch"
+        ]
+      ]
+    },
+    {
+      "name": "isWithinMaxMismatch",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "mismatch"
+        ],
+        [
+          "double",
+          "maxMismatchMw"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(mismatch) <= maxMismatchMw / 100.0 || fabs(mismatch) <= 1e-5"
+        ]
+      ]
+    },
+    {
+      "name": "slackMargin",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "mismatch"
+        ],
+        [
+          "double",
+          "interchangeMismatchWithSlack"
+        ],
+        [
+          "double",
+          "areaInterchangePMaxMismatchMw"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "java_signum(mismatch) * interchangeMismatchWithSlack + areaInterchangePMaxMismatchMw / 100.0"
+        ]
+      ]
+    },
+    {
+      "name": "areaShare",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "mismatch"
+        ],
+        [
+          "double",
+          "factor"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(mismatch * factor) > 1e-5 ? mismatch * factor : java_signum(mismatch) * 1.01 * 1e-5"
+        ]
+      ]
+    },
+    {
+      "name": "isAboveResidue",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "mismatch"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(mismatch) > 1e-5"
+        ]
+      ]
+    },
+    {
+      "name": "remainingAfter",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "remainingMismatch"
+        ],
+        [
+          "double",
+          "areaShare"
+        ],
+        [
+          "double",
+          "areaRemaining"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "remainingMismatch - areaShare + areaRemaining"
+        ]
+      ]
+    }
+  ]
+}

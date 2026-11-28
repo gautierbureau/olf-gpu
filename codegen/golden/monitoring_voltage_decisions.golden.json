@@ -1,0 +1,91 @@
+{
+  "java_class": "MonitoringVoltageDecisions",
+  "constants": [
+    [
+      "DECISION_NONE",
+      0
+    ],
+    [
+      "DECISION_TO_PV_HIGH",
+      1
+    ],
+    [
+      "DECISION_TO_PV_LOW",
+      2
+    ],
+    [
+      "DECISION_TO_PV_HIGH_THEN_LOW",
+      3
+    ]
+  ],
+  "methods": [
+    {
+      "name": "decision",
+      "returns": "int",
+      "params": [
+        [
+          "double",
+          "controlledV"
+        ],
+        [
+          "double",
+          "lowThreshold"
+        ],
+        [
+          "double",
+          "highThreshold"
+        ]
+      ],
+      "statements": [
+        [
+          "local",
+          "boolean",
+          "above",
+          "controlledV > highThreshold"
+        ],
+        [
+          "local",
+          "boolean",
+          "below",
+          "controlledV < lowThreshold"
+        ],
+        [
+          "return",
+          "above && below ? DECISION_TO_PV_HIGH_THEN_LOW : above ? DECISION_TO_PV_HIGH : below ? DECISION_TO_PV_LOW : DECISION_NONE"
+        ]
+      ]
+    },
+    {
+      "name": "switchesAtHigh",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "decision"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "decision == DECISION_TO_PV_HIGH || decision == DECISION_TO_PV_HIGH_THEN_LOW"
+        ]
+      ]
+    },
+    {
+      "name": "switchesAtLow",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "decision"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "decision == DECISION_TO_PV_LOW || decision == DECISION_TO_PV_HIGH_THEN_LOW"
+        ]
+      ]
+    }
+  ]
+}

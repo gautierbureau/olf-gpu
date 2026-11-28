@@ -147,6 +147,21 @@ factors (`GpuLodfCalculator`).
   numbers on this base (`docs/numbers.md` DC rows are from September); (3) fold the DC dependency into
   `olf-local-patches` (one OLF version again) once the seams settle.
 
+### #97 — every outer loop's rules generated from OLF's Java (2026-11-28)
+
+The rule family of #96 extended to the decisions OLF now holds as functions of numbers for every outer loop (OLF #242
+and its follow-ups, on `gb/main-gpu-integration-arrays`): nine more families, 46 functions, each header in
+`native/cuda/outerloop/generated/` proven on the host against OLF's `OuterLoopRuleVectorsTest` vectors (boundary and
+seeded random calls of every function of numbers of each class), 18,400 calls, bit for bit. A flipped comparison is
+caught. The parser gained double constants, extern constants given by the spec (another class's, e.g. `PerUnit.SB`),
+Java overloads as C++ overloads, and Java-exact helpers for `Math.max` (NaN, -0.0), `Math.signum`, `Math.toRadians`,
+`Math.toDegrees` and `Double.isNaN`, emitted only in a header that calls them.
+
+**Not done:** no kernel calls them (each loop's kernel keeps its inline comparisons: replacing them needs the device and
+the decision records, as #96 stage 3); the functions with a branch, a loop or arrays (the ratchet walks, the
+distribution, `SecondaryVoltageControlDecisions.shouldAdjust`) are not transpiled; the AC-DC converter limits rules are
+not on the dependency (gb/all-fixes predates the loop).
+
 ### #96 — reactive limits decisions generated from OLF's Java: pilot stage 2 (2026-11-10)
 
 The array-form proposal (#94, pull request 50), stage 2. OLF's fork branch `claude/hopeful-edison-8lqr3p` (two commits

@@ -1,0 +1,187 @@
+{
+  "java_class": "IncrementalControlDecisions",
+  "constants": [
+    [
+      "DIRECTION_NONE",
+      0
+    ],
+    [
+      "DIRECTION_INCREASE",
+      1
+    ],
+    [
+      "DIRECTION_DECREASE",
+      -1
+    ]
+  ],
+  "methods": [
+    {
+      "name": "directionOf",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "from"
+        ],
+        [
+          "int",
+          "to"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "to - from > 0 ? DIRECTION_INCREASE : DIRECTION_DECREASE"
+        ]
+      ]
+    },
+    {
+      "name": "directionChangeCountAfter",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "directionChangeCount"
+        ],
+        [
+          "int",
+          "maxDirectionChange"
+        ],
+        [
+          "int",
+          "currentDirection"
+        ],
+        [
+          "int",
+          "direction"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "directionChangeCount < maxDirectionChange && currentDirection != DIRECTION_NONE && currentDirection != direction ? directionChangeCount + 1 : directionChangeCount"
+        ]
+      ]
+    },
+    {
+      "name": "currentDirectionAfter",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "directionChangeCount"
+        ],
+        [
+          "int",
+          "maxDirectionChange"
+        ],
+        [
+          "int",
+          "currentDirection"
+        ],
+        [
+          "int",
+          "direction"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "directionChangeCount < maxDirectionChange ? direction : currentDirection"
+        ]
+      ]
+    },
+    {
+      "name": "allowedDirectionAfter",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "directionChangeCount"
+        ],
+        [
+          "int",
+          "maxDirectionChange"
+        ],
+        [
+          "int",
+          "allowedDirection"
+        ],
+        [
+          "int",
+          "direction"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "directionChangeCount < maxDirectionChange ? allowedDirection : direction == DIRECTION_INCREASE ? 0 : 1"
+        ]
+      ]
+    },
+    {
+      "name": "halfVoltageTargetDeadband",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "targetDeadband"
+        ],
+        [
+          "double",
+          "nominalV"
+        ],
+        [
+          "double",
+          "minTargetDeadbandKv"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "(isnan(targetDeadband) ? minTargetDeadbandKv / nominalV : targetDeadband) / 2"
+        ]
+      ]
+    },
+    {
+      "name": "isOutOfDeadband",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "diffV"
+        ],
+        [
+          "double",
+          "halfTargetDeadband"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(diffV) > halfTargetDeadband"
+        ]
+      ]
+    },
+    {
+      "name": "isInsensitive",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "sensitivity"
+        ],
+        [
+          "double",
+          "minSensitivity"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "fabs(sensitivity) < minSensitivity"
+        ]
+      ]
+    }
+  ]
+}

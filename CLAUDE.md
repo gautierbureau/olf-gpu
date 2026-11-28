@@ -42,9 +42,13 @@ scatter) + closed_branch_current_magnitude (current magnitude, read by the curre
 per-method functions and calculateSensi's private components, no assembler
 routine; outerloop/flow_observation.cuh mirrors calculateSensi line for line).
 
-RULE family (`codegen/java2cuda/rules.py`, a second shape): reactive_limits_decisions — the decisions of
-ReactiveLimitsOuterLoop, from OLF's `ReactiveLimitsDecisions` (typed functions kept statement for statement, into
-`native/cuda/outerloop/generated/`; proven against the reference vectors OLF's own test keeps, compiled for the host).
+RULE families (`codegen/java2cuda/rules.py`, a second shape): the decisions of the outer loops, from OLF's
+`...Decisions` classes (typed functions kept statement for statement, Java overloads as C++ overloads, double and
+extern constants, Java-exact `Math.max/signum/toRadians/toDegrees` and `Double.isNaN`, into
+`native/cuda/outerloop/generated/`; each proven against the reference vectors OLF's own tests keep
+(`ReactiveLimitsDecisionsVectorsTest`, `OuterLoopRuleVectorsTest`), compiled for the host): reactive limits, voltage
+monitoring, phase control, incremental controls, HVDC AC emulation, automation system, transformer ratio, secondary
+voltage control, discrete positions, area interchange. A function with a branch, a loop or arrays is not transpiled.
 NO kernel calls them yet. The class is on the dependency branch `gb/main-gpu-integration-arrays` (OLF #242), which
 `OLF_SRC` points at and `codegen-check.yml` checks out.
 

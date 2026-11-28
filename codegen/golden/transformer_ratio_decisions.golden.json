@@ -1,0 +1,174 @@
+{
+  "java_class": "TransformerRatioDecisions",
+  "constants": [],
+  "methods": [
+    {
+      "name": "isOutOfRange",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "r1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "maxR1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "r1 < minR1 || r1 > maxR1"
+        ]
+      ]
+    },
+    {
+      "name": "extremeR1",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "r1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "maxR1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "r1 > maxR1 ? maxR1 : minR1"
+        ]
+      ]
+    },
+    {
+      "name": "updatedR1",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "computedR1"
+        ],
+        [
+          "double",
+          "individualInitialR1"
+        ],
+        [
+          "double",
+          "individualMinR1"
+        ],
+        [
+          "double",
+          "individualMaxR1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "maxR1"
+        ],
+        [
+          "double",
+          "initialR1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "computedR1 >= initialR1 ? individualInitialR1 + (computedR1 - initialR1) * (individualMaxR1 - individualInitialR1) / (maxR1 - initialR1) : individualInitialR1 - (initialR1 - computedR1) * (individualInitialR1 - individualMinR1) / (initialR1 - minR1)"
+        ]
+      ]
+    },
+    {
+      "name": "shareFromMax",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "r1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "maxR1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "maxR1 != minR1 ? (maxR1 - r1) / (maxR1 - minR1) : 1"
+        ]
+      ]
+    },
+    {
+      "name": "shareFromMin",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "r1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "maxR1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "maxR1 != minR1 ? (r1 - minR1) / (maxR1 - minR1) : 1"
+        ]
+      ]
+    },
+    {
+      "name": "groupInitialR1",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "maxR1"
+        ],
+        [
+          "double",
+          "minR1"
+        ],
+        [
+          "double",
+          "sumShareFromMax"
+        ],
+        [
+          "double",
+          "sumShareFromMin"
+        ],
+        [
+          "int",
+          "count"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "(minR1 * sumShareFromMax + maxR1 * sumShareFromMin) / count"
+        ]
+      ]
+    }
+  ]
+}

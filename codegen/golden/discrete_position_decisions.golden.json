@@ -1,0 +1,67 @@
+{
+  "java_class": "DiscretePositionDecisions",
+  "constants": [
+    [
+      "ALLOWED_INCREASE",
+      0
+    ],
+    [
+      "ALLOWED_DECREASE",
+      1
+    ],
+    [
+      "ALLOWED_BOTH",
+      2
+    ]
+  ],
+  "methods": [
+    {
+      "name": "allowedFrom",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "allowedDirection"
+        ],
+        [
+          "int",
+          "current"
+        ],
+        [
+          "int",
+          "min"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "allowedDirection == ALLOWED_INCREASE ? current : min"
+        ]
+      ]
+    },
+    {
+      "name": "allowedTo",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "allowedDirection"
+        ],
+        [
+          "int",
+          "current"
+        ],
+        [
+          "int",
+          "count"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "allowedDirection == ALLOWED_DECREASE ? current : count - 1"
+        ]
+      ]
+    }
+  ]
+}

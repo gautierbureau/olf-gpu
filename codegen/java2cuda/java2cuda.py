@@ -52,6 +52,15 @@ import spec_closed_branch_current_magnitude  # noqa: E402
 import spec_load_model  # noqa: E402
 import rules  # noqa: E402  (the rule families: an outer loop's decisions)
 import spec_reactive_limits_decisions  # noqa: E402
+import spec_monitoring_voltage_decisions  # noqa: E402
+import spec_phase_control_decisions  # noqa: E402
+import spec_incremental_control_decisions  # noqa: E402
+import spec_hvdc_ac_emulation_decisions  # noqa: E402
+import spec_automation_system_decisions  # noqa: E402
+import spec_transformer_ratio_decisions  # noqa: E402
+import spec_secondary_voltage_control_decisions  # noqa: E402
+import spec_discrete_position_decisions  # noqa: E402
+import spec_area_interchange_control_decisions  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
            spec_shunt.MODULE, spec_hvdc_ac_emulation.MODULE,
@@ -59,7 +68,16 @@ MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
            spec_load_model.MODULE]
 
 # RULE families (rules.py): the decisions of an outer loop, typed functions kept statement for statement.
-RULE_MODULES = [spec_reactive_limits_decisions.MODULE]
+RULE_MODULES = [spec_reactive_limits_decisions.MODULE,
+                spec_monitoring_voltage_decisions.MODULE,
+                spec_phase_control_decisions.MODULE,
+                spec_incremental_control_decisions.MODULE,
+                spec_hvdc_ac_emulation_decisions.MODULE,
+                spec_automation_system_decisions.MODULE,
+                spec_transformer_ratio_decisions.MODULE,
+                spec_secondary_voltage_control_decisions.MODULE,
+                spec_discrete_position_decisions.MODULE,
+                spec_area_interchange_control_decisions.MODULE]
 
 # Math calls a flattened body may legitimately keep (extract_golden strips the
 # Math./FastMath. prefix); anything else left as a call is an unresolved helper.

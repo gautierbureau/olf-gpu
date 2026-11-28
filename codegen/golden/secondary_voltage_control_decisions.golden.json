@@ -1,0 +1,235 @@
+{
+  "java_class": "SecondaryVoltageControlDecisions",
+  "constants": [
+    [
+      "MAX_NO_PROGRESS_COUNT",
+      2
+    ],
+    [
+      "DV_EPS",
+      "double 1E-4"
+    ],
+    [
+      "DK_DIFF_MAX_EPS",
+      "double 1E-3"
+    ],
+    [
+      "K_SATURATION_EPS",
+      "double 5E-2"
+    ],
+    [
+      "MAX_TARGET_VOLTAGE_STEP_KV",
+      "double 2"
+    ],
+    [
+      "MIN_PROGRESS_RATIO",
+      "double 1E-2"
+    ]
+  ],
+  "methods": [
+    {
+      "name": "qToK",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "q"
+        ],
+        [
+          "double",
+          "minQ"
+        ],
+        [
+          "double",
+          "maxQ"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "(2 * q - maxQ - minQ) / (maxQ - minQ)"
+        ]
+      ]
+    },
+    {
+      "name": "hasProgressed",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "pilotDvAbs"
+        ],
+        [
+          "double",
+          "dkDiffMax"
+        ],
+        [
+          "double",
+          "previousPilotDvAbs"
+        ],
+        [
+          "double",
+          "previousDkDiffMax"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "pilotDvAbs < previousPilotDvAbs * (1 - MIN_PROGRESS_RATIO) || dkDiffMax < previousDkDiffMax * (1 - MIN_PROGRESS_RATIO)"
+        ]
+      ]
+    },
+    {
+      "name": "noProgressCountAfter",
+      "returns": "int",
+      "params": [
+        [
+          "boolean",
+          "hasPrevious"
+        ],
+        [
+          "double",
+          "pilotDvAbs"
+        ],
+        [
+          "double",
+          "dkDiffMax"
+        ],
+        [
+          "double",
+          "previousPilotDvAbs"
+        ],
+        [
+          "double",
+          "previousDkDiffMax"
+        ],
+        [
+          "int",
+          "noProgressCount"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "!hasPrevious || hasProgressed(pilotDvAbs, dkDiffMax, previousPilotDvAbs, previousDkDiffMax) ? 0 : noProgressCount + 1"
+        ]
+      ]
+    },
+    {
+      "name": "isStalled",
+      "returns": "boolean",
+      "params": [
+        [
+          "int",
+          "noProgressCount"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "noProgressCount >= MAX_NO_PROGRESS_COUNT"
+        ]
+      ]
+    },
+    {
+      "name": "isStepClipped",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "dv"
+        ],
+        [
+          "double",
+          "nominalV"
+        ]
+      ],
+      "statements": [
+        [
+          "local",
+          "double",
+          "stepKv",
+          "dv * nominalV"
+        ],
+        [
+          "return",
+          "stepKv > MAX_TARGET_VOLTAGE_STEP_KV || stepKv < -MAX_TARGET_VOLTAGE_STEP_KV"
+        ]
+      ]
+    },
+    {
+      "name": "clippedStep",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "dv"
+        ],
+        [
+          "double",
+          "nominalV"
+        ]
+      ],
+      "statements": [
+        [
+          "local",
+          "double",
+          "stepKv",
+          "dv * nominalV"
+        ],
+        [
+          "return",
+          "stepKv > MAX_TARGET_VOLTAGE_STEP_KV ? MAX_TARGET_VOLTAGE_STEP_KV / nominalV : stepKv < -MAX_TARGET_VOLTAGE_STEP_KV ? -MAX_TARGET_VOLTAGE_STEP_KV / nominalV : dv"
+        ]
+      ]
+    },
+    {
+      "name": "isOutOfPlausibleRange",
+      "returns": "boolean",
+      "params": [
+        [
+          "double",
+          "targetV"
+        ],
+        [
+          "double",
+          "minPlausibleTargetVoltage"
+        ],
+        [
+          "double",
+          "maxPlausibleTargetVoltage"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "targetV < minPlausibleTargetVoltage || targetV > maxPlausibleTargetVoltage"
+        ]
+      ]
+    },
+    {
+      "name": "clipToPlausibleRange",
+      "returns": "double",
+      "params": [
+        [
+          "double",
+          "targetV"
+        ],
+        [
+          "double",
+          "minPlausibleTargetVoltage"
+        ],
+        [
+          "double",
+          "maxPlausibleTargetVoltage"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "targetV < minPlausibleTargetVoltage ? minPlausibleTargetVoltage : targetV > maxPlausibleTargetVoltage ? maxPlausibleTargetVoltage : targetV"
+        ]
+      ]
+    }
+  ]
+}

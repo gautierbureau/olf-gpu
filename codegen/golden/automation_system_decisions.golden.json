@@ -1,0 +1,51 @@
+{
+  "java_class": "AutomationSystemDecisions",
+  "constants": [
+    [
+      "DECISION_NONE",
+      0
+    ],
+    [
+      "DECISION_OPEN",
+      1
+    ],
+    [
+      "DECISION_CLOSE",
+      2
+    ]
+  ],
+  "methods": [
+    {
+      "name": "trippingDecision",
+      "returns": "int",
+      "params": [
+        [
+          "double",
+          "i"
+        ],
+        [
+          "double",
+          "threshold"
+        ],
+        [
+          "boolean",
+          "branchOpen"
+        ],
+        [
+          "boolean",
+          "disabled"
+        ],
+        [
+          "boolean",
+          "inService"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "!(i > threshold && branchOpen != disabled) ? DECISION_NONE : branchOpen && inService ? DECISION_OPEN : !branchOpen && !inService ? DECISION_CLOSE : DECISION_NONE"
+        ]
+      ]
+    }
+  ]
+}

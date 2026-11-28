@@ -39,6 +39,8 @@ REGEN = "Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from th
 C_TYPE = {"double": "double", "boolean": "bool", "int": "int"}
 
 _CONSTANT = re.compile(r"public\s+static\s+final\s+int\s+(\w+)\s*=\s*(-?\d+)\s*;")
+# a double constant: its value an expression of numbers and of the spec's extern constants, kept as C
+_DOUBLE_CONSTANT = re.compile(r"public\s+static\s+final\s+double\s+(\w+)\s*=\s*([^;]+);")
 # a static method whose body holds no brace: typed locals and one return (a method with a loop
 # or a branch is not matched, and asking for it by name fails below)
 _METHOD = re.compile(
@@ -49,8 +51,24 @@ _RETURN = re.compile(r"^return\s+(.+)$", re.DOTALL)
 # what an expression may be made of: identifiers, numbers, arithmetic, comparisons, && || !, ?:
 _EXPRESSION = re.compile(r"^[\w\s+\-*/<>=!&|?:().,]+$")
 _WORD = re.compile(r"\b[A-Za-z_]\w*\b")
-JAVA_TO_C = [(re.compile(r"\bMath\.abs\("), "fabs(")]
-C_CALLS = {"fabs"}
+JAVA_TO_C = [(re.compile(r"\bMath\.abs\("), "fabs("),
+             (re.compile(r"\bMath\.max\("), "java_max("),
+             (re.compile(r"\bMath\.signum\("), "java_signum("),
+             (re.compile(r"\bMath\.toRadians\("), "java_to_radians("),
+             (re.compile(r"\bMath\.toDegrees\("), "java_to_degrees("),
+             (re.compile(r"\bDouble\.isNaN\("), "isnan(")]
+# the Java library functions as C, each EXACTLY Java's (JDK 21): emitted in a header only when one of its functions calls it
+JAVA_HELPERS = {
+    # Math.max(double, double): NaN if either is, +0.0 over -0.0
+    "java_max": "inline double java_max(double a, double b) {\n"
+                "    return a != a ? a : (a == 0.0 && b == 0.0 && signbit(a)) ? b : (a >= b ? a : b);\n}",
+    # Math.signum(double): the argument when zero or NaN, else +-1.0 with its sign
+    "java_signum": "inline double java_signum(double d) {\n    return (d == 0.0 || d != d) ? d : copysign(1.0, d);\n}",
+    # Math.toRadians / toDegrees: a multiplication by DEGREES_TO_RADIANS / RADIANS_TO_DEGREES
+    "java_to_radians": "inline double java_to_radians(double angdeg) {\n    return angdeg * 0.017453292519943295;\n}",
+    "java_to_degrees": "inline double java_to_degrees(double angrad) {\n    return angrad * 57.29577951308232;\n}",
+}
+C_CALLS = {"fabs", "isnan"} | set(JAVA_HELPERS)
 LITERALS = {"true", "false"}
 
 
@@ -66,11 +84,14 @@ def _collapse(text):
     return " ".join(text.split())
 
 
-def _expression(java, where):
-    """One Java expression as C: the text itself, with Math.abs as fabs."""
+def _expression(java, where, externs=None):
+    """One Java expression as C: the text itself, with the Java library calls as their exact C, and the spec's extern
+    constants (another class's, e.g. PerUnit.SB) as their values."""
     if not _EXPRESSION.match(java) or ">>>" in java:
         raise AssertionError(f"{where}: outside the rule subset: {_collapse(java)}")
     c = java
+    for name, value in (externs or {}).items():
+        c = re.sub(r"\b" + re.escape(name) + r"\b", value, c)
     for pattern, replacement in JAVA_TO_C:
         c = pattern.sub(replacement, c)
     if "." in re.sub(r"\d\.\d|\d\.|\.\d", "", c):      # a member access left: an object, or another Math call
@@ -86,7 +107,15 @@ def parse(mod):
     with open(os.path.join(_olf_src(), mod["java_source"])) as f:
         text = f.read()
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)          # javadoc and block comments
+    externs = mod.get("extern_constants", {})
     constants = [(name, int(value)) for name, value in _CONSTANT.findall(text)]
+    # double constants whose value is an expression of numbers and externs; the others (a call, another class's value
+    # the spec does not give) are left out, and a function reading one fails the identifier check below
+    for name, value in _DOUBLE_CONSTANT.findall(text):
+        try:
+            constants.append((name, "double " + _collapse(_expression(value, f"{mod['family']}.{name}", externs))))
+        except AssertionError:
+            pass
     # every overload of a name, in source order: the device header is C++, which overloads by arity and type as Java
     found = {}
     for returns, name, params, body in _METHOD.findall(text):
@@ -119,10 +148,10 @@ def parse(mod):
             local = _LOCAL.match(statement)
             ret = _RETURN.match(statement)
             if local and i < len(parts) - 1:
-                expression = _expression(local.group(3), where)
+                expression = _expression(local.group(3), where, externs)
                 statements.append(("local", local.group(1), local.group(2), expression))
             elif ret and i == len(parts) - 1:
-                expression = _expression(ret.group(1), where)
+                expression = _expression(ret.group(1), where, externs)
                 statements.append(("return", expression))
             else:
                 raise AssertionError(f"{where}: statement outside the rule subset: {_collapse(statement)}")
@@ -182,7 +211,13 @@ def render(mod, parsed):
         "",
         f"// {mod['java_class']}'s constants.",
     ]
-    out += [f"constexpr int {name} = {value};" for name, value in parsed["constants"]]
+    out += [f"constexpr double {name} = {value[len('double '):]};" if isinstance(value, str) else f"constexpr int {name} = {value};"
+            for name, value in parsed["constants"]]
+    used = [h for h in JAVA_HELPERS if any(h + "(" in str(st) for m in parsed["methods"] for st in m["statements"])]
+    if used:
+        out += ["", "// Java library functions, each exactly Java's."]
+        for h in used:
+            out += [f"{macro} " + JAVA_HELPERS[h]]
     out += ["",
             "// One device function per OLF Java method — SAME name, SAME signature, SAME statements."]
     for m in parsed["methods"]:
@@ -216,6 +251,9 @@ def _driver(mod, parsed, header):
     """A host program that reads the reference vectors, calls the function each line names with the
     line's arguments and compares the result with the line's: doubles by their bits."""
     cases = []
+    # a function of the vectors that the family does not transpile (a branch, a loop) is not checked
+    listed = sorted({m["name"] for m in parsed["methods"]})
+    skips = ["        else if (" + " && ".join(f"t[0] != \"{n}\"" for n in listed) + ") continue;"]
     for m in parsed["methods"]:
         args = ", ".join(_read_argument(t, f"t[{i + 1}]") for i, (t, _p) in enumerate(m["params"]))
         cases.append(f"        else if (t[0] == \"{m['name']}\" && t.size() == {len(m['params']) + 3}) "
@@ -230,8 +268,8 @@ def _driver(mod, parsed, header):
 #include <string>
 #include <vector>
 using namespace {mod['cuda_namespace']};
-static double bits(const std::string& h) {{ uint64_t u = std::stoull(h, nullptr, 16); double x; std::memcpy(&x, &u, 8); return x; }}
-static std::string hex(double x) {{ uint64_t u; std::memcpy(&u, &x, 8); char b[17]; std::snprintf(b, 17, "%016llx", (unsigned long long) u); return b; }}
+static inline double bits(const std::string& h) {{ uint64_t u = std::stoull(h, nullptr, 16); double x; std::memcpy(&x, &u, 8); return x; }}
+static inline std::string hex(double x) {{ uint64_t u; std::memcpy(&u, &x, 8); char b[17]; std::snprintf(b, 17, "%016llx", (unsigned long long) u); return b; }}
 int main(int argc, char** argv) {{
     if (argc != 2) return 2;
     std::ifstream in(argv[1]);
@@ -245,6 +283,7 @@ int main(int argc, char** argv) {{
         if (t.empty()) continue;
         std::string got;
         if (t.size() < 3 || t[t.size() - 2] != "=") got = "<malformed>";
+{chr(10).join(skips)}
 {chr(10).join(cases)}
         else got = "<unknown function or arity>";
         checked++;
@@ -278,8 +317,10 @@ def check_vectors(mod, parsed):
         binary = os.path.join(tmp, "vectors_check")
         with open(source, "w") as f:
             f.write(_driver(mod, parsed, header))
-        # no contraction: a rule that multiplies then adds must not become a fused multiply-add here
+        # no contraction: a rule that multiplies then adds must not become a fused multiply-add here. The Java text is
+        # kept as it is: && binds tighter than || in C as in Java, so a && b || c needs no parentheses (-Wno-parentheses)
         compiled = subprocess.run([compiler, "-std=c++14", "-O2", "-ffp-contract=off", "-Wall", "-Wextra", "-Werror",
+                                   "-Wno-parentheses",
                                    source, "-o", binary], capture_output=True, text=True)
         if compiled.returncode != 0:
             raise SystemExit(f"FAIL vectors: the committed {mod['cuda_path']} does not compile for the host:\n"

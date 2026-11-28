@@ -1,0 +1,131 @@
+{
+  "java_class": "HvdcAcEmulationDecisions",
+  "constants": [
+    [
+      "STATUS_LINEAR_MODE",
+      0
+    ],
+    [
+      "STATUS_SATURATION_MODE_FROM_CS1_TO_CS2",
+      1
+    ],
+    [
+      "STATUS_SATURATION_MODE_FROM_CS2_TO_CS1",
+      2
+    ],
+    [
+      "STATUS_FROZEN",
+      3
+    ],
+    [
+      "DECISION_NONE",
+      0
+    ],
+    [
+      "DECISION_TO_SATURATION_FROM_CS1_TO_CS2",
+      1
+    ],
+    [
+      "DECISION_TO_SATURATION_FROM_CS2_TO_CS1",
+      2
+    ],
+    [
+      "DECISION_TO_LINEAR_MODE",
+      3
+    ]
+  ],
+  "methods": [
+    {
+      "name": "linearModeDecision",
+      "returns": "int",
+      "params": [
+        [
+          "double",
+          "p1"
+        ],
+        [
+          "double",
+          "p2"
+        ],
+        [
+          "double",
+          "pMaxFromCS1toCS2"
+        ],
+        [
+          "double",
+          "pMaxFromCS2toCS1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "p1 >= 0 ? (p1 > pMaxFromCS1toCS2 ? DECISION_TO_SATURATION_FROM_CS1_TO_CS2 : DECISION_NONE) : p2 > pMaxFromCS2toCS1 ? DECISION_TO_SATURATION_FROM_CS2_TO_CS1 : DECISION_NONE"
+        ]
+      ]
+    },
+    {
+      "name": "saturationModeDecision",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "status"
+        ],
+        [
+          "double",
+          "p1"
+        ],
+        [
+          "double",
+          "p2"
+        ],
+        [
+          "double",
+          "pMaxFromCS1toCS2"
+        ],
+        [
+          "double",
+          "pMaxFromCS2toCS1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "p1 > 0 && p1 < pMaxFromCS1toCS2 || p2 > 0 && p2 < pMaxFromCS2toCS1 ? DECISION_TO_LINEAR_MODE : p1 < 0 && status == STATUS_SATURATION_MODE_FROM_CS1_TO_CS2 ? DECISION_TO_SATURATION_FROM_CS2_TO_CS1 : p2 < 0 && status == STATUS_SATURATION_MODE_FROM_CS2_TO_CS1 ? DECISION_TO_SATURATION_FROM_CS1_TO_CS2 : DECISION_NONE"
+        ]
+      ]
+    },
+    {
+      "name": "decision",
+      "returns": "int",
+      "params": [
+        [
+          "int",
+          "status"
+        ],
+        [
+          "double",
+          "p1"
+        ],
+        [
+          "double",
+          "p2"
+        ],
+        [
+          "double",
+          "pMaxFromCS1toCS2"
+        ],
+        [
+          "double",
+          "pMaxFromCS2toCS1"
+        ]
+      ],
+      "statements": [
+        [
+          "return",
+          "status == STATUS_LINEAR_MODE ? linearModeDecision(p1, p2, pMaxFromCS1toCS2, pMaxFromCS2toCS1) : status == STATUS_SATURATION_MODE_FROM_CS1_TO_CS2 || status == STATUS_SATURATION_MODE_FROM_CS2_TO_CS1 ? saturationModeDecision(status, p1, p2, pMaxFromCS1toCS2, pMaxFromCS2toCS1) : DECISION_NONE"
+        ]
+      ]
+    }
+  ]
+}
